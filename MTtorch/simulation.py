@@ -5,6 +5,7 @@ Write stochastic model of microtubules in neurite
 
 import torch
 import copy
+import numpy as np
 import time
 
 """
@@ -25,17 +26,24 @@ What classes?
                                  (rate can be supplied as lifetime))
 """
 
-class simulation():
+class Simulation():
 
     def __init__(self, states, transitions, properties, actions, name=""):
         """
 
         Args:
-            states (list of state objects): The state for not present does not
+            states (list of State objects): The state for not present does not
                 need to be defined
-            transitions (list of state transition objects):
-            properties (list of property objects):
-            actions (list of action objects):
+            transitions (list of StateTransition objects):
+            properties (list of ObjectProperty objects): Order of object
+                properties in list is important if a Geometry object is supplied
+                for an object property (min, max, start or initial condition),
+                then the object property that is a parameter to Geometry
+                must be in the list before the property that contains the
+                Geometry (e.g. the property "length" has a Geometry object based
+                on the property "position", then the property "position" needs
+                to be in the properties list before the property "length")
+            actions (list of Action objects):
             name (str): Name of simulation, used for data export and readibility
         """
         self.states = states
@@ -52,7 +60,8 @@ class simulation():
         self.action_funcs["add"] = self._add_to_property
         self.action_funcs["remove"] = self._remove_from_property
 
-    def start(self, nb_simulations, min_time, max_number_objects):
+    def start(self, nb_simulations, min_time, max_number_objects,
+              ignore_errors=False):
         """
 
         Args:
@@ -67,9 +76,21 @@ class simulation():
         """
 
         self.max_number_objects = max_number_objects
+        self.ignore_errors = ignore_errors
 
-        # create list with all transitions and ten with all actions
-        all_model_parameters = [*self.transitions, *self.actions]
+        # create list with all initial conditions
+        self.all_initial_conditions = []
+        for state in self.states:
+            initial_condition = state.initial_condition
+            if initial_condition is None:
+                continue
+            if type(initial_condition) is not list:
+                continue
+            self.all_initial_conditions.append(initial_condition)
+
+        # create list with all transitions and then with all actions
+        all_model_parameters = [*self.all_initial_conditions,
+                                *self.transitions, *self.actions]
 
         # create list of length of all model parameters
         model_parameter_lengths = [len(parameters.values)
@@ -86,13 +107,13 @@ class simulation():
         # specific size
         self.dimension_to_parameter_map = {}
         self.parameter_to_dimension_map = {}
-        all_dimensions = [dim for dim in len(model_parameter_lengths)]
+        all_dimensions = [dim for dim in len(model_parameter_lengths) + 2]
         for dimension, model_parameters in enumerate(all_model_parameters):
             array_dimension = dimension + 2
             expand_dimensions = copy.copy(all_dimensions)
             expand_dimensions.remove(array_dimension)
             # expand dimensions of parameter values to simulation array
-            array = model_parameters.values.expand_dims(expand_dimensions)
+            array = np.expand_dims(model_parameters.values, expand_dimensions)
             # save array in object, therefore also change objects saved in
             # self.transitions and self.actions
             model_parameters.value_array = array
@@ -103,13 +124,19 @@ class simulation():
 
         self.times = torch.zeros(self._simulation_array_size)[0, :]
 
-        objects_with_states = self._initialize_object_states()
+        # create index array in which each entry has the value of the index of
+        # the microtubule in the simulation, thereby multi-D operations
+        # on single simulations can be executed
+        # create array of index numbers of same shape as whole simulation array
+        view_array = [-1] + [1] * (len(self._simulation_array_size) - 1)
+        max_number_objects = self.max_number_objects
+        self.index_array = torch.linspace(1, max_number_objects,
+                                          max_number_objects).view(*view_array)
+        self.index_array = self.index_array.expand(self._simulation_array_size)
 
-        self._initialize_object_properties(objects_with_states)
+        self._initialize_object_states()
 
-        for action in self.actions:
-            array = action.values.expand(self._simulation_array_size)
-            action.value_array = array
+        self._initialize_object_properties()
 
         # continue simulation until all simulations have reached at least the
         # minimum time
@@ -120,32 +147,63 @@ class simulation():
         # initial object states, also using defined initial condition of
         # number of objects starting in each state
         self.object_states = torch.zeros(self._simulation_array_size)
+
         # keep track which objects already have a state set
-        # to more easily assign states to the correct positions
-        objects_with_states = 0
+        # to assign states to the correct positions
+        # due to combinations of different number of objects for different
+        # states, keep track of already assigned objects for each state
+        object_state_shape = self.object_states.shape
+        nb_objects_with_states = torch.zeros((1,*object_state_shape[1:]))
+        # first sum all number, to get the total number of object with states
+        # (after all states are assigned)
         for state in self.states:
             if state.initial_condition is None:
                 continue
-            nb_objects_in_state = state.initial_condition
-            start = objects_with_states
-            end = objects_with_states + nb_objects_in_state
-            if end > self.object_states.shape[0]:
-                raise ValueError(f"Initial conditions for states "
-                                 f"implied more objects with a state "
-                                 f"than the defined maximum number of "
-                                 f"objects. After state {state.name} the "
-                                 f"total number of objects would be {end} "
-                                 f"which is more than the maximum allowed "
-                                 f"number {self.max_number_objects}.")
-            self.object_states[start:end] = state.number
-            objects_with_states += nb_objects_in_state
-        return objects_with_states
+            # expand the initial condition array, to add them up
+            expanded_array = torch.HalfTensor(state.value_array)
+            expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
+            nb_objects_with_states += expanded_array
 
-    def _initialize_object_properties(self, objects_with_states):
+        # from all initial conditions, if the
+        if ((torch.max(nb_objects_with_states) > self.object_states.shape[0]) &
+                (self.ignore_errors == False)):
+            raise ValueError(f"Initial conditions for states "
+                             f"implied more objects with a state "
+                             f"than the defined maximum number of "
+                             f"objects. After state {state.name} the "
+                             f"total number of objects would be "
+                             f"{torch.max(nb_objects_with_states)} "
+                             f"which is more than the maximum allowed "
+                             f"number {self.max_number_objects}.")
+
+        # then subtract assigned number of objects at each state
+        # so that the number of objects that are assigned gets lower
+        # with each state, thereby preventing overriding already signed states
+        # (through keeping threshold for the index array lower)
+        for state in self.states:
+            if state.initial_condition is None:
+                continue
+            # expand the initial condition array, to add them up and get number
+            # of assigned objects for each simulation
+            expanded_array = torch.HalfTensor(state.value_array)
+            expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
+
+            object_state_mask = torch.where(self.index_array <=
+                                            nb_objects_with_states, True, False)
+
+            self.object_states[object_state_mask] = state.number
+            # subtract the number of objects for the current state
+            # thereby defining which number of objects will not be overwritten
+            # by next state and thereby stay in assigned state
+            nb_objects_with_states -= expanded_array
+        return None
+
+    def _initialize_object_properties(self):
         # create tensor for each object property
         # so that each object can have a value for each property
         # also respect initial condition, if defined
         object_state_mask = self.object_states > 0
+        nb_objects_with_states = torch.count_nonzero(object_state_mask)
         for object_property in self.properties:
             object_property.array = torch.zeros(self._simulation_array_size)
             object_property.array = float("nan")
@@ -154,12 +212,14 @@ class simulation():
                     (type(initial_cond) == type(self.__init__))):
                 # if initial condition is defined and a function,
                 # get values from function
-                property_values = initial_cond(objects_with_states)
+                property_values = initial_cond(nb_objects_with_states)
             elif ((initial_cond is not None) &
-                  (type(initial_cond) == str)):
+                  (type(initial_cond) == list)):
                 # if initial condition is a string == "random
                 # then random numbers from min to max val should be generated
-                if initial_cond == "random":
+                if len(initial_cond) == 2:
+                    min_value = initial_cond[0]
+                    max_value = initial_cond[1]
                     random_property_vals = True
                 else:
                     raise ValueError("For initial condition for object "
@@ -172,20 +232,22 @@ class simulation():
                 # that should be used for all objects initially
                 property_values = initial_cond
 
-            elif (object_property.start_value is not None):
-                # if no initial cond is defined, but a start value
-                # use the start value instead
-                property_values = object_property.start_value
-
-            else:
-                # if no initial values are defined, create random values between
-                # min_value and max_value
+            elif (type(object_property.start_value) == list):
+                # if no initial cond is defined, use the start value instead.
+                # if start_value is a list, property values will be
+                # random number between first and second element
+                min_value = object_property.start_value[0]
+                max_value = object_property.start_value[1]
                 random_property_vals = True
+            else:
+                # otherwise, start value is a single number
+                property_values = object_property.start_value
 
             if random_property_vals:
                 get_property_vals = self._get_random_poperty_values
                 property_values = get_property_vals(object_property,
-                                                    objects_with_states)
+                                                    min_value, max_value,
+                                                    nb_objects_with_states)
 
             object_property[object_state_mask] = property_values
 
@@ -263,10 +325,6 @@ class simulation():
         return None
 
     def _determine_positions_of_transitions(self):
-        # create array of index numbers of same shape than MTs
-        index_array = torch.linspace(1, self.max_number_objects+1,
-                                     self.max_number_objects+1).view(-1, 1, 1, 1, 1)
-        index_array = index_array.expand(*self.object_states.shape)
 
         # the transitions masks only tell which reaction happens in each
         # stimulation, but not which object in this simulation is affected
@@ -276,7 +334,7 @@ class simulation():
         # setting all positions where no catastrophe can take place to 0
         for transition_nb, transition in enumerate(self.transitions):
             transition_mask = transition.simulation_mask[transition_nb]
-            possible_transition_positions = torch.clone(index_array)
+            possible_transition_positions = torch.clone(self.index_array)
             # exclude simulations where the transition did not happen
             possible_transition_positions[~transition_mask] = 0
             # exclude positions in simulations that were not in the start state
@@ -357,19 +415,20 @@ class simulation():
                 continue
             nb_creations = len(torch.nonzero(transition_positions))
             for object_property in self.properties:
-                if object_property.start_value is None:
+                if type(object_property.start_value) == list:
                     get_property_vals = self._get_random_poperty_values
-                    property_values = get_property_vals(object_property,
+                    min_value = object_property.start_value[0]
+                    max_value = object_property.start_value[1]
+                    property_values = get_property_vals(min_value, max_value,
                                                         nb_creations)
                 else:
                     property_values = object_property.start_value
                 object_property.array[transition_positions] = property_values
         return None
 
-    def _get_random_poperty_values(self, object_property, nb_objects):
+    def _get_random_poperty_values(self, min_value,
+                                   max_value, nb_objects):
         # scale random number from min_value to max_value
-        min_value = object_property.min_value
-        max_value = object_property.max_value
         property_values = (torch.rand((nb_objects)) *
                            (max_value - min_value) + min_value)
         return property_values
@@ -380,6 +439,3 @@ class simulation():
     def _remove_from_property(self, object_property, reaction_times,
                               action_values):
         return object_property - (reaction_times * action_values)
-
-
-
