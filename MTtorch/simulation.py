@@ -28,7 +28,8 @@ What classes?
 
 class Simulation():
 
-    def __init__(self, states, transitions, properties, actions, name=""):
+    def __init__(self, states, transitions, properties, actions,
+                 object_removal=None, name="",):
         """
 
         Args:
@@ -44,12 +45,16 @@ class Simulation():
                 on the property "position", then the property "position" needs
                 to be in the properties list before the property "length")
             actions (list of Action objects):
-            name (str): Name of simulation, used for data export and readibility
+            name (str): Name of simulation, used for data export and readability
+            object_removal (list of ObjectRemovalCondition objects): Define
+                when an object should be removed from the simulation, based on
+                its object properties
         """
         self.states = states
         self.transitions = transitions
         self.properties = properties
         self.actions = actions
+        self.object_removal = object_removal
         self.name = name
 
         # since state 0 is reserved for no state (no object), start
@@ -196,6 +201,8 @@ class Simulation():
             # thereby defining which number of objects will not be overwritten
             # by next state and thereby stay in assigned state
             nb_objects_with_states -= expanded_array
+
+
         return None
 
     def _initialize_object_properties(self):
@@ -266,6 +273,13 @@ class Simulation():
         self._execute_actions_on_objects(reaction_times)
 
         self._update_object_states()
+
+        # remove objects based on properties
+        objects_to_remove = self.object_removal.get_objects_to_remove()
+        for object_property in self.object_properties:
+            object_property[objects_to_remove] = float("nan")
+
+        self.object_states[objects_to_remove] = 0
 
         self.times += reaction_times[0]
 
@@ -389,7 +403,18 @@ class Simulation():
             transformed_property_array = operation_func(property_array,
                                                         action_reaction_times,
                                                         value_array)
-            action.object_property.array[action_positions] = transformed_property_array
+            object_property_array = action.object_property.array
+            object_property_array[action_positions] = transformed_property_array
+
+            # prevent object properties going above min or max value
+            min_property_value = action.object_property.min_value
+            if min_property_value is not None:
+                objects_below_min = object_property_array < min_property_value
+                object_property_array[objects_below_min] = min_property_value
+            max_property_value = action.object_property.max_value
+            if max_property_value is not None:
+                objects_above_max = object_property_array > max_property_value
+                object_property_array[objects_above_max] = max_property_value
         return None
 
     def _update_object_states(self):

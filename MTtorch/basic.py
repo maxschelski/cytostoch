@@ -204,15 +204,38 @@ class ObjectRemovalCondition():
         """
 
         Args:
-            object_properties:
-            operation:
-            threshold:
+            object_properties (list of ObjectProperties):
+            operation (function or string): If function, has to take parameters:
+                object_properties and threshold. It should output a mask of
+                objects that should be removed
+            threshold (float): Value of last not removed object for operation
         """
         self.object_properties = object_properties
-        self.operation = operation
+        implemented_operations = {}
+        new_operation = self.operation_sum_smaller_than
+        implemented_operations["sum_smaller_than"] = new_operation
+        if type(operation) == str:
+            if operation not in implemented_operations:
+                raise ValueError(f"For ObjectRemovalCondition only the following"
+                                 f" operations are implemented and can be "
+                                 f"refered to by name in the 'operation' "
+                                 f"paramter: "
+                                 f"{', '.join(implemented_operations.keys())}."
+                                 f" Instead the following name was supplied: "
+                                 f"{operation}.")
+            self.operation = implemented_operations[operation]
+        else:
+            self.operation = operation
         self.threshold = threshold
 
-    def operation_sum_smaller_than(self):
+    def operation_sum_smaller_than(self, object_properties, threshold):
+        sum_of_properties = torch.zeros_like(object_properties[0].value_array)
+        for object_property in object_properties:
+            sum_of_properties += object_property.array
+        return sum_of_properties < threshold
+
+    def get_objects_to_remove(self):
+        return self.operation(self.object_properties, self.threshold)
 
 
 class StateTransition():
