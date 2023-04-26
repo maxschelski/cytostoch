@@ -68,8 +68,7 @@ class SSA():
         self.action_funcs["remove"] = self._remove_from_property
 
     def start(self, nb_simulations, min_time, max_number_objects,
-              ignore_errors=False, print_update_time_step=1,
-              time_precision="32"):
+              ignore_errors=False, print_update_time_step=1):
         """
 
         Args:
@@ -78,23 +77,9 @@ class SSA():
             min_time (float): minimum time
             max_number_objects (int): maximum number of objects allowed to be
                 simulated. Determines array size
-            time_precision (str): Precision of time in bit. Some torch functions
-                are not implemented for the float 16 dtype (e.g. sin).
-                This is relevant when giving user-defined functions to
-                cytotorch.
         Returns:
 
         """
-
-        if time_precision == "32":
-            self.time_dtype = torch.float
-        elif time_precision == "16":
-            self.time_dtype = torch.half
-        else:
-            raise ValueError("For time_precision only '16' or '32' are allowed "
-                             "values. They represent the precision of the time "
-                             "in bit.")
-
 
         self.max_number_objects = max_number_objects
         self.ignore_errors = ignore_errors
@@ -137,8 +122,7 @@ class SSA():
             self.dimension_to_parameter_map[dimension] = model_parameters
             self.parameter_to_dimension_map[model_parameters.name] = dimension
 
-        self.times = torch.zeros((1,*self._simulation_array_size[1:]),
-                                 dtype=self.time_dtype)
+        self.times = torch.zeros((1,*self._simulation_array_size[1:]))
 
         # create index array in which each entry has the value of the index of
         # the microtubule in the simulation, thereby multi-D operations
