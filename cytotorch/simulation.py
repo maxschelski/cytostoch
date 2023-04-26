@@ -7,6 +7,8 @@ import torch
 import copy
 import numpy as np
 import time
+import sys
+import gc
 
 """
 This is for single type modeling! (e.g. just MTs or actin) 
@@ -66,7 +68,8 @@ class SSA():
         self.action_funcs["remove"] = self._remove_from_property
 
     def start(self, nb_simulations, min_time, max_number_objects,
-              ignore_errors=False, print_update_time_step=1):
+              ignore_errors=False, print_update_time_step=1,
+              time_precision="32"):
         """
 
         Args:
@@ -75,10 +78,23 @@ class SSA():
             min_time (float): minimum time
             max_number_objects (int): maximum number of objects allowed to be
                 simulated. Determines array size
-
+            time_precision (str): Precision of time in bit. Some torch functions
+                are not implemented for the float 16 dtype (e.g. sin).
+                This is relevant when giving user-defined functions to
+                cytotorch.
         Returns:
 
         """
+
+        if time_precision == "32":
+            self.time_dtype = torch.float
+        elif time_precision == "16":
+            self.time_dtype = torch.half
+        else:
+            raise ValueError("For time_precision only '16' or '32' are allowed "
+                             "values. They represent the precision of the time "
+                             "in bit.")
+
 
         self.max_number_objects = max_number_objects
         self.ignore_errors = ignore_errors
@@ -96,7 +112,7 @@ class SSA():
         self._simulation_array_size = (self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths)
 
-        self._zero_tensor = torch.FloatTensor([0])
+        self._zero_tensor = torch.HalfTensor([0])
 
         # go through all model parameters and expand array to simulation
         # specific size
@@ -121,7 +137,8 @@ class SSA():
             self.dimension_to_parameter_map[dimension] = model_parameters
             self.parameter_to_dimension_map[model_parameters.name] = dimension
 
-        self.times = torch.zeros(self._simulation_array_size)[0, :]
+        self.times = torch.zeros((1,*self._simulation_array_size[1:]),
+                                 dtype=self.time_dtype)
 
         # create index array in which each entry has the value of the index of
         # the microtubule in the simulation, thereby multi-D operations
@@ -130,8 +147,10 @@ class SSA():
         view_array = [-1] + [1] * (len(self._simulation_array_size) - 1)
         max_number_objects = self.max_number_objects
         self.index_array = torch.linspace(1, max_number_objects,
-                                          max_number_objects).view(*view_array)
-        self.index_array = self.index_array.expand(self._simulation_array_size)
+                                          max_number_objects,
+                                          dtype=torch.int16).view(*view_array)
+
+        # self.index_array = self.index_array.expand(self._simulation_array_size)
 
         self._initialize_object_states()
 
@@ -151,24 +170,44 @@ class SSA():
                 times_tracked.add(whole_time)
             self._run_iteration()
 
+    def get_tensor_memory(self):
+        total_memory = 0
+        for gc_object in gc.get_objects():
+            try:
+                if (hasattr(gc_object, "element_size") &
+                        hasattr(gc_object, "nelement")):
+                    try:
+                        size = (gc_object.element_size() *
+                                gc_object.nelement()/1024/1024)
+                        total_memory += size
+                        if size > 50:
+                            print(gc_object.shape, gc_object.dtype, size)
+                    except:
+                        continue
+            except:
+                continue
+        print(total_memory)
+
     def _initialize_object_states(self):
         # initial object states, also using defined initial condition of
         # number of objects starting in each state
-        self.object_states = torch.zeros(self._simulation_array_size)
+        self.object_states = torch.zeros(self._simulation_array_size,
+                                         dtype=torch.int8)
 
         # keep track which objects already have a state set
         # to assign states to the correct positions
         # due to combinations of different number of objects for different
         # states, keep track of already assigned objects for each state
         object_state_shape = self.object_states.shape
-        nb_objects_with_states = torch.zeros((1,*object_state_shape[1:]))
+        nb_objects_with_states = torch.zeros((1,*object_state_shape[1:]),
+                                             dtype=torch.int16)
         # first sum all number, to get the total number of object with states
         # (after all states are assigned)
         for state in self.states:
             if state.initial_condition is None:
                 continue
             # expand the initial condition array, to add them up
-            expanded_array = torch.HalfTensor(state.initial_condition)
+            expanded_array = torch.ShortTensor(state.initial_condition)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
             nb_objects_with_states += expanded_array
 
@@ -184,6 +223,9 @@ class SSA():
                              f"which is more than the maximum allowed "
                              f"number {self.max_number_objects}.")
 
+
+        # self.get_tensor_memory()
+
         # then subtract assigned number of objects at each state
         # so that the number of objects that are assigned gets lower
         # with each state, thereby preventing overriding already signed states
@@ -193,10 +235,11 @@ class SSA():
                 continue
             # expand the initial condition array, to add them up and get number
             # of assigned objects for each simulation
-            expanded_array = torch.HalfTensor(state.initial_condition)
+            expanded_array = torch.ShortTensor(state.initial_condition)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
-            object_state_mask = torch.where(self.index_array <=
+            object_state_mask = torch.where(self.index_array.expand(
+                self._simulation_array_size) <=
                                             nb_objects_with_states, True, False)
 
             self.object_states[object_state_mask] = state.number
@@ -214,7 +257,8 @@ class SSA():
         object_state_mask = self.object_states > 0
         nb_objects_with_states = torch.count_nonzero(object_state_mask)
         for object_property in self.properties:
-            object_property.array = torch.zeros(self._simulation_array_size)
+            object_property.array = torch.zeros(self._simulation_array_size,
+                                                dtype=torch.bfloat16)
             object_property.array[:] = float("nan")
             initial_cond = object_property.initial_condition
             if ((initial_cond is not None) &
@@ -259,12 +303,10 @@ class SSA():
 
             object_property.array[object_state_mask] = property_values
 
-
     def _run_iteration(self):
         # create tensor for x (position in neurite), l (length of microtubule)
         # and time
         total_rates = self._get_total_and_single_rates_for_state_transitions()
-
         reaction_times = self._get_times_of_next_transition(total_rates)
 
         self._determine_next_transition(total_rates)
@@ -282,11 +324,13 @@ class SSA():
 
         self.object_states[objects_to_remove] = 0
 
-        self.times += reaction_times[0]
+        self.times += reaction_times
+
+        # self.get_tensor_memory()
 
     def _get_total_and_single_rates_for_state_transitions(self):
         # get number of objects in each state
-        nb_objects_all_states = torch.HalfTensor()
+        nb_objects_all_states = torch.ShortTensor()
         # add 1 to number of states since 0 is not explicitly defined
         for state in range(len(self.states) + 1):
             nb_objects = torch.sum(self.object_states == state, dim=0)
@@ -324,12 +368,11 @@ class SSA():
         exponential_func = torch.distributions.exponential.Exponential
         reaction_times = exponential_func(total_rates,
                                           validate_args=False).sample()
-        reaction_times = reaction_times.expand(*self.object_states.shape)
         return reaction_times
 
     def _determine_next_transition(self, total_rates):
         # get which event happened in each simulation
-        random_numbers = torch.rand(total_rates.shape)
+        random_numbers = torch.rand(total_rates.shape, dtype=torch.half)
 
         # set random number in zero rate positions to >1 to make threshold
         # higher than total rate, thereby preventing any reaction from
@@ -338,13 +381,14 @@ class SSA():
         thresholds = total_rates * random_numbers
 
         # go through each transition and check whether it will occur
-        current_rate_sum = torch.zeros_like(self.transitions[0].current_rates)
+        current_rate_sum = torch.zeros_like(self.transitions[0].current_rates,
+                                            dtype=torch.half)
         for transition in self.transitions:
             current_rate_sum += transition.current_rates
             transition_mask = ((current_rate_sum - thresholds) >
                                self._zero_tensor)
-            transition_mask = transition_mask.expand(*self.object_states.shape)
             transition.simulation_mask = transition_mask
+
         return None
 
     def _determine_positions_of_transitions(self):
@@ -357,9 +401,12 @@ class SSA():
         # setting all positions where no catastrophe can take place to 0
         for transition in self.transitions:
             transition_mask = transition.simulation_mask
-            possible_transition_positions = torch.clone(self.index_array)
+            array_size = self._simulation_array_size
+            possible_transition_positions = self.index_array.expand(array_size)
+            possible_transition_positions =possible_transition_positions.clone()
             # exclude simulations where the transition did not happen
-            possible_transition_positions[~transition_mask] = 0
+            possible_transition_positions[~transition_mask.expand(
+                *self.object_states.shape)] = 0
             # exclude positions in simulations that were not in the start state
             if transition.start_state is None:
                 start_state = 0
@@ -384,7 +431,8 @@ class SSA():
             if action.states is None:
                 action_positions = self.object_states > 0
             else:
-                action_positions = torch.zeros(self.object_states.shape)
+                action_positions = torch.zeros(self.object_states.shape,
+                                               dtype=torch.bool)
                 for state in action.states:
                     action_positions = (action_positions |
                                         (self.object_states ==
@@ -393,7 +441,9 @@ class SSA():
             #     continue
             object_property_array = action.object_property.array
             property_array = object_property_array[action_positions]
-            action_reaction_times = reaction_times[action_positions]
+            sim_array_shape = self.object_states.shape
+            action_reaction_times = reaction_times.expand(*sim_array_shape)
+            action_reaction_times = action_reaction_times[action_positions]
             value_array = action.value_array
             value_array = value_array.expand(*self.object_states.shape)
             value_array = value_array[action_positions]
@@ -401,6 +451,7 @@ class SSA():
             transformed_property_array = action.operation(property_array,
                                                           action_reaction_times,
                                                           value_array)
+            transformed_property_array = transformed_property_array.bfloat16()
             object_property_array[action_positions] = transformed_property_array
 
             # MAKE MAX AND MIN THREHOLDS WORK FOR ARRAY AND INT VALUES!
@@ -420,6 +471,7 @@ class SSA():
                 if type(max_property_value) == type(self.object_states):
                     max_property_value = max_property_value[objects_above_max]
                 object_property_array[objects_above_max] = max_property_value
+
         return None
 
     def _update_object_states(self):
@@ -459,7 +511,7 @@ class SSA():
     def _get_random_poperty_values(self, min_value,
                                    max_value, nb_objects):
         # scale random number from min_value to max_value
-        property_values = (torch.rand((nb_objects)) *
+        property_values = (torch.rand((nb_objects), dtype=torch.bfloat16) *
                            (max_value - min_value) + min_value)
         return property_values
 

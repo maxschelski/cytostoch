@@ -266,7 +266,8 @@ class ObjectRemovalCondition():
         self.threshold = threshold
 
     def operation_sum_smaller_than(self, object_properties, threshold):
-        sum_of_properties = torch.zeros_like(object_properties[0].array)
+        sum_of_properties = torch.zeros_like(object_properties[0].array,
+                                             dtype=torch.half)
         for object_property in object_properties:
             sum_of_properties += object_property.array
         return sum_of_properties < threshold
