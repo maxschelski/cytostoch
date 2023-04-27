@@ -1,5 +1,6 @@
 import torch
-import functools
+import numpy as np
+import time
 
 class PropertyGeometry():
 
@@ -57,6 +58,156 @@ class PropertyGeometry():
 
     def get_limit(self):
         return self.operation(self.properties)
+
+class Dimension():
+
+    def __init__(self, position, length=None, direction=None):
+        """
+
+        Args:
+            position (ObjectProperty):
+            length (ObjectProperty):
+            direction (ObjectProperty):
+        """
+        self.position = position
+        self.length = length
+        self.direction = direction
+
+class DataExtraction():
+    """
+    Compress data for keeping and saving.
+    Define which properties should be kept and how they should be rearranged.
+    So far, this is only implemented for a 1D system modeled in 2D
+    (object start position and object length).
+    """
+
+    def __init__(self, dimensions, operation, resolution=0.5):
+        """
+        Define how many dimensions in the system
+
+        Args:
+            dimensions (list of Dimension objects):
+            operation (func or string): operation used to transform data for
+                extraction. Name of already implemented function as string.
+                Alternatively, user-defined function (encouraged to submit
+                pull request to add to package) using parameters dimensions and
+                resolution.
+            extract_state (bool): Whether to extract object state information
+        """
+        self.dimensions = dimensions
+        self.resolution = resolution
+
+        implemented_operations = {}
+        new_operation = self._operation_2D_to_1D_density
+        implemented_operations["2D_to_1D_density"] = new_operation
+        implemented_operations["raw"] = self._operation_raw
+
+        if type(operation) == str:
+            if operation not in implemented_operations:
+                raise ValueError(f"For DataExtraction only the following"
+                                 f" operations are implemented and can be "
+                                 f"refered to by name in the 'operation' "
+                                 f"paramter: "
+                                 f"{', '.join(implemented_operations.keys())}."
+                                 f" Instead the following name was supplied: "
+                                 f"{operation}.")
+            self.operation = implemented_operations[operation]
+        else:
+            self.operation = operation
+
+    def extract(self):
+        return self.operation(self.dimensions, self.resolution)
+
+    def _operation_raw(self, dimensions, resolution):
+        data_dict = {}
+        data_dict["position"] = dimensions.position.array
+        data_dict["length"] = dimensions.length.array
+        return data_dict
+
+    def _operation_2D_to_1D_density(self, dimensions, resolution):
+        """
+        Create 1D density array from start and length information without
+        direction.
+        Args:
+            dimensions (list of Dimension objects):
+            resolution (float): resolution in dimension for data export
+
+        Returns:
+
+        """
+        if len(dimensions) > 1:
+            return ValueError(f"The operation '2D_to_1D_density' is only "
+                              f"implemented for 1 dimension. DataExtraction "
+                              f"received {len(dimensions)} dimensions instead.")
+
+        # create boolean data array later by expanding each microtubule in space
+        # size of array will be:
+        # (max_position of neurite / resolution) x nb of microtubules
+        max_position = dimensions[0].position.max_value
+        # add one to the dimension since it starts at 0
+        position_dimension = int(max_position // resolution + 1)
+
+        # data type depends on dimension 0 - since that is the number of
+        # different int values needed (int8 for <=256; int16 for >=256)
+        # (dimension 0 is determined by max_x of neurite / resolution)
+        if position_dimension < 256:
+            indices_tensor = torch.ByteTensor
+            indices_dtype = torch.uint8
+        else:
+            indices_tensor = torch.ShortTensor
+            indices_dtype = torch.short
+
+        # extract positions of the array that actually contains objects
+        # crop data so that positions that don't contain objects
+        # are excluded
+        objects_array = ~torch.isnan(dimensions[0].position.array)
+        positions_object = torch.nonzero(objects_array)
+        min_pos_with_object = positions_object[:,0].min()
+
+        position_start = dimensions[0].position.array
+        max_nb_objects = position_start.shape[0]
+        position_start = position_start[min_pos_with_object:max_nb_objects]
+
+        # transform object properties into multiples of resolution
+        # then transform length into end position
+        position_start = torch.div(position_start, resolution,
+                                   rounding_mode="floor").to(torch.short)
+        position_start = torch.unsqueeze(position_start, 0)
+
+        position_end = dimensions[0].length.array
+        position_end = position_end[min_pos_with_object:max_nb_objects]
+        position_end = (torch.div(position_end, resolution,
+                                 rounding_mode="floor") +
+                        position_start).to(indices_dtype)
+
+        # remove negative numbers to allow uint8 dtype
+        position_start[position_start < 0] = 0
+        position_start = position_start.to(indices_dtype)
+
+        # create indices array which each number
+        # corresponding to one position in space (in dimension 0)
+        indices = np.linspace(0,position_dimension, position_dimension+1)
+        indices = np.expand_dims(indices,
+                                 tuple(range(1,len(position_start.shape))))
+        indices = indices_tensor(indices)
+
+        # create boolean data array later by expanding each microtubule in space
+        # use index array to set all positions in boolean data array to True
+        # that are between start point and end point
+        data_array = torch.where((indices.expand(-1, *position_start.shape[1:])
+                                 >= position_start) &
+                                 (indices.expand(-1, *position_start.shape[1:])
+                                 <= position_end), True, False)
+
+        # then sum across microtubules to get number of MTs at each position
+        data_array = torch.sum(data_array, dim=1)
+
+        data_dict = {}
+        data_dict["1D_density"] = data_array
+
+        return data_dict
+
+
 
 
 class ObjectProperty():
@@ -225,7 +376,7 @@ class State():
         self.name = name
 
         if type(self.initial_condition) is not list:
-            self.initial_condition = [self.initial_condition]
+            self.initial_condition = torch.ShortTensor([self.initial_condition])
 
         # set variable to treat initial condtions as other simulation parameters
         self.values = self.initial_condition
