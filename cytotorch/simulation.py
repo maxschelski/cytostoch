@@ -9,6 +9,7 @@ import numpy as np
 import time
 import sys
 import gc
+import os
 
 """
 This is for single type modeling! (e.g. just MTs or actin) 
@@ -67,36 +68,38 @@ class SSA():
         self.action_funcs["add"] = self._add_to_property
         self.action_funcs["remove"] = self._remove_from_property
 
-    def start(self, nb_simulations, min_time, data_extraction,
+    def start(self, nb_simulations, min_time, data_extraction,data_folder,
               max_number_objects=None, save_states=False,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=5,
-               dynamically_increase_nb_objects=True):
+               dynamically_increase_nb_objects=True,
+              use_assertion_checks=True):
         """
 
         Args:
             nb_simulations (int): Number of simulations to run per parameter
                 combination
             min_time (float): minimum time
+            data_extraction (DataExtraction object):
+            data_folder (string): Folder in which data should be saved
             max_number_objects (int): maximum number of objects allowed to be
                 simulated. Determines array size
-            data_extraction (DataExtraction object):
         Returns:
 
         """
         # turn off autograd function to reduce memory overhead of pytorch
         # and reduce backend processes
         with torch.no_grad():
-            self._start(nb_simulations, min_time, data_extraction,
+            self._start(nb_simulations, min_time, data_extraction,data_folder,
                         max_number_objects, ignore_errors,
                         print_update_time_step,
                         nb_objects_added_per_step,
-                        dynamically_increase_nb_objects)
+                        dynamically_increase_nb_objects,use_assertion_checks)
 
-    def _start(self, nb_simulations, min_time, data_extraction,
-               max_number_objects, ignore_errors=False,
+    def _start(self, nb_simulations, min_time, data_extraction,data_folder,
+               max_number_objects=None, ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=5,
-               dynamically_increase_nb_objects=True):
+               dynamically_increase_nb_objects=True,use_assertion_checks=True):
         """
 
         Args:
@@ -107,11 +110,12 @@ class SSA():
                 simulated. Determines array size
         Returns:
         """
-
         self.data_extraction = data_extraction
+        self.data_folder = data_folder
         self.ignore_errors = ignore_errors
         self.nb_objects_added_per_step = nb_objects_added_per_step
         self.dynamically_increase_nb_objects = dynamically_increase_nb_objects
+        self.use_assertion_checks = use_assertion_checks
 
         # create list with all transitions and then with all actions
         all_simulation_parameters = [*self.states,
@@ -141,27 +145,8 @@ class SSA():
         print(self._simulation_array_size)
         self._zero_tensor = torch.HalfTensor([0])
 
-        # go through all model parameters and expand array to simulation
-        # specific size
-        self.dimension_to_parameter_map = {}
-        self.parameter_to_dimension_map = {}
-        all_dimensions = [dim for dim
-                          in range(len(simulation_parameter_lengths) + 2)]
-        for dimension, model_parameters in enumerate(all_simulation_parameters):
-            array_dimension = dimension + 2
-            expand_dimensions = copy.copy(all_dimensions)
-            expand_dimensions.remove(array_dimension)
-            # expand dimensions of parameter values to simulation array
-            array = np.expand_dims(model_parameters.values, expand_dimensions)
-            # save array in object, therefore also change objects saved in
-            # self.transitions and self.actions
-            array = torch.HalfTensor(array)
-            array = array.expand(1,*self._simulation_array_size[1:])
-            model_parameters.value_array = array
-            # assign model parameter to the correct dimension
-            # in the simulation arrays
-            self.dimension_to_parameter_map[dimension] = model_parameters
-            self.parameter_to_dimension_map[model_parameters.name] = dimension
+        self._initialize_parameter_arrays(all_simulation_parameters,
+                                          simulation_parameter_lengths)
 
         self.times = torch.zeros((1,*self._simulation_array_size[1:]))
 
@@ -187,7 +172,7 @@ class SSA():
         # continue simulation until all simulations have reached at least the
         # minimum time
         times_tracked = set()
-        iteration = 0
+        iteration_nb = 0
         while True:
             current_min_time = torch.min(self.times)
             if current_min_time >= min_time:
@@ -195,12 +180,12 @@ class SSA():
             # print regular current min time in all simulations
             whole_time = current_min_time.item() // print_update_time_step
             if whole_time not in times_tracked:
-                print(iteration, "; Current time: ", whole_time)
+                print(iteration_nb, "; Current time: ", whole_time)
                 times_tracked.add(whole_time)
-            self._run_iteration()
-            iteration += 1
+            self._run_iteration(iteration_nb)
+            iteration_nb += 1
 
-    def _run_iteration(self):
+    def _run_iteration(self, iteration_nb):
         # create tensor for x (position in neurite), l (length of microtubule)
         # and time
         start = time.time()
@@ -232,7 +217,14 @@ class SSA():
         data = self.data_extraction.extract()
         print("after extraction:", time.time() - start)
 
-        # for file_name, data_array in data.items():
+        for file_name, data_array in data.items():
+            file_path = os.path.join(self.folder,
+                                     file_name+str(iteration_nb)+".pt")
+            torch.save(data_array, file_path)
+
+        file_path = os.path.join(self.folder,
+                                 "times_" + str(iteration_nb) + ".pt")
+        torch.save(self.times, file_path)
 
         # self.get_tensor_memory()
         # check whether there is a simulation in which all object positions
@@ -306,6 +298,31 @@ class SSA():
             max_number_objects_with_state += torch.max(state.initial_condition)
 
         return max_number_objects_with_state.item()
+
+    def _initialize_parameter_arrays(self, all_simulation_parameters,
+                                     simulation_parameter_lengths):
+        # go through all model parameters and expand array to simulation
+        # specific size
+        self.dimension_to_parameter_map = {}
+        self.parameter_to_dimension_map = {}
+        all_dimensions = [dim for dim
+                          in range(len(simulation_parameter_lengths) + 2)]
+        for dimension, model_parameters in enumerate(all_simulation_parameters):
+            array_dimension = dimension + 2
+            expand_dimensions = copy.copy(all_dimensions)
+            expand_dimensions.remove(array_dimension)
+            # expand dimensions of parameter values to simulation array
+            array = np.expand_dims(model_parameters.values, expand_dimensions)
+            # save array in object, therefore also change objects saved in
+            # self.transitions and self.actions
+            array = torch.HalfTensor(array)
+            array = array.expand(1,*self._simulation_array_size[1:])
+            model_parameters.value_array = array
+            # assign model parameter to the correct dimension
+            # in the simulation arrays
+            self.dimension_to_parameter_map[dimension] = model_parameters
+            self.parameter_to_dimension_map[model_parameters.name] = dimension
+        return None
 
     def _initialize_object_states(self):
         # initial object states, also using defined initial condition of
@@ -490,13 +507,14 @@ class SSA():
             all_transitions_mask = all_transitions_mask | transition_mask
             transition.simulation_mask = transition_mask
 
-        # test whether the expected number of transitions (one per simulation)
-        # is observed
-        nb_no_transitions = len(torch.nonzero(total_rates == 0))
-        expected_total_nb_transitions = np.prod(rate_array_shape[1:])
-        nb_transitions = len(torch.nonzero(all_transitions_mask))
-        assert expected_total_nb_transitions == (nb_no_transitions +
-                                                 nb_transitions)
+        if self.use_assertion_checks:
+            # test whether the expected number of transitions
+            # (one per simulation) is observed
+            nb_no_transitions = len(torch.nonzero(total_rates == 0))
+            expected_total_nb_transitions = np.prod(rate_array_shape[1:])
+            nb_transitions = len(torch.nonzero(all_transitions_mask))
+            assert expected_total_nb_transitions == (nb_no_transitions +
+                                                     nb_transitions)
 
         return None
 
