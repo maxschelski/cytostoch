@@ -135,6 +135,7 @@ class DataExtraction():
         Returns:
 
         """
+        start = time.time()
         if len(dimensions) > 1:
             return ValueError(f"The operation '2D_to_1D_density' is only "
                               f"implemented for 1 dimension. DataExtraction "
@@ -194,10 +195,10 @@ class DataExtraction():
         # create boolean data array later by expanding each microtubule in space
         # use index array to set all positions in boolean data array to True
         # that are between start point and end point
-        data_array = torch.where((indices.expand(-1, *position_start.shape[1:])
-                                 >= position_start) &
-                                 (indices.expand(-1, *position_start.shape[1:])
-                                 <= position_end), True, False)
+        data_array = ((indices.expand(-1, *position_start.shape[1:])
+                       >= position_start) &
+                      (indices.expand(-1, *position_start.shape[1:])
+                       <= position_end))
 
         # then sum across microtubules to get number of MTs at each position
         data_array = torch.sum(data_array, dim=1)
@@ -309,9 +310,10 @@ class Action():
         Args:
             object_property (ObjectProperty object):
             operation (func or str): function that takes the property tensor, the
-                action values tensor and the time tensor as 1D tensor
-                (of the objects with the correct state) and then outputs the
-                transformed property tensor.
+                action values tensor and the time tensor as multi-D tensor and
+                 a mask that is True at all positions where the action will
+                 be executed, and False at positions where it won't be executed
+                 and then outputs the transformed property tensor.
                 Alternatively use one of the following standard_positions as
                 string: "add", "subtract"
             values (1D iterable): values that should be used for the action.
@@ -356,11 +358,11 @@ class Action():
         # define variables which will be used in simulation
         self.value_array = torch.HalfTensor([])
 
-    def _operation_add(self, property_values, values, time):
-        return property_values + values * time
+    def _operation_add(self, property_values, values, time, mask):
+        return property_values + values*time*mask
 
-    def _operation_subtract(self, property_values, values, time):
-        return property_values - values * time
+    def _operation_subtract(self, property_values, values, time, mask):
+        return property_values - values*time*mask
 
 
 class State():

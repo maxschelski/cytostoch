@@ -198,30 +198,46 @@ class SSA():
     def _run_iteration(self, iteration_nb):
         # create tensor for x (position in neurite), l (length of microtubule)
         # and time
-
+        start = time.time()
         total_rates = self._get_total_and_single_rates_for_state_transitions()
         reaction_times = self._get_times_of_next_transition(total_rates)
 
         print("MAX:", reaction_times.max())
-
+        print(time.time() - start)
+        start = time.time()
         self._determine_next_transition(total_rates)
+        print(time.time() - start)
+        start = time.time()
 
         self._determine_positions_of_transitions()
+        print(time.time() - start)
+        start = time.time()
 
         self._execute_actions_on_objects(reaction_times)
+        print(4, time.time() - start)
+        start = time.time()
 
         self._update_object_states()
+        print(time.time() - start)
+        start = time.time()
 
         # remove objects based on properties
         objects_to_remove = self.object_removal.get_objects_to_remove()
         for object_property in self.properties:
             object_property.array[objects_to_remove] = float("nan")
+        print(time.time() - start)
+        start = time.time()
 
         self.object_states[objects_to_remove] = 0
 
         self.times += reaction_times
+        print(time.time() - start)
+        start = time.time()
 
         data = self.data_extraction.extract()
+        print(time.time() - start)
+        start = time.time()
+        dasd
 
         self._save_data(data, iteration_nb)
 
@@ -373,9 +389,8 @@ class SSA():
             expanded_array = torch.ShortTensor(state.initial_condition)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
-            object_state_mask = torch.where(self.index_array.expand(
-                self._simulation_array_size) <=
-                                            nb_objects_with_states, True, False)
+            object_state_mask = (self.index_array.expand(
+                self._simulation_array_size) <= nb_objects_with_states)
 
             self.object_states[object_state_mask] = state.number
             # subtract the number of objects for the current state
@@ -548,10 +563,12 @@ class SSA():
             possible_transition_positions[~start_state_positions] =no_transition_nb
             idx_positions = torch.amin(possible_transition_positions,
                                        dim=0, keepdim=True)
-            transition_positions = torch.where((possible_transition_positions ==
-                                                idx_positions) &
-                                               (possible_transition_positions <
-                                                no_transition_nb), True, False)
+
+            transition_positions = ((possible_transition_positions ==
+                                     idx_positions) &
+                                    (possible_transition_positions <
+                                     no_transition_nb))
+
             transition.transition_positions = transition_positions
         return None
 
@@ -569,40 +586,35 @@ class SSA():
                     action_positions = (action_positions |
                                         (self.object_states ==
                                          state.number))
-            # if torch.count_nonzero(action_positions) == 0:
-            #     continue
+            if torch.count_nonzero(action_positions) == 0:
+                continue
             object_property_array = action.object_property.array
-            property_array = object_property_array[action_positions]
             sim_array_shape = self.object_states.shape
             action_reaction_times = reaction_times.expand(*sim_array_shape)
-            action_reaction_times = action_reaction_times[action_positions]
             value_array = action.value_array
             value_array = value_array.expand(*self.object_states.shape)
-            value_array = value_array[action_positions]
 
-            transformed_property_array = action.operation(property_array,
+            transformed_property_array = action.operation(object_property_array,
                                                           action_reaction_times,
-                                                          value_array)
+                                                          value_array,
+                                                          action_positions)
             transformed_property_array = transformed_property_array.bfloat16()
-            object_property_array[action_positions] = transformed_property_array
-
-            # MAKE MAX AND MIN THREHOLDS WORK FOR ARRAY AND INT VALUES!
+            object_property_array = transformed_property_array
 
             # prevent object properties going above min or max value
             min_property_value = action.object_property.min_value
             if min_property_value is not None:
                 objects_below_min = (object_property_array <
                                      min_property_value)
-                if type(min_property_value) == type(self.object_states):
-                    min_property_values = min_property_value[objects_below_min]
-                object_property_array[objects_below_min] = min_property_values
+                diff = min_property_value - object_property_array
+                object_property_array += diff * objects_below_min
+
             max_property_value = action.object_property.max_value
             if max_property_value is not None:
                 objects_above_max = (object_property_array >
                                      max_property_value)
-                if type(max_property_value) == type(self.object_states):
-                    max_property_value = max_property_value[objects_above_max]
-                object_property_array[objects_above_max] = max_property_value
+                diff = object_property_array - max_property_value
+                object_property_array -= diff*objects_above_max
 
         return None
 
