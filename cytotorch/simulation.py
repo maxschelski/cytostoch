@@ -10,6 +10,9 @@ import time
 import sys
 import gc
 import os
+import psutil
+
+from . import analyzer
 
 """
 This is for single type modeling! (e.g. just MTs or actin) 
@@ -64,15 +67,12 @@ class SSA():
         for state_nb, state in enumerate(self.states):
             state.number = state_nb + 1
 
-        self.action_funcs = {}
-        self.action_funcs["add"] = self._add_to_property
-        self.action_funcs["remove"] = self._remove_from_property
 
     def start(self, nb_simulations, min_time, data_extraction,data_folder,
-              max_number_objects=None, save_states=False,
+              max_number_objects=None,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=5,
-               dynamically_increase_nb_objects=True,
+               dynamically_increase_nb_objects=True, save_states=False,
               use_assertion_checks=True):
         """
 
@@ -94,12 +94,19 @@ class SSA():
                         max_number_objects, ignore_errors,
                         print_update_time_step,
                         nb_objects_added_per_step,
-                        dynamically_increase_nb_objects,use_assertion_checks)
+                        dynamically_increase_nb_objects,save_states,
+                        use_assertion_checks)
+
+    def save(self, time_resolution, max_time):
+        analysis = analyzer.Analyzer(simulation=self)
+        analysis.start(time_resolution, max_time,
+                       use_assertion_checks=self.use_assertion_checks)
 
     def _start(self, nb_simulations, min_time, data_extraction,data_folder,
                max_number_objects=None, ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=5,
-               dynamically_increase_nb_objects=True,use_assertion_checks=True):
+               dynamically_increase_nb_objects=True, save_states=False,
+               use_assertion_checks=True):
         """
 
         Args:
@@ -115,6 +122,7 @@ class SSA():
         self.ignore_errors = ignore_errors
         self.nb_objects_added_per_step = nb_objects_added_per_step
         self.dynamically_increase_nb_objects = dynamically_increase_nb_objects
+        self.save_states = save_states
         self.use_assertion_checks = use_assertion_checks
 
         # create list with all transitions and then with all actions
@@ -142,7 +150,7 @@ class SSA():
         # array size contains for each combination of parameters to explore
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths]
-        print(self._simulation_array_size)
+
         self._zero_tensor = torch.HalfTensor([0])
 
         self._initialize_parameter_arrays(all_simulation_parameters,
@@ -159,7 +167,7 @@ class SSA():
         self.index_array = torch.linspace(1, max_number_objects,
                                           max_number_objects,
                                           dtype=torch.int16).view(*view_array)
-        print(self.index_array.shape)
+
         # self.index_array = self.index_array.expand(self._simulation_array_size)
 
         self._initialize_object_states()
@@ -167,12 +175,14 @@ class SSA():
         self._initialize_object_properties()
 
         self._add_objects_to_full_tensor()
-        print("\n\n")
+
+        data = self.data_extraction.extract()
+        self._save_data(data, 0)
 
         # continue simulation until all simulations have reached at least the
         # minimum time
         times_tracked = set()
-        iteration_nb = 0
+        iteration_nb = 1
         while True:
             current_min_time = torch.min(self.times)
             if current_min_time >= min_time:
@@ -188,11 +198,12 @@ class SSA():
     def _run_iteration(self, iteration_nb):
         # create tensor for x (position in neurite), l (length of microtubule)
         # and time
-        start = time.time()
+
         total_rates = self._get_total_and_single_rates_for_state_transitions()
         reaction_times = self._get_times_of_next_transition(total_rates)
 
-        start = time.time()
+        print("MAX:", reaction_times.max())
+
         self._determine_next_transition(total_rates)
 
         self._determine_positions_of_transitions()
@@ -200,8 +211,6 @@ class SSA():
         self._execute_actions_on_objects(reaction_times)
 
         self._update_object_states()
-
-        print(time.time() - start)
 
         # remove objects based on properties
         objects_to_remove = self.object_removal.get_objects_to_remove()
@@ -212,26 +221,16 @@ class SSA():
 
         self.times += reaction_times
 
-        print("before extraction:", time.time() - start)
-        start = time.time()
         data = self.data_extraction.extract()
-        print("after extraction:", time.time() - start)
 
-        for file_name, data_array in data.items():
-            file_path = os.path.join(self.folder,
-                                     file_name+str(iteration_nb)+".pt")
-            torch.save(data_array, file_path)
-
-        file_path = os.path.join(self.folder,
-                                 "times_" + str(iteration_nb) + ".pt")
-        torch.save(self.times, file_path)
+        self._save_data(data, iteration_nb)
 
         # self.get_tensor_memory()
         # check whether there is a simulation in which all object positions
-        # are occupied
+        # are occupied, if so, increase tensor size to make space for more
+        # objects
         if self.dynamically_increase_nb_objects:
             self._add_objects_to_full_tensor()
-
 
     def _add_objects_to_full_tensor(self):
         """
@@ -480,6 +479,9 @@ class SSA():
         exponential_func = torch.distributions.exponential.Exponential
         reaction_times = exponential_func(total_rates,
                                           validate_args=False).sample()
+        print("rate:", total_rates.min(), total_rates.mean(),
+              "\nreac:", reaction_times.max(),reaction_times.mean(),
+              reaction_times.min())
         return reaction_times
 
     def _determine_next_transition(self, total_rates):
@@ -616,7 +618,6 @@ class SSA():
                 end_state = 0
             else:
                 end_state = transition.end_state.number
-            print(end_state, len(torch.nonzero(transition_positions)))
             self.object_states[transition_positions] = end_state
             # if state ended in state 0, set property array at position to NaN
             if end_state == 0:
@@ -646,9 +647,35 @@ class SSA():
                            (max_value - min_value) + min_value)
         return property_values
 
-    def _add_to_property(self, object_property, reaction_times, action_values):
-        return object_property + (reaction_times * action_values)
+    def _save_data(self, data, iteration_nb):
 
-    def _remove_from_property(self, object_property, reaction_times,
-                              action_values):
-        return object_property - (reaction_times * action_values)
+        # check how much space the data of this iteration would need
+
+        # check how much space is free on the GPU (if executed on GPU)
+
+        # if 2x space free on GPU than would be needed for data, keep on GPU
+
+        # if not enough space free, move to CPU
+
+        # check how much space is free on CPU memory (RAM)
+
+        # if enough space free on memory for another round of data,
+        # concatanate to already present data
+
+        # if not enough space free, save array to hard drive
+
+        for file_name, data_array in data.items():
+            file_path = os.path.join(self.data_folder,
+                                     file_name+str(iteration_nb)+".pt")
+            torch.save(data_array, file_path)
+
+        file_path = os.path.join(self.data_folder,
+                                 "times_" + str(iteration_nb) + ".pt")
+        torch.save(self.times, file_path)
+
+        if self.save_states:
+            file_path = os.path.join(self.data_folder,
+                                     "states_" + str(iteration_nb) + ".pt")
+            torch.save(self.object_states, file_path)
+
+        return None
