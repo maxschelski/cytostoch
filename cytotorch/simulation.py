@@ -6,6 +6,7 @@ Write stochastic model of microtubules in neurite
 import torch
 import copy
 import numpy as np
+import pandas as pd
 import time
 import sys
 import gc
@@ -66,7 +67,13 @@ class SSA():
         # since state 0 is reserved for no state (no object), start
         for state_nb, state in enumerate(self.states):
             state.number = state_nb + 1
+            state.name += "_" + str(state.number)
 
+        for transition in self.transitions:
+            if transition.name == "":
+                continue
+            transition.name = ("transition_from" +str(self.start_state.number) +
+                               "_to" + str(self.end_state.number))
 
     def start(self, nb_simulations, min_time, data_extraction,data_folder,
               max_number_objects=None,
@@ -117,6 +124,7 @@ class SSA():
                 simulated. Determines array size
         Returns:
         """
+        self.min_time = min_time
         self.data_extraction = data_extraction
         self.data_folder = data_folder
         self.ignore_errors = ignore_errors
@@ -125,14 +133,16 @@ class SSA():
         self.save_states = save_states
         self.use_assertion_checks = use_assertion_checks
 
+        self.all_removed_positions = pd.DataFrame()
+
         # create list with all transitions and then with all actions
-        all_simulation_parameters = [*self.states,
-                                     *self.transitions, *self.actions]
+        self._all_simulation_parameters = [*self.states,
+                                          *self.transitions, *self.actions]
 
         # create list of length of all model parameters
         simulation_parameter_lengths = [len(parameters.values)
                                         for parameters
-                                        in all_simulation_parameters]
+                                        in self._all_simulation_parameters]
 
         if dynamically_increase_nb_objects:
             # if the number of objects allowed in the simulation should be
@@ -153,7 +163,7 @@ class SSA():
 
         self._zero_tensor = torch.HalfTensor([0])
 
-        self._initialize_parameter_arrays(all_simulation_parameters,
+        self._initialize_parameter_arrays(self._all_simulation_parameters,
                                           simulation_parameter_lengths)
 
         self.times = torch.zeros((1,*self._simulation_array_size[1:]))
@@ -164,6 +174,7 @@ class SSA():
         # create array of index numbers of same shape as whole simulation array
         view_array = [-1] + [1] * (len(self._simulation_array_size) - 1)
         max_number_objects = self.max_number_objects
+
         self.index_array = torch.linspace(1, max_number_objects,
                                           max_number_objects,
                                           dtype=torch.int16).view(*view_array)
@@ -177,7 +188,10 @@ class SSA():
         self._add_objects_to_full_tensor()
 
         data = self.data_extraction.extract()
+
         self._save_data(data, 0)
+
+        self._save_simulation_parameters()
 
         # continue simulation until all simulations have reached at least the
         # minimum time
@@ -190,54 +204,40 @@ class SSA():
             # print regular current min time in all simulations
             whole_time = current_min_time.item() // print_update_time_step
             if whole_time not in times_tracked:
-                print(iteration_nb, "; Current time: ", whole_time)
+                print("\n\n\n\n",iteration_nb, "; Current time: ", whole_time)
                 times_tracked.add(whole_time)
             self._run_iteration(iteration_nb)
             iteration_nb += 1
 
+        removed_pos_file = os.path.join(self.data_folder,
+                                        "removed_param_values.feather")
+        self.all_removed_positions.to_feather(removed_pos_file)
+
+
     def _run_iteration(self, iteration_nb):
         # create tensor for x (position in neurite), l (length of microtubule)
         # and time
-        start = time.time()
         total_rates = self._get_total_and_single_rates_for_state_transitions()
         reaction_times = self._get_times_of_next_transition(total_rates)
 
-        print("MAX:", reaction_times.max())
-        print(time.time() - start)
-        start = time.time()
         self._determine_next_transition(total_rates)
-        print(time.time() - start)
-        start = time.time()
 
         self._determine_positions_of_transitions()
-        print(time.time() - start)
-        start = time.time()
 
         self._execute_actions_on_objects(reaction_times)
-        print(4, time.time() - start)
-        start = time.time()
 
         self._update_object_states()
-        print(time.time() - start)
-        start = time.time()
 
         # remove objects based on properties
         objects_to_remove = self.object_removal.get_objects_to_remove()
         for object_property in self.properties:
             object_property.array[objects_to_remove] = float("nan")
-        print(time.time() - start)
-        start = time.time()
 
         self.object_states[objects_to_remove] = 0
 
         self.times += reaction_times
-        print(time.time() - start)
-        start = time.time()
 
         data = self.data_extraction.extract()
-        print(time.time() - start)
-        start = time.time()
-        dasd
 
         self._save_data(data, iteration_nb)
 
@@ -247,6 +247,72 @@ class SSA():
         # objects
         if self.dynamically_increase_nb_objects:
             self._add_objects_to_full_tensor()
+
+        # only reduce array size, if not all simulations are done
+        current_min_time = torch.min(self.times)
+        if current_min_time >= self.min_time:
+            return
+
+        # reduce array size every defined number of iterations
+        # by checking whether all simulations for a parameter value are done
+        dim_list = list(range(len(self.times.shape)))
+        all_finished_sim_positions = []
+        for dim in range(1,len(self.times.shape)):
+            new_dim_list = copy.copy(dim_list)
+            new_dim_list.remove(dim)
+            min_sim_time_param_value = torch.amin(self.times,
+                                                  dim=tuple(new_dim_list))
+            finished_sim_positions = torch.where(min_sim_time_param_value >=
+                                                 self.min_time)[0]
+
+            all_finished_sim_positions.append(finished_sim_positions)
+            # save the specific positions that are removed from array
+            # in a dataframe
+            # with columns (iteration_nb, dimension, position)
+            # When all simulations are done, save the dataframe as .feather
+            for finished_sim_position in finished_sim_positions:
+                nb_removed_positions = len(self.all_removed_positions)
+                # user iteration_nb + 1 since it will only be removed for
+                # the next iteration - otherwise the final step in the
+                # simulation would be excluded
+                new_removed_position = pd.DataFrame({"iteration_nb":
+                                                         iteration_nb+1,
+                                                     "dimension": dim,
+                                                     "position":
+                                                         finished_sim_position.item()},
+                                                    index=
+                                                    [nb_removed_positions])
+                concat_list = [self.all_removed_positions, new_removed_position]
+                self.all_removed_positions = pd.concat(concat_list)
+
+        # Remove data from finished simulation positions
+        # create list with lists of all shape positions
+        all_dim_list = [list(range(shape)) for shape in self.times.shape]
+        for dim, dim_list in enumerate(all_dim_list[1:]):
+            finished_sim_positions = all_finished_sim_positions[dim]
+            dim += 1
+            for finished_sim_position in finished_sim_positions:
+                dim_list.remove(finished_sim_position)
+            # make all arrays smaller
+            self.times = torch.index_select(self.times, dim=dim,
+                                            index=torch.IntTensor(dim_list))
+            for property in self.properties:
+                property.array = torch.index_select(property.array,
+                                                    dim=dim,
+                                                    index=
+                                                    torch.IntTensor(dim_list))
+            self.object_states = torch.index_select(self.object_states,
+                                                    dim=dim,
+                                                    index=torch.IntTensor(dim_list))
+
+            for sim_parameter in self._all_simulation_parameters:
+                sim_parameter.value_array = torch.index_select(sim_parameter.value_array,
+                                                             dim=dim,
+                                                             index=
+                                                             torch.IntTensor(dim_list))
+
+        self._simulation_array_size = [self._simulation_array_size[0],
+                                       *self.times.shape[1:]]
 
     def _add_objects_to_full_tensor(self):
         """
@@ -335,7 +401,7 @@ class SSA():
             model_parameters.value_array = array
             # assign model parameter to the correct dimension
             # in the simulation arrays
-            self.dimension_to_parameter_map[dimension] = model_parameters
+            self.dimension_to_parameter_map[array_dimension] = model_parameters
             self.parameter_to_dimension_map[model_parameters.name] = dimension
         return None
 
@@ -373,9 +439,6 @@ class SSA():
                              f"{torch.max(nb_objects_with_states)} "
                              f"which is more than the maximum allowed "
                              f"number {self.max_number_objects}.")
-
-
-        # self.get_tensor_memory()
 
         # then subtract assigned number of objects at each state
         # so that the number of objects that are assigned gets lower
@@ -678,7 +741,7 @@ class SSA():
 
         for file_name, data_array in data.items():
             file_path = os.path.join(self.data_folder,
-                                     file_name+str(iteration_nb)+".pt")
+                                     file_name+"_"+str(iteration_nb)+".pt")
             torch.save(data_array, file_path)
 
         file_path = os.path.join(self.data_folder,
@@ -690,4 +753,12 @@ class SSA():
                                      "states_" + str(iteration_nb) + ".pt")
             torch.save(self.object_states, file_path)
 
+        return None
+
+    def _save_simulation_parameters(self):
+
+        for parameter in self._all_simulation_parameters:
+            file_name = "param_"+parameter.name+".pt"
+            torch.save(parameter.value_array, os.path.join(self.data_folder,
+                                                           file_name))
         return None

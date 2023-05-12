@@ -81,7 +81,7 @@ class DataExtraction():
     (object start position and object length).
     """
 
-    def __init__(self, dimensions, operation, resolution=0.5):
+    def __init__(self, dimensions, operation, **kwargs):
         """
         Define how many dimensions in the system
 
@@ -95,7 +95,7 @@ class DataExtraction():
             extract_state (bool): Whether to extract object state information
         """
         self.dimensions = dimensions
-        self.resolution = resolution
+        self.kwargs = kwargs
 
         implemented_operations = {}
         new_operation = self._operation_2D_to_1D_density
@@ -116,15 +116,16 @@ class DataExtraction():
             self.operation = operation
 
     def extract(self):
-        return self.operation(self.dimensions, self.resolution)
+        return self.operation(self.dimensions, **self.kwargs)
 
-    def _operation_raw(self, dimensions, resolution):
+    def _operation_raw(self, dimensions):
         data_dict = {}
         data_dict["position"] = dimensions.position.array
         data_dict["length"] = dimensions.length.array
         return data_dict
 
-    def _operation_2D_to_1D_density(self, dimensions, resolution):
+    def _operation_2D_to_1D_density(self, dimensions, resolution=0.2,
+                                    **kwargs):
         """
         Create 1D density array from start and length information without
         direction.
@@ -135,7 +136,7 @@ class DataExtraction():
         Returns:
 
         """
-        start = time.time()
+
         if len(dimensions) > 1:
             return ValueError(f"The operation '2D_to_1D_density' is only "
                               f"implemented for 1 dimension. DataExtraction "
@@ -144,14 +145,18 @@ class DataExtraction():
         # create boolean data array later by expanding each microtubule in space
         # size of array will be:
         # (max_position of neurite / resolution) x nb of microtubules
+        min_position = dimensions[0].position.min_value
+        if min_position is None:
+            min_position = 0
         max_position = dimensions[0].position.max_value
-        # add one to the dimension since it starts at 0
-        position_dimension = int(max_position // resolution + 1)
+
+        position_dimension = int((max_position - min_position)
+                                 // resolution)
 
         # data type depends on dimension 0 - since that is the number of
         # different int values needed (int8 for <=256; int16 for >=256)
         # (dimension 0 is determined by max_x of neurite / resolution)
-        if position_dimension < 256:
+        if (position_dimension+1) < 256:
             indices_tensor = torch.ByteTensor
             indices_dtype = torch.uint8
         else:
@@ -203,13 +208,16 @@ class DataExtraction():
         # then sum across microtubules to get number of MTs at each position
         data_array = torch.sum(data_array, dim=1)
 
+        positions = torch.arange(min_position, max_position+resolution*0.9,
+                                 resolution)
+        dimensions = [-1] + [1] * (len(data_array.shape) - 1)
+        positions = positions.view(*dimensions)
+
         data_dict = {}
+        data_dict["1D_density_position"] = positions
         data_dict["1D_density"] = data_array
 
         return data_dict
-
-
-
 
 class ObjectProperty():
 
@@ -243,7 +251,7 @@ class ObjectProperty():
         self._max_value = max_value
         self._start_value = start_value
         self._initial_condition = initial_condition
-        self._name = name
+        self.name = "property_"+name
 
         if (start_value is None):
             raise ValueError("Start_value has to be float or a list of two "
@@ -325,7 +333,10 @@ class Action():
         self.states = states
         self.values = torch.HalfTensor(values)
         self.object_property = object_property
-        self.name = name
+        if name != "":
+            self.name = "action_"+name
+        else:
+            self.name = "action_state"+str(states)+object_property.name+"_OP"+str(operation)
 
         implemented_operations = {}
         implemented_operations["add"] = self._operation_add
@@ -375,7 +386,7 @@ class State():
             initial_condition (int): Number of objects in that state
         """
         self.initial_condition = initial_condition
-        self.name = name
+        self.name = "state_"+name
 
         if type(self.initial_condition) is not list:
             self.initial_condition = torch.ShortTensor([self.initial_condition])
