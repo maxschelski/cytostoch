@@ -103,6 +103,8 @@ class SSA():
 
         # create tensors object to reference the correct tensor class
         # depending on the device
+        print(torch.cuda.device_count())
+        print(device)
         if (device == "GPU") & (torch.cuda.device_count() > 0):
             self.device = device
             self.tensors = torch.cuda
@@ -309,7 +311,70 @@ class SSA():
         if current_min_time >= self.min_time:
             return
 
+<<<<<<< HEAD
+        # reduce array size every defined number of iterations
+        # by checking whether all simulations for a parameter value are done
+        dim_list = list(range(len(self.times.shape)))
+        all_finished_sim_positions = []
+        for dim in range(1,len(self.times.shape)):
+            new_dim_list = copy.copy(dim_list)
+            new_dim_list.remove(dim)
+            min_sim_time_param_value = torch.amin(self.times,
+                                                  dim=tuple(new_dim_list))
+            finished_sim_positions = torch.where(min_sim_time_param_value >=
+                                                 self.min_time)[0]
+
+            all_finished_sim_positions.append(finished_sim_positions)
+            # save the specific positions that are removed from array
+            # in a dataframe
+            # with columns (iteration_nb, dimension, position)
+            # When all simulations are done, save the dataframe as .feather
+            for finished_sim_position in finished_sim_positions:
+                nb_removed_positions = len(self.all_removed_positions)
+                # user iteration_nb + 1 since it will only be removed for
+                # the next iteration - otherwise the final step in the
+                # simulation would be excluded
+                new_removed_position = pd.DataFrame({"iteration_nb":
+                                                         iteration_nb+1,
+                                                     "dimension": dim,
+                                                     "position":
+                                                         finished_sim_position.item()},
+                                                    index=
+                                                    [nb_removed_positions])
+                concat_list = [self.all_removed_positions, new_removed_position]
+                self.all_removed_positions = pd.concat(concat_list)
+
+        # Remove data from finished simulation positions
+        # create list with lists of all shape positions
+        all_dim_list = [list(range(shape)) for shape in self.times.shape]
+        for dim, dim_list in enumerate(all_dim_list[1:]):
+            finished_sim_positions = all_finished_sim_positions[dim]
+            dim += 1
+            for finished_sim_position in finished_sim_positions:
+                dim_list.remove(finished_sim_position)
+            # make all arrays smaller
+            self.times = torch.index_select(self.times, dim=dim,
+                                            index=self.tensors.IntTensor(dim_list))
+            for property in self.properties:
+                property.array = torch.index_select(property.array,
+                                                    dim=dim,
+                                                    index=
+                                                    self.tensors.IntTensor(dim_list))
+            self.object_states = torch.index_select(self.object_states,
+                                                    dim=dim,
+                                                    index=self.tensors.IntTensor(dim_list))
+
+            for sim_parameter in self._all_simulation_parameters:
+                sim_parameter.value_array = torch.index_select(sim_parameter.value_array,
+                                                             dim=dim,
+                                                             index=
+                                                             self.tensors.IntTensor(dim_list))
+
+        self._simulation_array_size = [self._simulation_array_size[0],
+                                       *self.times.shape[1:]]
+=======
         self._remove_finished_simulations(iteration_nb)
+>>>>>>> ecc40a057f7c6b4e292698b6883fd40945e7f23e
 
     def _add_objects_to_full_tensor(self):
         """
@@ -423,7 +488,7 @@ class SSA():
             if state.initial_condition is None:
                 continue
             # expand the initial condition array, to add them up
-            expanded_array = self.tensors.ShortTensor(state.initial_condition)
+            expanded_array = self.tensors.ShortTensor(state.initial_condition.cuda())
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
             nb_objects_with_states += expanded_array
 
@@ -448,7 +513,7 @@ class SSA():
                 continue
             # expand the initial condition array, to add them up and get number
             # of assigned objects for each simulation
-            expanded_array = self.tensors.ShortTensor(state.initial_condition)
+            expanded_array = self.tensors.ShortTensor(state.initial_condition.cuda())
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
             object_state_mask = (self.index_array.expand(
@@ -804,7 +869,7 @@ class SSA():
         if self.device == "GPU":
             total_memory = torch.cuda.get_device_properties(0).total_memory
             reserved_memory = torch.cuda.memory_reserved(0)
-            free_memory = total_memory - reserved_memory
+            free_memory = (total_memory - reserved_memory)/1024/1024
 
             if iteration_nb == 0:
                 self.initial_memory_used = reserved_memory
@@ -815,17 +880,26 @@ class SSA():
             # memory used by data
             total_data_memory = 0
             for tensor in [data, self.times, self.object_states]:
-                size = (tensor.element_size() *
-                        tensor.nelement() / 1024 / 1024)
-                total_data_memory += size
+                if type(tensor) == dict:
+                    for data_elements in tensor.values():
+                        size = (data_elements.element_size() *
+                                data_elements.nelement() / 1024 / 1024)
+                        total_data_memory += size
 
-            memory_used = min(self.iteration_memory_used,
-                              self.initial_memory_used)
+                else:
+                    size = (tensor.element_size() *
+                            tensor.nelement() / 1024 / 1024)
+                    total_data_memory += size
 
+
+            memory_used = min(self.iteration_memory_used/1024/1024,
+                              self.initial_memory_used/1024/1024)
+                              
+            print(free_memory, memory_used, total_data_memory)
             # if 2x space free on GPU than would be needed for data, keep on GPU
             if free_memory > (2 * (memory_used + total_data_memory)):
                 self.all_iteration_nbs.append(iteration_nb)
-                self.all_data.append(torch.clone(data))
+                self.all_data.append(copy.deepcopy(data))
                 self.all_times.append(torch.clone(self.times))
                 if self.save_states:
                     self.all_states.append(torch.clone(self.object_states))
@@ -840,13 +914,16 @@ class SSA():
             # if not enough space free, move to CPU memory
             all_data_cpu = []
             all_times_cpu = []
-            all_states_cpu = []
-            for data in self.all_data:
-                all_data_cpu.append(data.cpu())
+            all_object_states_cpu = []
+            for data_dict in self.all_data:
+                new_data_dict = {}
+                for keyword, data in data_dict.items():
+                    new_data_dict[keyword] = data.cpu()
+                all_data_cpu.append(new_data_dict)
             for times in self.all_times:
                 all_times_cpu.append(times.cpu())
             for states in self.all_states:
-                all_states_cpu.append(states.cpu())
+                all_object_states_cpu.append(states.cpu())
             all_iteration_nbs = copy.copy(self.all_iteration_nbs)
 
             self.all_iteration_nbs = []
