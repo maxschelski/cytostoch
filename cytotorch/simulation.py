@@ -73,7 +73,7 @@ class tRSSA():
 class SSA():
 
     def __init__(self, states, transitions, properties, actions,
-                 object_removal=None, name="",):
+                 object_removal=None, name="", device="GPU"):
         """
 
         Args:
@@ -100,6 +100,15 @@ class SSA():
         self.actions = actions
         self.object_removal = object_removal
         self.name = name
+
+        self.tensors = []
+
+        if (device == "GPU") & (torch.cuda.device_count() > 0):
+            self.device = device
+            self.tensors = torch.cuda
+        else:
+            self.device = "CPU"
+            self.tensors = torch
 
         # since state 0 is reserved for no state (no object), start
         for state_nb, state in enumerate(self.states):
@@ -227,7 +236,7 @@ class SSA():
         data = self.data_extraction.extract()
 
         self._save_data(data, 0)
-
+        # self.get_tensor_memory()
         self._save_simulation_parameters()
 
         # continue simulation until all simulations have reached at least the
@@ -269,9 +278,9 @@ class SSA():
         objects_to_remove = self.object_removal.get_objects_to_remove()
         for object_property in self.properties:
             object_property.array[objects_to_remove] = float("nan")
-        objects_to_remove = None
 
         self.object_states[objects_to_remove] = 0
+        objects_to_remove = None
 
         self.times += reaction_times
 
@@ -391,6 +400,8 @@ class SSA():
     def get_tensor_memory(self):
         total_memory = 0
         for gc_object in gc.get_objects():
+            if str(type(gc_object)).find("torch.") != -1:
+                print(type(gc_object))
             try:
                 if (hasattr(gc_object, "element_size") &
                         hasattr(gc_object, "nelement")):
@@ -766,7 +777,7 @@ class SSA():
 
         # check how much space the data of this iteration would need
         # for that check the size of each big array
-        self.get_tensor_memory()
+        # self.get_tensor_memory()
 
         # check how much space is free on the GPU (if executed on GPU)
 
