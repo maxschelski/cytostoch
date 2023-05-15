@@ -103,6 +103,8 @@ class SSA():
 
         # create tensors object to reference the correct tensor class
         # depending on the device
+        print(torch.cuda.device_count())
+        print(device)
         if (device == "GPU") & (torch.cuda.device_count() > 0):
             self.device = device
             self.tensors = torch.cuda
@@ -356,7 +358,7 @@ class SSA():
                 property.array = torch.index_select(property.array,
                                                     dim=dim,
                                                     index=
-                                                    torch.IntTensor(dim_list))
+                                                    self.tensors.IntTensor(dim_list))
             self.object_states = torch.index_select(self.object_states,
                                                     dim=dim,
                                                     index=self.tensors.IntTensor(dim_list))
@@ -482,7 +484,7 @@ class SSA():
             if state.initial_condition is None:
                 continue
             # expand the initial condition array, to add them up
-            expanded_array = self.tensors.ShortTensor(state.initial_condition)
+            expanded_array = self.tensors.ShortTensor(state.initial_condition.cuda())
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
             nb_objects_with_states += expanded_array
 
@@ -507,7 +509,7 @@ class SSA():
                 continue
             # expand the initial condition array, to add them up and get number
             # of assigned objects for each simulation
-            expanded_array = self.tensors.ShortTensor(state.initial_condition)
+            expanded_array = self.tensors.ShortTensor(state.initial_condition.cuda())
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
             object_state_mask = (self.index_array.expand(
@@ -789,7 +791,7 @@ class SSA():
         if self.device == "GPU":
             total_memory = torch.cuda.get_device_properties(0).total_memory
             reserved_memory = torch.cuda.memory_reserved(0)
-            free_memory = total_memory - reserved_memory
+            free_memory = (total_memory - reserved_memory)/1024/1024
 
             if iteration_nb == 0:
                 self.initial_memory_used = reserved_memory
@@ -800,17 +802,26 @@ class SSA():
             # memory used by data
             total_data_memory = 0
             for tensor in [data, self.times, self.object_states]:
-                size = (tensor.element_size() *
-                        tensor.nelement() / 1024 / 1024)
-                total_data_memory += size
+                if type(tensor) == dict:
+                    for data_elements in tensor.values():
+                        size = (data_elements.element_size() *
+                                data_elements.nelement() / 1024 / 1024)
+                        total_data_memory += size
 
-            memory_used = min(self.iteration_memory_used,
-                              self.initial_memory_used)
+                else:
+                    size = (tensor.element_size() *
+                            tensor.nelement() / 1024 / 1024)
+                    total_data_memory += size
 
+
+            memory_used = min(self.iteration_memory_used/1024/1024,
+                              self.initial_memory_used/1024/1024)
+                              
+            print(free_memory, memory_used, total_data_memory)
             # if 2x space free on GPU than would be needed for data, keep on GPU
             if free_memory > (2 * (memory_used + total_data_memory)):
                 self.all_iteration_nbs.append(iteration_nb)
-                self.all_data.append(torch.clone(data))
+                self.all_data.append(copy.deepcopy(data))
                 self.all_times.append(torch.clone(self.times))
                 if self.save_states:
                     self.all_states.append(torch.clone(self.object_states))
@@ -825,13 +836,16 @@ class SSA():
             # if not enough space free, move to CPU memory
             all_data_cpu = []
             all_times_cpu = []
-            all_states_cpu = []
-            for data in self.all_data:
-                all_data_cpu.append(data.cpu())
+            all_object_states_cpu = []
+            for data_dict in self.all_data:
+                new_data_dict = {}
+                for keyword, data in data_dict.items():
+                    new_data_dict[keyword] = data.cpu()
+                all_data_cpu.append(new_data_dict)
             for times in self.all_times:
                 all_times_cpu.append(times.cpu())
             for states in self.all_states:
-                all_states_cpu.append(states.cpu())
+                all_object_states_cpu.append(states.cpu())
             all_iteration_nbs = copy.copy(self.all_iteration_nbs)
 
             self.all_iteration_nbs = []
