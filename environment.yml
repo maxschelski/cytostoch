@@ -1,0 +1,10 @@
+name: cytotorch
+channels:
+  - defaults
+dependencies:
+  - pytorch=1.12.1
+  - pandas=1.5.3
+  - numpy=1.23.5
+  - seaborn=0.12.2
+  - pyarrow=11.0.0
+prefix: C:\Users\Maxsc\anaconda3\envs\cytotorch
