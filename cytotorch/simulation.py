@@ -730,9 +730,18 @@ class SSA():
                                                         nb_creations)
                 else:
                     property_values = object_property.start_value
-                    
-                object_property.array = object_property.array.masked_scatter(transition_positions, property_values)
-                #object_property.array[transition_positions] = property_values
+
+                # if there is just one property value (its not a tensor)
+                # use another way of assinging values
+                # masked_scatter has advantage of much smaller memory footprint
+                # but when just assigning one value, memory footprint using
+                # mask directly is small
+                if type(property_values) != type(object_property.array):
+                    object_property.array[
+                        transition_positions] = property_values
+                    return None
+                object_property.array = object_property.array.masked_scatter(transition_positions,
+                                                                             property_values)
         return None
 
     def _get_random_poperty_values(self, min_value,
