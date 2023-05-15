@@ -571,7 +571,7 @@ class SSA():
                                              current_rates.unsqueeze(0)))
 
         # add current nucleation rate to catastrophe rate for each simulation
-        total_rates = torch.sum(all_transition_rates, dim=0)
+        total_rates = torch.sum(all_transition_rates, dim=0, dtype=torch.float)
 
         return total_rates
 
@@ -839,7 +839,7 @@ class SSA():
 
         # check how much space is free on the GPU (if executed on GPU)
         if self.device == "GPU":
-            self.get_tensor_memory()
+            
             torch.cuda.empty_cache()
             total_memory = torch.cuda.get_device_properties(0).total_memory
             reserved_memory = torch.cuda.memory_reserved(0)
@@ -869,10 +869,6 @@ class SSA():
             memory_used = min(self.iteration_memory_used,
                               self.initial_memory_used)
                               
-            print(free_memory/1024/1024/1024, 
-            memory_used/1024/1024/1024, total_data_memory/1024/1024/1024,
-            torch.cuda.memory_allocated(0)/1024/1024/1024,
-            torch.cuda.memory_reserved(0)/1024/1024/1024 )
             # if 2x space free on GPU than would be needed for data, keep on GPU
             if free_memory > (2 * (memory_used + total_data_memory)):
                 self.all_iteration_nbs.append(iteration_nb)
