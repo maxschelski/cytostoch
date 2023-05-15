@@ -33,6 +33,43 @@ What classes?
                                  (rate can be supplied as lifetime))
 """
 
+class tRSSA():
+
+    def __init__(self):
+        pass
+
+    def start(self, time_step_size_simulation, time_depency_step_size=0.001):
+
+        self.time_dependency_step_size = time_depency_step_size
+        # create bounds (upper and lower) for species
+
+        # for time dependency get min and max points of time dependent function
+        # first numerically simulate time dependent function over whole interval
+        self.timesteps = torch.arange(0, self.max_time, self.time_depency_step_size)
+        for transition in self.transitions:
+            if transition.time_dependency is None:
+                continue
+            time_data = transition.time_dependency(self.timesteps)
+            transition.time_depency_data = time_data
+
+        for action in self.actions:
+            if action.time_dependency is None:
+                continue
+            time_data = transition.time_dependency(self.timesteps)
+            # multiplay by step size to get actual values and not rates/speeds
+            time_data *= self.time_dependency_step_size
+            action.time_dependency_data = time_data
+
+        # get min and max for first time range
+        index = torch.where((self.timesteps >= 0) &
+                            (self.timesteps < time_step_size_simulation))
+
+        # create bounds for propensities
+
+    def run_iteration(self):
+        pass
+
+
 class SSA():
 
     def __init__(self, states, transitions, properties, actions,
@@ -204,7 +241,7 @@ class SSA():
             # print regular current min time in all simulations
             whole_time = current_min_time.item() // print_update_time_step
             if whole_time not in times_tracked:
-                print("\n\n\n\n",iteration_nb, "; Current time: ", whole_time)
+                print("\n",iteration_nb, "; Current time: ", whole_time)
                 times_tracked.add(whole_time)
             self._run_iteration(iteration_nb)
             iteration_nb += 1
@@ -220,25 +257,40 @@ class SSA():
         total_rates = self._get_total_and_single_rates_for_state_transitions()
         reaction_times = self._get_times_of_next_transition(total_rates)
 
+        print("\n\n11111")
+        self.get_tensor_memory()
         self._determine_next_transition(total_rates)
 
+        print("\n\n2222")
+        self.get_tensor_memory()
         self._determine_positions_of_transitions()
 
+        print("\n\n3333")
+        self.get_tensor_memory()
         self._execute_actions_on_objects(reaction_times)
 
+        print("\n\n4444")
+        self.get_tensor_memory()
         self._update_object_states()
 
+        print("\n\n5555")
+        self.get_tensor_memory()
         # remove objects based on properties
         objects_to_remove = self.object_removal.get_objects_to_remove()
         for object_property in self.properties:
             object_property.array[objects_to_remove] = float("nan")
+        objects_to_remove = None
 
         self.object_states[objects_to_remove] = 0
 
+        print("\n\n66666")
+        self.get_tensor_memory()
         self.times += reaction_times
 
         data = self.data_extraction.extract()
-
+        print("\n\n7777")
+        self.get_tensor_memory()
+        dasd
         self._save_data(data, iteration_nb)
 
         # self.get_tensor_memory()
@@ -361,7 +413,7 @@ class SSA():
                         size = (gc_object.element_size() *
                                 gc_object.nelement()/1024/1024)
                         total_memory += size
-                        if size > 50:
+                        if size > 5:
                             print(gc_object.shape, gc_object.dtype, size)
                     except:
                         continue
@@ -557,9 +609,9 @@ class SSA():
         exponential_func = torch.distributions.exponential.Exponential
         reaction_times = exponential_func(total_rates,
                                           validate_args=False).sample()
-        print("rate:", total_rates.min(), total_rates.mean(),
-              "\nreac:", reaction_times.max(),reaction_times.mean(),
-              reaction_times.min())
+        # print("rate:", total_rates.min(), total_rates.mean(),
+        #       "\nreac:", reaction_times.max(),reaction_times.mean(),
+        #       reaction_times.min())
         return reaction_times
 
     def _determine_next_transition(self, total_rates):
@@ -698,11 +750,14 @@ class SSA():
             if end_state == 0:
                 for object_property in self.properties:
                     object_property.array[transition_positions] = float("nan")
+                transition.transition_positions = None
                 continue
             # if state started in state 0, add new entry in property array
             if start_state != 0:
+                transition.transition_positions = None
                 continue
             nb_creations = len(torch.nonzero(transition_positions))
+            transition.transition_positions = None
             for object_property in self.properties:
                 if type(object_property.start_value) == list:
                     get_property_vals = self._get_random_poperty_values
@@ -725,6 +780,8 @@ class SSA():
     def _save_data(self, data, iteration_nb):
 
         # check how much space the data of this iteration would need
+        # for that check the size of each big array
+        self.get_tensor_memory()
 
         # check how much space is free on the GPU (if executed on GPU)
 
