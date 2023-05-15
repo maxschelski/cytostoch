@@ -257,24 +257,14 @@ class SSA():
         total_rates = self._get_total_and_single_rates_for_state_transitions()
         reaction_times = self._get_times_of_next_transition(total_rates)
 
-        print("\n\n11111")
-        self.get_tensor_memory()
         self._determine_next_transition(total_rates)
 
-        print("\n\n2222")
-        self.get_tensor_memory()
         self._determine_positions_of_transitions()
 
-        print("\n\n3333")
-        self.get_tensor_memory()
         self._execute_actions_on_objects(reaction_times)
 
-        print("\n\n4444")
-        self.get_tensor_memory()
         self._update_object_states()
 
-        print("\n\n5555")
-        self.get_tensor_memory()
         # remove objects based on properties
         objects_to_remove = self.object_removal.get_objects_to_remove()
         for object_property in self.properties:
@@ -283,14 +273,9 @@ class SSA():
 
         self.object_states[objects_to_remove] = 0
 
-        print("\n\n66666")
-        self.get_tensor_memory()
         self.times += reaction_times
 
         data = self.data_extraction.extract()
-        print("\n\n7777")
-        self.get_tensor_memory()
-        dasd
         self._save_data(data, iteration_nb)
 
         # self.get_tensor_memory()
