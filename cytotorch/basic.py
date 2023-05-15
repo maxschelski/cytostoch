@@ -115,8 +115,8 @@ class DataExtraction():
         else:
             self.operation = operation
 
-    def extract(self):
-        return self.operation(self.dimensions, **self.kwargs)
+    def extract(self, simulation_object):
+        return self.operation(self.dimensions, simulation_object, **self.kwargs)
 
     def _operation_raw(self, dimensions):
         data_dict = {}
@@ -124,8 +124,8 @@ class DataExtraction():
         data_dict["length"] = dimensions.length.array
         return data_dict
 
-    def _operation_2D_to_1D_density(self, dimensions, resolution=0.2,
-                                    **kwargs):
+    def _operation_2D_to_1D_density(self, dimensions, simulation_object,
+                                    resolution=0.2, **kwargs):
         """
         Create 1D density array from start and length information without
         direction.
@@ -153,15 +153,18 @@ class DataExtraction():
         position_dimension = int((max_position - min_position)
                                  // resolution)
 
+        # create tensors on correct device
+        tensors = simulation_object.tensors
+
         # data type depends on dimension 0 - since that is the number of
         # different int values needed (int8 for <=256; int16 for >=256)
         # (dimension 0 is determined by max_x of neurite / resolution)
         if (position_dimension+1) < 256:
-            indices_tensor = torch.ByteTensor
-            indices_dtype = torch.uint8
+            indices_tensor = tensors.ByteTensor
+            indices_dtype = tensors.uint8
         else:
-            indices_tensor = torch.ShortTensor
-            indices_dtype = torch.short
+            indices_tensor = tensors.ShortTensor
+            indices_dtype = tensors.short
 
         # extract positions of the array that actually contains objects
         # crop data so that positions that don't contain objects
