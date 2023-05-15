@@ -101,14 +101,16 @@ class SSA():
         self.object_removal = object_removal
         self.name = name
 
-        self.tensors = []
-
+        # create tensors object to reference the correct tensor class
+        # depending on the device
         if (device == "GPU") & (torch.cuda.device_count() > 0):
             self.device = device
             self.tensors = torch.cuda
+            torch.set_default_tensor_type(torch.cuda.FloatTensor)
         else:
             self.device = "CPU"
             self.tensors = torch
+            torch.set_default_tensor_type(torch.FloatTensor)
 
         # since state 0 is reserved for no state (no object), start
         for state_nb, state in enumerate(self.states):
@@ -179,6 +181,14 @@ class SSA():
         self.save_states = save_states
         self.use_assertion_checks = use_assertion_checks
 
+        self.all_data = []
+        self.all_times = []
+        self.all_states = []
+        self.all_iteration_nbs = []
+
+        self.initial_memory_used = 0
+        self.iteration_memory_used = 0
+
         self.all_removed_positions = pd.DataFrame()
 
         # create list with all transitions and then with all actions
@@ -207,7 +217,7 @@ class SSA():
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths]
 
-        self._zero_tensor = torch.HalfTensor([0])
+        self._zero_tensor = self.tensors.HalfTensor([0])
 
         self._initialize_parameter_arrays(self._all_simulation_parameters,
                                           simulation_parameter_lengths)
@@ -225,18 +235,17 @@ class SSA():
                                           max_number_objects,
                                           dtype=torch.int16).view(*view_array)
 
-        # self.index_array = self.index_array.expand(self._simulation_array_size)
-
         self._initialize_object_states()
 
         self._initialize_object_properties()
 
+        # self.get_tensor_memory()
+
         self._add_objects_to_full_tensor()
 
-        data = self.data_extraction.extract()
+        data = self.data_extraction.extract(self)
 
         self._save_data(data, 0)
-        # self.get_tensor_memory()
         self._save_simulation_parameters()
 
         # continue simulation until all simulations have reached at least the
@@ -284,8 +293,9 @@ class SSA():
 
         self.times += reaction_times
 
-        data = self.data_extraction.extract()
+        data = self.data_extraction.extract(self)
         self._save_data(data, iteration_nb)
+        del data
 
         # self.get_tensor_memory()
         # check whether there is a simulation in which all object positions
@@ -341,7 +351,7 @@ class SSA():
                 dim_list.remove(finished_sim_position)
             # make all arrays smaller
             self.times = torch.index_select(self.times, dim=dim,
-                                            index=torch.IntTensor(dim_list))
+                                            index=self.tensors.IntTensor(dim_list))
             for property in self.properties:
                 property.array = torch.index_select(property.array,
                                                     dim=dim,
@@ -349,13 +359,13 @@ class SSA():
                                                     torch.IntTensor(dim_list))
             self.object_states = torch.index_select(self.object_states,
                                                     dim=dim,
-                                                    index=torch.IntTensor(dim_list))
+                                                    index=self.tensors.IntTensor(dim_list))
 
             for sim_parameter in self._all_simulation_parameters:
                 sim_parameter.value_array = torch.index_select(sim_parameter.value_array,
                                                              dim=dim,
                                                              index=
-                                                             torch.IntTensor(dim_list))
+                                                             self.tensors.IntTensor(dim_list))
 
         self._simulation_array_size = [self._simulation_array_size[0],
                                        *self.times.shape[1:]]
@@ -397,11 +407,10 @@ class SSA():
                                           dtype=torch.int16).view(*view_array)
         return None
 
+
     def get_tensor_memory(self):
         total_memory = 0
         for gc_object in gc.get_objects():
-            if str(type(gc_object)).find("torch.") != -1:
-                print(type(gc_object))
             try:
                 if (hasattr(gc_object, "element_size") &
                         hasattr(gc_object, "nelement")):
@@ -410,7 +419,8 @@ class SSA():
                                 gc_object.nelement()/1024/1024)
                         total_memory += size
                         if size > 5:
-                            print(gc_object.shape, gc_object.dtype, size)
+                            print(type(gc_object),
+                                  gc_object.shape, gc_object.dtype, size)
                     except:
                         continue
             except:
@@ -444,7 +454,7 @@ class SSA():
             array = np.expand_dims(model_parameters.values, expand_dimensions)
             # save array in object, therefore also change objects saved in
             # self.transitions and self.actions
-            array = torch.HalfTensor(array)
+            array = self.tensors.HalfTensor(array)
             array = array.expand(1,*self._simulation_array_size[1:])
             model_parameters.value_array = array
             # assign model parameter to the correct dimension
@@ -472,7 +482,7 @@ class SSA():
             if state.initial_condition is None:
                 continue
             # expand the initial condition array, to add them up
-            expanded_array = torch.ShortTensor(state.initial_condition)
+            expanded_array = self.tensors.ShortTensor(state.initial_condition)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
             nb_objects_with_states += expanded_array
 
@@ -497,7 +507,7 @@ class SSA():
                 continue
             # expand the initial condition array, to add them up and get number
             # of assigned objects for each simulation
-            expanded_array = torch.ShortTensor(state.initial_condition)
+            expanded_array = self.tensors.ShortTensor(state.initial_condition)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
             object_state_mask = (self.index_array.expand(
@@ -566,7 +576,7 @@ class SSA():
 
     def _get_total_and_single_rates_for_state_transitions(self):
         # get number of objects in each state
-        nb_objects_all_states = torch.ShortTensor()
+        nb_objects_all_states = self.tensors.ShortTensor()
         # add 1 to number of states since 0 is not explicitly defined
         for state in range(1,len(self.states) + 1):
             nb_objects = torch.sum(self.object_states == state, dim=0)
@@ -576,7 +586,7 @@ class SSA():
                                                nb_objects))
         # get rates for all state transitions, depending on number of objects
         # in corresponding start state of transition
-        all_transition_rates = torch.HalfTensor()
+        all_transition_rates = self.tensors.HalfTensor()
         for transition in self.transitions:
             if transition.start_state is None:
                 # for state 0, the number of objects in state 0 is of course
@@ -775,36 +785,85 @@ class SSA():
 
     def _save_data(self, data, iteration_nb):
 
-        # check how much space the data of this iteration would need
-        # for that check the size of each big array
-        # self.get_tensor_memory()
-
         # check how much space is free on the GPU (if executed on GPU)
+        if self.device == "GPU":
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            reserved_memory = torch.cuda.memory_reserved(0)
+            free_memory = total_memory - reserved_memory
 
-        # if 2x space free on GPU than would be needed for data, keep on GPU
+            if iteration_nb == 0:
+                self.initial_memory_used = reserved_memory
+            if iteration_nb == 1:
+                self.iteration_memory_used = (reserved_memory -
+                                              self.initial_memory_used)
 
-        # if not enough space free, move to CPU
+            # memory used by data
+            total_data_memory = 0
+            for tensor in [data, self.times, self.object_states]:
+                size = (tensor.element_size() *
+                        tensor.nelement() / 1024 / 1024)
+                total_data_memory += size
 
-        # check how much space is free on CPU memory (RAM)
+            memory_used = min(self.iteration_memory_used,
+                              self.initial_memory_used)
 
-        # if enough space free on memory for another round of data,
-        # concatanate to already present data
+            # if 2x space free on GPU than would be needed for data, keep on GPU
+            if free_memory > (2 * (memory_used + total_data_memory)):
+                self.all_iteration_nbs.append(iteration_nb)
+                self.all_data.append(torch.clone(data))
+                self.all_times.append(torch.clone(self.times))
+                if self.save_states:
+                    self.all_states.append(torch.clone(self.object_states))
+                return None
 
-        # if not enough space free, save array to hard drive
+            self.all_iteration_nbs.append(iteration_nb)
+            self.all_data.append(data)
+            self.all_times.append(self.times)
+            if self.save_states:
+                self.all_states.append(self.object_states)
 
-        for file_name, data_array in data.items():
+            # if not enough space free, move to CPU memory
+            all_data_cpu = []
+            all_times_cpu = []
+            all_states_cpu = []
+            for data in self.all_data:
+                all_data_cpu.append(data.cpu())
+            for times in self.all_times:
+                all_times_cpu.append(times.cpu())
+            for states in self.all_states:
+                all_states_cpu.append(states.cpu())
+            all_iteration_nbs = copy.copy(self.all_iteration_nbs)
+
+            self.all_iteration_nbs = []
+            self.all_data = []
+            self.all_times = []
+            self.all_states = []
+
+        else:
+            all_iteration_nbs = [iteration_nb]
+            all_data_cpu = [data]
+            all_times_cpu = [self.times]
+            all_object_states_cpu = [self.object_states]
+
+        for (iteration_nb,data_cpu,
+             times_cpu, object_states_cpu) \
+                in zip(all_iteration_nbs, all_data_cpu,
+                       all_times_cpu, all_object_states_cpu):
+
+            # save data to hard drive
+            for file_name, data_array in data_cpu.items():
+                file_path = os.path.join(self.data_folder,
+                                         file_name+"_"+str(iteration_nb)+".pt")
+                torch.save(data_array, file_path)
+
             file_path = os.path.join(self.data_folder,
-                                     file_name+"_"+str(iteration_nb)+".pt")
-            torch.save(data_array, file_path)
+                                     "times_" + str(iteration_nb) + ".pt")
+            torch.save(self.times, file_path)
 
-        file_path = os.path.join(self.data_folder,
-                                 "times_" + str(iteration_nb) + ".pt")
-        torch.save(self.times, file_path)
-
-        if self.save_states:
-            file_path = os.path.join(self.data_folder,
-                                     "states_" + str(iteration_nb) + ".pt")
-            torch.save(self.object_states, file_path)
+            if self.save_states:
+                file_path = os.path.join(self.data_folder,
+                                         "states_" + str(iteration_nb) + ".pt")
+                torch.save(self.object_states, file_path)
 
         return None
 
