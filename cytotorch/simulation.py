@@ -426,7 +426,11 @@ class SSA():
             if state.initial_condition is None:
                 continue
             # expand the initial condition array, to add them up
-            expanded_array = self.tensors.ShortTensor(state.initial_condition.cuda())
+            if self.device == "GPU":
+                initial_cond = state.initial_condition.cuda()
+            else:
+                initial_cond = state.initial_condition
+            expanded_array = self.tensors.ShortTensor(initial_cond)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
             nb_objects_with_states += expanded_array
 
@@ -451,7 +455,11 @@ class SSA():
                 continue
             # expand the initial condition array, to add them up and get number
             # of assigned objects for each simulation
-            expanded_array = self.tensors.ShortTensor(state.initial_condition.cuda())
+            if self.device == "GPU":
+                initial_cond = state.initial_condition.cuda()
+            else:
+                initial_cond = state.initial_condition
+            expanded_array = self.tensors.ShortTensor(initial_cond)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
             object_state_mask = (self.index_array.expand(
@@ -766,7 +774,7 @@ class SSA():
                                                     [nb_removed_positions])
                 concat_list = [self.all_removed_positions, new_removed_position]
                 self.all_removed_positions = pd.concat(concat_list)
-            return all_finished_sim_positions
+        return all_finished_sim_positions
 
     def _remove_finished_positions_from_all_arrays(self,
                                                    all_finished_sim_positions):
