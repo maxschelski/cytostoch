@@ -161,21 +161,21 @@ class DataExtraction():
         # (dimension 0 is determined by max_x of neurite / resolution)
         if (position_dimension+1) < 256:
             indices_tensor = tensors.ByteTensor
-            indices_dtype = tensors.uint8
+            indices_dtype = torch.uint8
         else:
             indices_tensor = tensors.ShortTensor
-            indices_dtype = tensors.short
+            indices_dtype = torch.short
 
         # extract positions of the array that actually contains objects
         # crop data so that positions that don't contain objects
         # are excluded
-        objects_array = ~torch.isnan(dimensions[0].position.array)
-        positions_object = torch.nonzero(objects_array)
-        min_pos_with_object = positions_object[:,0].min()
+        #objects_array = ~torch.isnan(dimensions[0].position.array)
+        #positions_object = torch.nonzero(objects_array)
+        #min_pos_with_object = positions_object[:,0].min()
 
         position_start = dimensions[0].position.array
-        max_nb_objects = position_start.shape[0]
-        position_start = position_start[min_pos_with_object:max_nb_objects]
+        #max_nb_objects = position_start.shape[0]
+        #position_start = position_start[min_pos_with_object:max_nb_objects]
 
         # transform object properties into multiples of resolution
         # then transform length into end position
@@ -184,7 +184,7 @@ class DataExtraction():
         position_start = torch.unsqueeze(position_start, 0)
 
         position_end = dimensions[0].length.array
-        position_end = position_end[min_pos_with_object:max_nb_objects]
+        #position_end = position_end[min_pos_with_object:max_nb_objects]
         position_end = (torch.div(position_end, resolution,
                                  rounding_mode="floor") +
                         position_start).to(indices_dtype)

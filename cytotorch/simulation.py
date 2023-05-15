@@ -101,10 +101,10 @@ class SSA():
         self.object_removal = object_removal
         self.name = name
 
+        #os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256"
+
         # create tensors object to reference the correct tensor class
         # depending on the device
-        print(torch.cuda.device_count())
-        print(device)
         if (device == "GPU") & (torch.cuda.device_count() > 0):
             self.device = device
             self.tensors = torch.cuda
@@ -323,10 +323,12 @@ class SSA():
         Returns: None
 
         """
-        positions_object = torch.nonzero(self.object_states)
-        max_pos_with_object = positions_object[:,0].max()
-        if (max_pos_with_object < (self.object_states.shape[0] - 1)):
+        positions_object = torch.max(self.object_states[-1])
+        if positions_object == 0:
             return None
+        #max_pos_with_object = positions_object[:,0].max()
+        #if (max_pos_with_object < (self.object_states.shape[0] - 1)):
+        #    return None
 
         self._simulation_array_size[0] += self.nb_objects_added_per_step
         self.max_number_objects += self.nb_objects_added_per_step
@@ -524,7 +526,10 @@ class SSA():
                 property_values = get_property_vals(min_value, max_value,
                                                     nb_objects_with_states)
 
-            object_property.array[object_state_mask] = property_values
+            object_property.array = object_property.array.masked_scatter(object_state_mask, 
+                                                                        property_values)
+            
+            #object_property.array[object_state_mask] = property_values
 
     def _get_total_and_single_rates_for_state_transitions(self):
         # get number of objects in each state
@@ -725,7 +730,9 @@ class SSA():
                                                         nb_creations)
                 else:
                     property_values = object_property.start_value
-                object_property.array[transition_positions] = property_values
+                    
+                object_property.array = object_property.array.masked_scatter(transition_positions, property_values)
+                #object_property.array[transition_positions] = property_values
         return None
 
     def _get_random_poperty_values(self, min_value,
@@ -813,9 +820,11 @@ class SSA():
 
         # check how much space is free on the GPU (if executed on GPU)
         if self.device == "GPU":
+            self.get_tensor_memory()
+            torch.cuda.empty_cache()
             total_memory = torch.cuda.get_device_properties(0).total_memory
             reserved_memory = torch.cuda.memory_reserved(0)
-            free_memory = (total_memory - reserved_memory)/1024/1024
+            free_memory = (total_memory - reserved_memory)
 
             if iteration_nb == 0:
                 self.initial_memory_used = reserved_memory
@@ -829,19 +838,22 @@ class SSA():
                 if type(tensor) == dict:
                     for data_elements in tensor.values():
                         size = (data_elements.element_size() *
-                                data_elements.nelement() / 1024 / 1024)
+                                data_elements.nelement())
                         total_data_memory += size
 
                 else:
                     size = (tensor.element_size() *
-                            tensor.nelement() / 1024 / 1024)
+                            tensor.nelement())
                     total_data_memory += size
 
 
-            memory_used = min(self.iteration_memory_used/1024/1024,
-                              self.initial_memory_used/1024/1024)
+            memory_used = min(self.iteration_memory_used,
+                              self.initial_memory_used)
                               
-            print(free_memory, memory_used, total_data_memory)
+            print(free_memory/1024/1024/1024, 
+            memory_used/1024/1024/1024, total_data_memory/1024/1024/1024,
+            torch.cuda.memory_allocated(0)/1024/1024/1024,
+            torch.cuda.memory_reserved(0)/1024/1024/1024 )
             # if 2x space free on GPU than would be needed for data, keep on GPU
             if free_memory > (2 * (memory_used + total_data_memory)):
                 self.all_iteration_nbs.append(iteration_nb)
