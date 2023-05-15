@@ -311,70 +311,8 @@ class SSA():
         if current_min_time >= self.min_time:
             return
 
-<<<<<<< HEAD
-        # reduce array size every defined number of iterations
-        # by checking whether all simulations for a parameter value are done
-        dim_list = list(range(len(self.times.shape)))
-        all_finished_sim_positions = []
-        for dim in range(1,len(self.times.shape)):
-            new_dim_list = copy.copy(dim_list)
-            new_dim_list.remove(dim)
-            min_sim_time_param_value = torch.amin(self.times,
-                                                  dim=tuple(new_dim_list))
-            finished_sim_positions = torch.where(min_sim_time_param_value >=
-                                                 self.min_time)[0]
-
-            all_finished_sim_positions.append(finished_sim_positions)
-            # save the specific positions that are removed from array
-            # in a dataframe
-            # with columns (iteration_nb, dimension, position)
-            # When all simulations are done, save the dataframe as .feather
-            for finished_sim_position in finished_sim_positions:
-                nb_removed_positions = len(self.all_removed_positions)
-                # user iteration_nb + 1 since it will only be removed for
-                # the next iteration - otherwise the final step in the
-                # simulation would be excluded
-                new_removed_position = pd.DataFrame({"iteration_nb":
-                                                         iteration_nb+1,
-                                                     "dimension": dim,
-                                                     "position":
-                                                         finished_sim_position.item()},
-                                                    index=
-                                                    [nb_removed_positions])
-                concat_list = [self.all_removed_positions, new_removed_position]
-                self.all_removed_positions = pd.concat(concat_list)
-
-        # Remove data from finished simulation positions
-        # create list with lists of all shape positions
-        all_dim_list = [list(range(shape)) for shape in self.times.shape]
-        for dim, dim_list in enumerate(all_dim_list[1:]):
-            finished_sim_positions = all_finished_sim_positions[dim]
-            dim += 1
-            for finished_sim_position in finished_sim_positions:
-                dim_list.remove(finished_sim_position)
-            # make all arrays smaller
-            self.times = torch.index_select(self.times, dim=dim,
-                                            index=self.tensors.IntTensor(dim_list))
-            for property in self.properties:
-                property.array = torch.index_select(property.array,
-                                                    dim=dim,
-                                                    index=
-                                                    self.tensors.IntTensor(dim_list))
-            self.object_states = torch.index_select(self.object_states,
-                                                    dim=dim,
-                                                    index=self.tensors.IntTensor(dim_list))
-
-            for sim_parameter in self._all_simulation_parameters:
-                sim_parameter.value_array = torch.index_select(sim_parameter.value_array,
-                                                             dim=dim,
-                                                             index=
-                                                             self.tensors.IntTensor(dim_list))
-
-        self._simulation_array_size = [self._simulation_array_size[0],
-                                       *self.times.shape[1:]]
-=======
         self._remove_finished_simulations(iteration_nb)
->>>>>>> ecc40a057f7c6b4e292698b6883fd40945e7f23e
+
 
     def _add_objects_to_full_tensor(self):
         """
