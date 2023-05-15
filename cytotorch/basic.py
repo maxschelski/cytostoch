@@ -206,7 +206,8 @@ class DataExtraction():
                        <= position_end))
 
         # then sum across microtubules to get number of MTs at each position
-        data_array = torch.sum(data_array, dim=1)
+        data_array = torch.sum(data_array, dim=1,
+                               dtype=torch.int16)
 
         positions = torch.arange(min_position, max_position+resolution*0.9,
                                  resolution)

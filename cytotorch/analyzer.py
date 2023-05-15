@@ -516,4 +516,3 @@ class Analyzer():
             file_name = "_".join(column_names[1:])
             dataframe.to_feather(os.path.join(self.data_folder,
                                               file_name + ".feather"))
-            print(dataframe.columns)
