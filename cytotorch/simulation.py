@@ -785,7 +785,7 @@ class SSA():
                 property.array = torch.index_select(property.array,
                                                     dim=dim,
                                                     index=
-                                                    torch.IntTensor(dim_list))
+                                                    self.tensors.IntTensor(dim_list))
             self.object_states = torch.index_select(self.object_states,
                                                     dim=dim,
                                                     index=self.tensors.IntTensor(dim_list))
