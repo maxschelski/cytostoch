@@ -309,7 +309,7 @@ class SSA():
         if current_min_time >= self.min_time:
             return
 
-        self._remove_finished_simulations(iteration_nb)
+        self._remove_finished_sgit imulations(iteration_nb)
 
     def _add_objects_to_full_tensor(self):
         """
