@@ -41,7 +41,7 @@ class tRSSA():
     def start(self, time_step_size_simulation, time_depency_step_size=0.001):
 
         self.time_dependency_step_size = time_depency_step_size
-        # create bounds (upper and lower) for species
+        # create bounds (upper and lower) for objects
 
         # for time dependency get min and max points of time dependent function
         # first numerically simulate time dependent function over whole interval
@@ -65,6 +65,17 @@ class tRSSA():
                             (self.timesteps < time_step_size_simulation))
 
         # create bounds for propensities
+
+        # draw random numbers with lambda = upper bound
+
+        # check if random number is below lower bound
+
+        # check for remaining positions, whether actual propensity at time
+        # is higher than random number
+        # for all where not the case, add one to counter
+
+        # check whether object bounds hold, otherwise increase or decrease
+        # bounds
 
     def run_iteration(self):
         pass
