@@ -101,7 +101,7 @@ class SSA():
         self.object_removal = object_removal
         self.name = name
 
-        #os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256"
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
         # create tensors object to reference the correct tensor class
         # depending on the device
@@ -128,7 +128,7 @@ class SSA():
     def start(self, nb_simulations, min_time, data_extraction,data_folder,
               max_number_objects=None,
               ignore_errors=False, print_update_time_step=1,
-               nb_objects_added_per_step=5,
+               nb_objects_added_per_step=10,
                dynamically_increase_nb_objects=True, save_states=False,
               use_assertion_checks=True):
         """
@@ -161,7 +161,7 @@ class SSA():
 
     def _start(self, nb_simulations, min_time, data_extraction,data_folder,
                max_number_objects=None, ignore_errors=False,
-               print_update_time_step=1, nb_objects_added_per_step=5,
+               print_update_time_step=1, nb_objects_added_per_step=10,
                dynamically_increase_nb_objects=True, save_states=False,
                use_assertion_checks=True):
         """
@@ -274,16 +274,25 @@ class SSA():
     def _run_iteration(self, iteration_nb):
         # create tensor for x (position in neurite), l (length of microtubule)
         # and time
+        start = time.time()
         total_rates = self._get_total_and_single_rates_for_state_transitions()
         reaction_times = self._get_times_of_next_transition(total_rates)
+        # print(1, time.time() - start)
+        start = time.time()
 
         self._determine_next_transition(total_rates)
 
         self._determine_positions_of_transitions()
+        # print(2, time.time() - start)
+        start = time.time()
 
         self._execute_actions_on_objects(reaction_times)
+        # print(3, time.time() - start)
+        start = time.time()
 
         self._update_object_states()
+        # print(4, time.time() - start)
+        start = time.time()
 
         # remove objects based on properties
         objects_to_remove = self.object_removal.get_objects_to_remove()
@@ -294,9 +303,17 @@ class SSA():
         objects_to_remove = None
 
         self.times += reaction_times
+        # print(5, time.time() - start)
+        start = time.time()
 
         data = self.data_extraction.extract(self)
+        # print(6, time.time() - start)
+        start = time.time()
+
         self._save_data(data, iteration_nb)
+        # print(7, time.time() - start)
+        start = time.time()
+
         del data
 
         # self.get_tensor_memory()
@@ -306,6 +323,8 @@ class SSA():
         if self.dynamically_increase_nb_objects:
             self._add_objects_to_full_tensor()
 
+        # print(8, time.time() - start)
+        start = time.time()
         # only reduce array size, if not all simulations are done
         current_min_time = torch.min(self.times)
         if current_min_time >= self.min_time:
@@ -313,6 +332,8 @@ class SSA():
 
         self._remove_finished_simulations(iteration_nb)
 
+        # print(9, time.time() - start)
+        start = time.time()
 
     def _add_objects_to_full_tensor(self):
         """
@@ -326,6 +347,11 @@ class SSA():
         positions_object = torch.max(self.object_states[-1])
         if positions_object == 0:
             return None
+
+        # empty cache whenever the tensor size was changed
+        # print("\n EMPTY CACHE!")
+        torch.cuda.empty_cache()
+
         #max_pos_with_object = positions_object[:,0].max()
         #if (max_pos_with_object < (self.object_states.shape[0] - 1)):
         #    return None
@@ -655,8 +681,14 @@ class SSA():
         for action in self.actions:
             # get a mask that includes all objects on which the action should be
             # executed
+            start = time.time()
             if action.states is None:
                 action_positions = self.object_states > 0
+                # assume that almost always in all the simulations at least one
+                # there is at least one object
+                # even if not, the mask multiplication 
+                # will prevent wrong values
+                any_objects = True
             else:
                 action_positions = torch.zeros(self.object_states.shape,
                                                dtype=torch.bool)
@@ -664,36 +696,61 @@ class SSA():
                     action_positions = (action_positions |
                                         (self.object_states ==
                                          state.number))
-            if torch.count_nonzero(action_positions) == 0:
+                any_objects = action_positions.any()
+            if not any_objects:
                 continue
+            # print(3.1, time.time() - start)
+            start = time.time()
             object_property_array = action.object_property.array
             sim_array_shape = self.object_states.shape
             action_reaction_times = reaction_times.expand(*sim_array_shape)
             value_array = action.value_array
+            # print(3.2, time.time() - start)
+            start = time.time()
             value_array = value_array.expand(*self.object_states.shape)
 
+
+            #transformed_property_array = object_property_array + action_reaction_times*value_array*action_positions
             transformed_property_array = action.operation(object_property_array,
                                                           action_reaction_times,
                                                           value_array,
                                                           action_positions)
+            # print(3.3, time.time() - start)
+            start = time.time()
             transformed_property_array = transformed_property_array.bfloat16()
             object_property_array = transformed_property_array
+            # print(3.4, time.time() - start)
+            start = time.time()
 
             # prevent object properties going above min or max value
             min_property_value = action.object_property.min_value
             if min_property_value is not None:
                 objects_below_min = (object_property_array <
                                      min_property_value)
-                diff = min_property_value - object_property_array
-                object_property_array += diff * objects_below_min
+                # if max property is not a tensor, but just a single value
+                if type(min_property_value) != type(object_property_array):
+                    object_property_array[objects_below_min] = min_property_value
+                else:
+                    diff = min_property_value - object_property_array
+                    object_property_array += diff * objects_below_min
 
+            # print(3.5, time.time() - start)
+            # start = time.time()
             max_property_value = action.object_property.max_value
+
             if max_property_value is not None:
                 objects_above_max = (object_property_array >
                                      max_property_value)
-                diff = object_property_array - max_property_value
-                object_property_array -= diff*objects_above_max
+                # if max property is not a tensor, but just a single value
+                if type(max_property_value) != type(object_property_array):
+                    object_property_array[objects_above_max] = max_property_value
+                else:
+                    diff = object_property_array - max_property_value
+                    object_property_array -= diff*objects_above_max
+            action.object_property.array = object_property_array
+            # print(3.6, time.time() - start)
 
+            start = time.time()
         return None
 
     def _update_object_states(self):
@@ -715,7 +772,7 @@ class SSA():
                     object_property.array[transition_positions] = float("nan")
                 transition.transition_positions = None
                 continue
-            # if state started in state 0, add new entry in property array
+            # if state started in state 0, add new entry in property arrays
             if start_state != 0:
                 transition.transition_positions = None
                 continue
@@ -797,9 +854,13 @@ class SSA():
         # Remove data from finished simulation positions
         # create list with lists of all shape positions
         all_dim_list = [list(range(shape)) for shape in self.times.shape]
+        positions_removed = False
         for dim, dim_list in enumerate(all_dim_list[1:]):
             finished_sim_positions = all_finished_sim_positions[dim]
             dim += 1
+            if len(finished_sim_positions) == 0:
+                continue
+            positions_removed = True
             for finished_sim_position in finished_sim_positions:
                 dim_list.remove(finished_sim_position)
             # make all arrays smaller
@@ -820,53 +881,55 @@ class SSA():
                                                              index=
                                                              self.tensors.IntTensor(dim_list))
 
+        # clear cache if a position was removed and therefore tensor size changed
+        if positions_removed:
+            torch.cuda.empty_cache()
+
         self._simulation_array_size = [self._simulation_array_size[0],
                                        *self.times.shape[1:]]
 
         return None
 
-    def _save_data(self, data, iteration_nb):
+    def _save_data(self, data_dict, iteration_nb):
 
-        # check how much space is free on the GPU (if executed on GPU)
         if self.device == "GPU":
-            
-            torch.cuda.empty_cache()
+            # check if cache should be emptied
+
+
+            # check how much space is free on the GPU (if executed on GPU)
+            start = time.time()
+            #print(6.1, time.time() - start)
+            start = time.time()
             total_memory = torch.cuda.get_device_properties(0).total_memory
             reserved_memory = torch.cuda.memory_reserved(0)
             free_memory = (total_memory - reserved_memory)
 
-            if iteration_nb == 0:
-                self.initial_memory_used = reserved_memory
-            if iteration_nb == 1:
-                self.iteration_memory_used = (reserved_memory -
-                                              self.initial_memory_used)
+            # get maximum memory used in current iteration
+            iteration_memory_used = torch.cuda.max_memory_allocated()
+            torch.cuda.reset_max_memory_allocated()
 
-            # memory used by data
-            total_data_memory = 0
-            for tensor in [data, self.times, self.object_states]:
-                if type(tensor) == dict:
-                    for data_elements in tensor.values():
-                        size = (data_elements.element_size() *
-                                data_elements.nelement())
-                        total_data_memory += size
+            # print("RESERVED:", reserved_memory/1024/1024/1024,
+            # "   ALLOCATED:", torch.cuda.memory_allocated(0)/1024/1024/1024,
+            # "   ITERATION USED:", iteration_memory_used/1024/1024/1024,
+            # "   FREE RESERVED:", free_memory/1024/1024/1024,
+            # "   FREE ALLOCATED:",(total_memory-torch.cuda.memory_allocated(0))/1024/1024/1024)
 
-                else:
-                    size = (tensor.element_size() *
-                            tensor.nelement())
-                    total_data_memory += size
-
-
-            memory_used = min(self.iteration_memory_used,
-                              self.initial_memory_used)
-                              
+            #print(6.4, time.time() - start)    
+            #print("\nITERATION NB: ", iteration_nb)
             # if 2x space free on GPU than would be needed for data, keep on GPU
-            if free_memory > (2 * (memory_used + total_data_memory)):
-                self.all_iteration_nbs.append(iteration_nb)
-                self.all_data.append(copy.deepcopy(data))
-                self.all_times.append(torch.clone(self.times))
-                if self.save_states:
-                    self.all_states.append(torch.clone(self.object_states))
-                return None
+
+            # best performance is achieved with saving data every time!
+            # keep legacy code for saving at irregular intervals in, in case used later
+            """
+            #if False:#iteration_nb == 50:#free_memory > (2 * (memory_used + total_data_memory)):
+            #    start = time.time()
+            #    self.all_iteration_nbs.append(iteration_nb)
+            #    self.all_data.append(copy.deepcopy(data))
+            #    self.all_times.append(torch.clone(self.times))
+            #    if self.save_states:
+            #        self.all_states.append(torch.clone(self.object_states))
+                #print(6.5, time.time() - start)
+            #    return None
 
             self.all_iteration_nbs.append(iteration_nb)
             self.all_data.append(data)
@@ -904,21 +967,25 @@ class SSA():
              times_cpu, object_states_cpu) \
                 in zip(all_iteration_nbs, all_data_cpu,
                        all_times_cpu, all_object_states_cpu):
+            """
+            data_dict_cpu = {}
+            for keyword, data in data_dict.items():
+                data_dict_cpu[keyword] = data.cpu()
 
-            # save data to hard drive
-            for file_name, data_array in data_cpu.items():
-                file_path = os.path.join(self.data_folder,
-                                         file_name+"_"+str(iteration_nb)+".pt")
-                torch.save(data_array, file_path)
-
+        # save data to hard drive
+        for file_name, data_array in data_dict_cpu.items():
             file_path = os.path.join(self.data_folder,
-                                     "times_" + str(iteration_nb) + ".pt")
-            torch.save(self.times, file_path)
+                                        file_name+"_"+str(iteration_nb)+".pt")
+            torch.save(data_array, file_path)
 
-            if self.save_states:
-                file_path = os.path.join(self.data_folder,
-                                         "states_" + str(iteration_nb) + ".pt")
-                torch.save(self.object_states, file_path)
+        file_path = os.path.join(self.data_folder,
+                                    "times_" + str(iteration_nb) + ".pt")
+        torch.save(self.times, file_path)
+
+        if self.save_states:
+            file_path = os.path.join(self.data_folder,
+                                        "states_" + str(iteration_nb) + ".pt")
+            torch.save(self.object_states, file_path)
 
         return None
 
