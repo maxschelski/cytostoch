@@ -20,6 +20,10 @@ class Analyzer():
         self.simulation = simulation
         self.data_folder = data_folder
 
+        torch.set_default_tensor_type(torch.FloatTensor)
+        torch.set_default_device("cpu")
+        self.device = "cpu"
+
         # Per default, data folder will be used from the simulation object
         # but if the analyzer is used not directly after a simulation,
         # supplying a different data folder might make sense and is allowed
@@ -191,7 +195,7 @@ class Analyzer():
             if keyword_finder.search(file_name) is None:
                 continue
             file_path = os.path.join(self.data_folder, file_name)
-            new_times = torch.load(file_path)
+            new_times = torch.load(file_path).to(self.device)
             new_times = new_times.unsqueeze(0)
             new_shape = new_times.shape
             # combine all time and data arrays that have the same shape
@@ -255,10 +259,12 @@ class Analyzer():
         current_iteration_nb = 0
         array_resizer = None
         data_concat = torch.FloatTensor()
+        print(data_concat.device)
         # go through all time arrays while keeping track of the current
         # iteration_nb
         #change their size
         for data in data_list:
+            print(data.device)
             # get the current array resizer
             array_resizer = self.array_resizing_dict.get(current_iteration_nb,
                                                          array_resizer)
