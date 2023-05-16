@@ -199,18 +199,65 @@ class DataExtraction():
         indices = np.expand_dims(indices,
                                  tuple(range(1,len(position_start.shape))))
         indices = indices_tensor(indices)
+        
+        # split by simulations to reduce memory usage
+        # otherwise high memory usage leads to 
+        # massively increased processing time
+        # with this split, processing time increases linearly with
+        # array size 
 
-        # create boolean data array later by expanding each microtubule in space
-        # use index array to set all positions in boolean data array to True
-        # that are between start point and end point
-        data_array = ((indices.expand(-1, *position_start.shape[1:])
-                       >= position_start) &
-                      (indices.expand(-1, *position_start.shape[1:])
-                       <= position_end))
+        nb_objects = position_start.shape[1]
+        # find way to dynamically determine ideal step size!
+        step_size = 5
+        nb_steps = int(nb_objects/step_size)
+        start_nb_objects = torch.linspace(0, nb_objects-step_size, nb_steps)
+        all_data = 0
+        
+        for start_nb_object in start_nb_objects:
+            end_nb_object = int((start_nb_object + step_size).item())
+            start_nb_object = int(start_nb_object.item())
+            # create boolean data array later by expanding each microtubule in space
+            # use index array to set all positions in boolean data array to True
+            # that are between start point and end point
+            data_array = ((indices.expand(-1, step_size, *position_start.shape[2:])
+                        >= position_start[:, start_nb_object:end_nb_object]) &
+                        (indices.expand(-1, step_size, *position_start.shape[2:])
+                        <= position_end[:, start_nb_object:end_nb_object]))
 
-        # then sum across microtubules to get number of MTs at each position
-        data_array = torch.sum(data_array, dim=1,
-                               dtype=torch.int16)
+            # then sum across microtubules to get number of MTs at each position
+            data_array = torch.sum(data_array, dim=1,
+                                    dtype=torch.int16)
+
+            all_data = all_data + data_array
+
+        """
+        nb_simulations = position_start.shape[2]
+        # find way to dynamically determine ideal step size!
+        step_size = 100
+        nb_steps = int(nb_simulations/step_size)
+        start_nb_simulations = torch.linspace(0, nb_simulations-step_size, nb_steps)
+        all_data = indices_tensor([])
+        print("\n START!")
+        for start_nb_simulation in start_nb_simulations:
+            end_nb_simulation = int((start_nb_simulation + step_size).item())
+            start_nb_simulation = int(start_nb_simulation.item())
+            # create boolean data array later by expanding each microtubule in space
+            # use index array to set all positions in boolean data array to True
+            # that are between start point and end point
+            data_array = ((indices.expand(-1, position_start.shape[1], step_size, *position_start.shape[3:])
+                        >= position_start[:, :,start_nb_simulation:end_nb_simulation]) &
+                        (indices.expand(-1, position_start.shape[1], step_size, *position_start.shape[3:])
+                        <= position_end[:, :,start_nb_simulation:end_nb_simulation]))
+
+            # then sum across microtubules to get number of MTs at each position
+            data_array = torch.sum(data_array, dim=1,
+                                    dtype=torch.int16)
+            start = time.time()
+            all_data = torch.cat([all_data, data_array])
+            print(time.time() - start)
+        """
+
+        data_array = all_data
 
         positions = torch.arange(min_position, max_position+resolution*0.9,
                                  resolution)
