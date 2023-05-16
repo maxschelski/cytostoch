@@ -29,7 +29,7 @@ What classes?
 - action class (defines what happens to a property, gets property supplied and
                 what happens with it)
 - state class for each state
-- action state transition class (includes one transition, rates 
+- action stategit pu transition class (includes one transition, rates 
                                  (rate can be supplied as lifetime))
 """
 
@@ -552,10 +552,18 @@ class SSA():
                 property_values = get_property_vals(min_value, max_value,
                                                     nb_objects_with_states)
 
+                # if there is just one property value (its not a tensor)
+                # use another way of assinging values
+                # masked_scatter has advantage of much smaller memory footprint
+                # but when just assigning one value, memory footprint using
+                # mask directly is small
+            if type(property_values) != type(object_property.array):
+                object_property.array[
+                    object_state_mask] = property_values
+                continue
             object_property.array = object_property.array.masked_scatter(object_state_mask, 
                                                                         property_values)
-            
-            #object_property.array[object_state_mask] = property_values
+        return None
 
     def _get_total_and_single_rates_for_state_transitions(self):
         # get number of objects in each state
@@ -796,7 +804,7 @@ class SSA():
                 if type(property_values) != type(object_property.array):
                     object_property.array[
                         transition_positions] = property_values
-                    return None
+                    continue
                 object_property.array = object_property.array.masked_scatter(transition_positions,
                                                                              property_values)
         return None
@@ -860,7 +868,9 @@ class SSA():
             dim += 1
             if len(finished_sim_positions) == 0:
                 continue
+
             positions_removed = True
+
             for finished_sim_position in finished_sim_positions:
                 dim_list.remove(finished_sim_position)
             # make all arrays smaller
