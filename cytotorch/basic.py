@@ -155,15 +155,16 @@ class DataExtraction():
 
         # create tensors on correct device
         tensors = simulation_object.tensors
+        device = simulation_object.device
 
         # data type depends on dimension 0 - since that is the number of
         # different int values needed (int8 for <=256; int16 for >=256)
         # (dimension 0 is determined by max_x of neurite / resolution)
         if (position_dimension+1) < 256:
-            indices_tensor = tensors.ByteTensor
+            indices_tensor = torch.ByteTensor
             indices_dtype = torch.uint8
         else:
-            indices_tensor = tensors.ShortTensor
+            indices_tensor = torch.ShortTensor
             indices_dtype = torch.short
 
         # extract positions of the array that actually contains objects
@@ -198,7 +199,7 @@ class DataExtraction():
         indices = np.linspace(0,position_dimension, position_dimension+1)
         indices = np.expand_dims(indices,
                                  tuple(range(1,len(position_start.shape))))
-        indices = indices_tensor(indices)
+        indices = indices_tensor(indices).to(device=device)
         
         # split by simulations to reduce memory usage
         # otherwise high memory usage leads to 
@@ -236,7 +237,7 @@ class DataExtraction():
         step_size = 100
         nb_steps = int(nb_simulations/step_size)
         start_nb_simulations = torch.linspace(0, nb_simulations-step_size, nb_steps)
-        all_data = indices_tensor([])
+        all_data = indices_tensor([]).to(device=device)
         print("\n START!")
         for start_nb_simulation in start_nb_simulations:
             end_nb_simulation = int((start_nb_simulation + step_size).item())

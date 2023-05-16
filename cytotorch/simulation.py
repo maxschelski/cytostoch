@@ -106,9 +106,13 @@ class SSA():
         # create tensors object to reference the correct tensor class
         # depending on the device
         if (device == "GPU") & (torch.cuda.device_count() > 0):
-            self.device = device
+            for GPU_nb in range(torch.cuda.device_count()):
+                if torch.cuda.memory_reserved(GPU_nb) == 0:
+                    break
+            self.device = "cuda:"+str(GPU_nb)
             self.tensors = torch.cuda
             torch.set_default_tensor_type(torch.cuda.FloatTensor)
+            torch.set_default_device(self.device)
         else:
             self.device = "CPU"
             self.tensors = torch
@@ -219,7 +223,7 @@ class SSA():
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths]
 
-        self._zero_tensor = self.tensors.HalfTensor([0])
+        self._zero_tensor = torch.HalfTensor([0]).to(device=self.device)
 
         self._initialize_parameter_arrays(self._all_simulation_parameters,
                                           simulation_parameter_lengths)
@@ -426,7 +430,7 @@ class SSA():
             array = np.expand_dims(model_parameters.values, expand_dimensions)
             # save array in object, therefore also change objects saved in
             # self.transitions and self.actions
-            array = self.tensors.HalfTensor(array)
+            array = torch.HalfTensor(array).to(device=self.device)
             array = array.expand(1,*self._simulation_array_size[1:])
             model_parameters.value_array = array
             # assign model parameter to the correct dimension
@@ -454,11 +458,8 @@ class SSA():
             if state.initial_condition is None:
                 continue
             # expand the initial condition array, to add them up
-            if self.device == "GPU":
-                initial_cond = state.initial_condition.cuda()
-            else:
-                initial_cond = state.initial_condition
-            expanded_array = self.tensors.ShortTensor(initial_cond)
+            initial_cond = state.initial_condition
+            expanded_array = torch.ShortTensor(initial_cond).to(device=self.device)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
             nb_objects_with_states += expanded_array
 
@@ -483,11 +484,8 @@ class SSA():
                 continue
             # expand the initial condition array, to add them up and get number
             # of assigned objects for each simulation
-            if self.device == "GPU":
-                initial_cond = state.initial_condition.cuda()
-            else:
-                initial_cond = state.initial_condition
-            expanded_array = self.tensors.ShortTensor(initial_cond)
+            initial_cond = state.initial_condition
+            expanded_array = torch.ShortTensor(initial_cond).to(device=self.device)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
             object_state_mask = (self.index_array.expand(
@@ -567,7 +565,7 @@ class SSA():
 
     def _get_total_and_single_rates_for_state_transitions(self):
         # get number of objects in each state
-        nb_objects_all_states = self.tensors.ShortTensor()
+        nb_objects_all_states = torch.ShortTensor().to(device=self.device)
         # add 1 to number of states since 0 is not explicitly defined
         for state in range(1,len(self.states) + 1):
             nb_objects = torch.sum(self.object_states == state, dim=0)
@@ -577,7 +575,7 @@ class SSA():
                                                nb_objects))
         # get rates for all state transitions, depending on number of objects
         # in corresponding start state of transition
-        all_transition_rates = self.tensors.HalfTensor()
+        all_transition_rates = torch.HalfTensor().to(device=self.device)
         for transition in self.transitions:
             if transition.start_state is None:
                 # for state 0, the number of objects in state 0 is of course
@@ -874,22 +872,21 @@ class SSA():
             for finished_sim_position in finished_sim_positions:
                 dim_list.remove(finished_sim_position)
             # make all arrays smaller
+            dim_list_tensor = torch.IntTensor(dim_list).to(device=self.device)
             self.times = torch.index_select(self.times, dim=dim,
-                                            index=self.tensors.IntTensor(dim_list))
+                                            index=dim_list_tensor)
             for property in self.properties:
                 property.array = torch.index_select(property.array,
                                                     dim=dim,
-                                                    index=
-                                                    self.tensors.IntTensor(dim_list))
+                                                    index=dim_list_tensor)
             self.object_states = torch.index_select(self.object_states,
                                                     dim=dim,
-                                                    index=self.tensors.IntTensor(dim_list))
+                                                    index=dim_list_tensor)
 
             for sim_parameter in self._all_simulation_parameters:
                 sim_parameter.value_array = torch.index_select(sim_parameter.value_array,
                                                              dim=dim,
-                                                             index=
-                                                             self.tensors.IntTensor(dim_list))
+                                                             index=dim_list_tensor)
 
         # clear cache if a position was removed and therefore tensor size changed
         if positions_removed:
@@ -902,7 +899,7 @@ class SSA():
 
     def _save_data(self, data_dict, iteration_nb):
 
-        if self.device == "GPU":
+        if self.device.find("cuda") != -1:
             # check if cache should be emptied
 
 
