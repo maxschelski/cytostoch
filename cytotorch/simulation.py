@@ -276,7 +276,7 @@ class SSA():
             # print regular current min time in all simulations
             whole_time = current_min_time.item() // print_update_time_step
             if whole_time not in times_tracked:
-                print("\n",iteration_nb, "; Current time: ", whole_time)
+                print("\n",iteration_nb, "; Current time: ", whole_time * print_update_time_step)
                 times_tracked.add(whole_time)
             self._run_iteration(iteration_nb)
             iteration_nb += 1
