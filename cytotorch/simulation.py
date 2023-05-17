@@ -924,7 +924,7 @@ class SSA():
 
             # get maximum memory used in current iteration
             iteration_memory_used = torch.cuda.max_memory_allocated()
-            torch.cuda.reset_max_memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
 
             # print("RESERVED:", reserved_memory/1024/1024/1024,
             # "   ALLOCATED:", torch.cuda.memory_allocated(0)/1024/1024/1024,
