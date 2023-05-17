@@ -1,8 +1,6 @@
 # Cytotorch
- Stochastic simulation (SSA) of microtubules in neurites, implemented in Pytorch for fast parallel processing. 
+ Stochastic simulation (SSA) of microtubules in neurites, implemented in Pytorch for fast parallel processing using GPUs. 
 
-TIME DEPENDENCY ONLY WORKS IF INTEGRAL IS SUPPLIED IN FUNCTION.
+For an example of a simulation of microtubules in neurites, see "stochastic_microtubule_model.py" in the folder "scripts".
 
-!STILL HEAVILY UNDER DEVELOPMENT!
-
-FIRST WORKING VERSION EXPECTED 17th of May 2023
+TIME DEPENDENCY DOES NOT WORK YET!
