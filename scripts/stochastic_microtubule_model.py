@@ -38,7 +38,7 @@ def nucleation(time_array, frequency=0.2, min_nucleation_fraction=0.5):
 max_nucleation_rates = np.linspace(1, 10, 5)
 nucleation = StateTransition(end_state=growing_state, 
                              rates=max_nucleation_rates,
-                              time_dependency=nucleation)
+                              time_dependency=None)
 
 MT_lifetimes = np.linspace(1, 60, 5)
 catastrophe = StateTransition(start_state=growing_state,
