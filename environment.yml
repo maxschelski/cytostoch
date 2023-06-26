@@ -1,6 +1,7 @@
 name: cytotorch
 channels:
   - defaults
+  - pytorch
 dependencies:
   - pytorch-cuda=11.8
   - pytorch=2.0.1
