@@ -1,12 +1,13 @@
-name: cytotorch
+name: cytotorch2
 channels:
   - defaults
   - pytorch
+  - nvidia
 dependencies:
+  - pytorch
   - pytorch-cuda=11.8
-  - pytorch=2.0.1
-  - pyarrow=11.0.0
-  - numpy=1.24.3
-  - pandas=1.5.3
+  - torchvision
+  - torchaudio
+  - pyarrow
+  - pandas
   - spyder
-
