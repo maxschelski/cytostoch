@@ -11,6 +11,7 @@ from cytotorch.basic import (ObjectProperty, PropertyGeometry, Action, State,
                              ObjectRemovalCondition, StateTransition, 
                              Dimension, DataExtraction)
 from cytotorch import analyzer
+import time
 
 max_x = 20
 position = ObjectProperty(max_value=max_x, start_value=[0, max_x])
@@ -26,7 +27,7 @@ MTRF = Action(position, operation="subtract", values=np.linspace(0,2,5))
 out_of_neurite = ObjectRemovalCondition([length, position], "sum_smaller_than",
                                         threshold=0)
 
-def nucleation(time_array, frequency=0.2, min_nucleation_fraction=0.5):
+def nucleation_time(time_array, frequency=0.2, min_nucleation_fraction=0.5):
     """
     Get nucleation rate at defined time
     """
@@ -38,7 +39,7 @@ def nucleation(time_array, frequency=0.2, min_nucleation_fraction=0.5):
 max_nucleation_rates = np.linspace(1, 10, 5)
 nucleation = StateTransition(end_state=growing_state, 
                              rates=max_nucleation_rates,
-                              time_dependency=nucleation)
+                              time_dependency=None)
 
 MT_lifetimes = np.linspace(1, 60, 5)
 catastrophe = StateTransition(start_state=growing_state,
@@ -56,14 +57,17 @@ MT_simulation = simulation.SSA(states=[growing_state],
                                object_removal=out_of_neurite)
 
 nb_simulations = 100
-min_t = 0.1
-folder = "C:\\Users\\Maxsc\\Desktop\\simulation"
+min_t = 60 
+# folder = "C:\\Users\\Maxsc\\Desktop\\simulation"
+folder = "E:\\Max\\simulation\\05_200_60"
 # folder = "C:\\Users\\Maxsc\\Desktop\\sim_test"
+start = time.time()
 MT_simulation.start(nb_simulations, min_t, data_extraction=data_extractor,
-                    data_folder=folder)
+                    data_folder=folder, print_update_time_step=0.5)
 
 # MT_simulation.save(time_resolution=0.5, max_time = 60, 
 #                    data_folder=folder)
 
 analysis = analyzer.Analyzer(data_folder=folder)
-analysis.start(time_resolution=0.01, max_time=0.1)
+analysis.start(time_resolution=0.5, max_time=min_t)
+print("TIME: ", time.time() - start)
