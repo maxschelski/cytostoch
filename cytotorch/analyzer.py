@@ -98,7 +98,7 @@ class Analyzer():
 
         timestep_changes = self._get_timestep_changes_and_repeats(all_times)
 
-        time_array = self._get_equal_timesteps_array(all_times,
+        time_array, repeated_time_mask = self._get_equal_timesteps_array(all_times,
                                                      timestep_changes,
                                                      type="time")
 
@@ -110,17 +110,18 @@ class Analyzer():
             new_data, _ = self._load_data(file_name_keyword=data_keyword)
             new_data = self._equalize_object_nb(new_data)
             new_data = self._concat_arrays_with_removed_param_vals(new_data)
-            new_data = self._get_equal_timesteps_array(new_data,
-                                                       timestep_changes)
+            new_data,_ = self._get_equal_timesteps_array(new_data,
+                                                       timestep_changes,
+                                                       repeated_time_mask)
+
             # sort data by number of datapoints for each timepoint
             # since for each different number of datapoints, a new dataframe
-            all_data[new_data.shape[1]] = {}
+            if new_data.shape[1] not in all_data:
+                all_data[new_data.shape[1]] = {}
             all_data[new_data.shape[1]][data_keyword] = new_data
 
         all_data = self._add_single_datapoint_data_to_other_sets(all_data)
-
         self._save_all(all_data, time_array, parameters)
-
 
         # get expected number of nonzero elements
         # expected_nb_nonzero_elements = ((self.max_timestep+1) *
@@ -163,7 +164,7 @@ class Analyzer():
             new_iteration_nb = iteration_nb.zfill(len(str(max_nb)))
             new_file_name = file_name.replace(iteration_nb+".pt",
                                          new_iteration_nb+".pt")
-            os.rename(os.path.join(self.data_folder, file_name),
+            os.replace(os.path.join(self.data_folder, file_name),
                       os.path.join(self.data_folder, new_file_name))
         return None
 
@@ -259,12 +260,10 @@ class Analyzer():
         current_iteration_nb = 0
         array_resizer = None
         data_concat = torch.FloatTensor()
-        print(data_concat.device)
         # go through all time arrays while keeping track of the current
         # iteration_nb
         #change their size
         for data in data_list:
-            print(data.device)
             # get the current array resizer
             array_resizer = self.array_resizing_dict.get(current_iteration_nb,
                                                          array_resizer)
@@ -384,6 +383,7 @@ class Analyzer():
         return timestep_changes
 
     def _get_equal_timesteps_array(self, input_array, timestep_changes,
+                                   repeated_time_mask=None,
                                    type=None):
         # get timestep changes to same shape a input array...
         # firt change view though
@@ -391,6 +391,7 @@ class Analyzer():
         input_array = input_array.expand([timestep_changes.shape[0],
                                           input_array.shape[1],
                                           *timestep_changes.shape[2:]])
+
         timestep_changes = timestep_changes.expand(input_array.shape)
 
         # move time axis to last position so that all timepoints of the
@@ -433,11 +434,12 @@ class Analyzer():
             # assert used_timepoints.max() <= (self.max_time +
             #                                  self.time_resolution)
 
-        repeated_time_mask = self._get_repeated_timesteps_mask(data_timesteps)
+        if repeated_time_mask is None:
+            repeated_time_mask = self._get_repeated_timesteps_mask(data_timesteps)
         # Use mask to set values of all data arrays to nan
-        data_timesteps[repeated_time_mask] = float("nan")
+        data_timesteps[repeated_time_mask.expand(data_timesteps.shape)] = float("nan")
 
-        return data_timesteps
+        return data_timesteps, repeated_time_mask
 
     def _get_repeated_timesteps_mask(self, time_array):
         # create array for all timepoints
@@ -507,7 +509,7 @@ class Analyzer():
             column_names.append("time")
             # next add all simulation parameters
             for name, parameter in parameters.items():
-                data_values.append(parameter.expand(data_shape)
+                data_values.append(parameter.cpu().expand(data_shape)
                                    .flatten().unsqueeze(1))
                 column_names.append(name)
 
@@ -519,6 +521,7 @@ class Analyzer():
 
             data = torch.concat(data_values, dim=1)
             dataframe = pd.DataFrame(data=data, columns=column_names)
-            file_name = "_".join(column_names[1:])
+            # file_name = "_".join(column_names[1:])
+            file_name = "data"
             dataframe.to_feather(os.path.join(self.data_folder,
                                               file_name + ".feather"))

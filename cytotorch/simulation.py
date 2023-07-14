@@ -8,6 +8,7 @@ import copy
 import numpy as np
 import pandas as pd
 import time
+import shutil
 import sys
 import gc
 import os
@@ -116,7 +117,7 @@ class SSA():
 
         # create tensors object to reference the correct tensor class
         # depending on the device
-        if (device == "GPU") & (torch.cuda.device_count() > 0):
+        if (device.lower() == "gpu") & (torch.cuda.device_count() > 0):
             for GPU_nb in range(torch.cuda.device_count()):
                 if torch.cuda.memory_reserved(GPU_nb) == 0:
                     break
@@ -125,7 +126,7 @@ class SSA():
             torch.set_default_tensor_type(torch.cuda.FloatTensor)
             torch.set_default_device(self.device)
         else:
-            self.device = "CPU"
+            self.device = "cpu"
             self.tensors = torch
             torch.set_default_tensor_type(torch.FloatTensor)
 
@@ -135,17 +136,23 @@ class SSA():
             state.name += "_" + str(state.number)
 
         for transition in self.transitions:
-            if transition.name == "":
+            if transition.name != "":
                 continue
-            transition.name = ("transition_from" +str(self.start_state.number) +
-                               "_to" + str(self.end_state.number))
+            start_state = transition.start_state
+            if start_state is not None:
+                start_state = start_state.number
+            end_state = transition.end_state
+            if end_state is not None:
+                end_state = end_state.number
+            transition.name = ("trans_" + str(start_state) +
+                               "to" + str(end_state))
 
     def start(self, nb_simulations, min_time, data_extraction,data_folder,
               max_number_objects=None,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
                dynamically_increase_nb_objects=True, save_states=False,
-              use_assertion_checks=True):
+              use_assertion_checks=True, reset_folder=True):
         """
 
         Args:
@@ -167,7 +174,7 @@ class SSA():
                         print_update_time_step,
                         nb_objects_added_per_step,
                         dynamically_increase_nb_objects,save_states,
-                        use_assertion_checks)
+                        use_assertion_checks, reset_folder)
 
     def save(self, time_resolution, max_time):
         analysis = analyzer.Analyzer(simulation=self)
@@ -178,7 +185,7 @@ class SSA():
                max_number_objects=None, ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                dynamically_increase_nb_objects=True, save_states=False,
-               use_assertion_checks=True):
+               use_assertion_checks=True, reset_folder=True):
         """
 
         Args:
@@ -189,6 +196,10 @@ class SSA():
                 simulated. Determines array size
         Returns:
         """
+        if reset_folder:
+            shutil.rmtree(data_folder)
+            os.mkdir(data_folder)
+
         self.min_time = min_time
         self.data_extraction = data_extraction
         self.data_folder = data_folder
@@ -278,7 +289,9 @@ class SSA():
             if whole_time not in times_tracked:
                 print("\n",iteration_nb, "; Current time: ", whole_time * print_update_time_step)
                 times_tracked.add(whole_time)
+
             self._run_iteration(iteration_nb)
+
             iteration_nb += 1
 
         removed_pos_file = os.path.join(self.data_folder,
@@ -986,9 +999,9 @@ class SSA():
                 in zip(all_iteration_nbs, all_data_cpu,
                        all_times_cpu, all_object_states_cpu):
             """
-            data_dict_cpu = {}
-            for keyword, data in data_dict.items():
-                data_dict_cpu[keyword] = data.cpu()
+        data_dict_cpu = {}
+        for keyword, data in data_dict.items():
+            data_dict_cpu[keyword] = data.cpu()
 
         # save data to hard drive
         for file_name, data_array in data_dict_cpu.items():
@@ -1008,7 +1021,6 @@ class SSA():
         return None
 
     def _save_simulation_parameters(self):
-
         for parameter in self._all_simulation_parameters:
             file_name = "param_"+parameter.name+".pt"
             torch.save(parameter.value_array, os.path.join(self.data_folder,
