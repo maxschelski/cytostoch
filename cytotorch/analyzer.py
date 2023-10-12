@@ -9,7 +9,7 @@ import time
 
 class Analyzer():
 
-    def __init__(self, simulation=None, data_folder = None):
+    def __init__(self, simulation=None, data_folder = None, device="gpu"):
         """
 
         """
@@ -20,9 +20,19 @@ class Analyzer():
         self.simulation = simulation
         self.data_folder = data_folder
 
-        torch.set_default_tensor_type(torch.FloatTensor)
-        torch.set_default_device("cpu")
-        self.device = "cpu"
+        if (device.lower() == "gpu") & (torch.cuda.device_count() > 0):
+            # use GPU that is not used already, in case of multiple GPUs
+            for GPU_nb in range(torch.cuda.device_count()):
+                if torch.cuda.memory_reserved(GPU_nb) == 0:
+                    break
+            self.device = "cuda:"+str(GPU_nb)
+            self.tensors = torch.cuda
+            torch.set_default_tensor_type(torch.cuda.FloatTensor)
+            torch.set_default_device(self.device)
+        else:
+            self.device = "cpu"
+            self.tensors = torch
+            torch.set_default_tensor_type(torch.FloatTensor)
 
         # Per default, data folder will be used from the simulation object
         # but if the analyzer is used not directly after a simulation,
@@ -48,9 +58,14 @@ class Analyzer():
         self.max_time = max_time
         self.use_assertion_checks = use_assertion_checks
 
-        self._rename_files_for_sorting()
+        print("Starting renaming files...")
 
-        all_times, params_removed = self._load_data(file_name_keyword="times")
+        self._rename_files_for_sorting(self.data_folder)
+
+        print("Starting loading time files...")
+
+        all_times, params_removed = self._load_data(self.data_folder,
+                                                    file_name_keyword="times")
 
         parameters = self._load_parameters()
 
@@ -72,11 +87,13 @@ class Analyzer():
         # Reconstruct full time arrays by going through removed param values
         # grouped by timepoint
         # create list of ALL indices for all dimensions from first timepoint
-        self.all_dim_list = [torch.IntTensor(range(shape))
-                        for shape in all_times[0].shape[2:]]
+        self.all_dim_list = [torch.IntTensor(range(shape)).to(self.device)
+                             for shape in all_times[0].shape[2:]]
 
         removed_param_vals.groupby(["iteration_nb"]
                                    ).apply(self._build_array_resize_dict)
+
+        print("Starting concatenating arrays with removed params")
 
         all_times = self._concat_arrays_with_removed_param_vals(all_times)
 
@@ -102,26 +119,41 @@ class Analyzer():
                                                      timestep_changes,
                                                      type="time")
 
-        data_keywords = self._get_data_keywords()
-        data_keywords.remove("times")
+        # go through each folder that contains sub data
+        # There is one folder for each function in DataExtraction used.
+        # Time and parameter data is in the parent folder and therefore does
+        # not need to be looked at per folder (therefore before this for loop)
+        for folder_name in os.listdir(self.data_folder):
+            if not folder_name.startswith("_data"):
+                continue
+            data_path = os.path.join(self.data_folder, folder_name)
+            if not os.path.isdir(data_path):
+                continue
+            self._rename_files_for_sorting(data_path)
+            data_keywords = self._get_data_keywords(data_path)
+            if "times" in data_keywords:
+                data_keywords.remove("times")
+            all_data = {}
+            for data_keyword in data_keywords:
+                new_data, _ = self._load_data(data_path,
+                                              file_name_keyword=data_keyword)
+                new_data = self._equalize_object_nb(new_data)
+                try:
+                    new_data = torch.concat(new_data)
+                except:
+                    concat_func = self._concat_arrays_with_removed_param_vals
+                    new_data = concat_func(new_data)
+                new_data,_ = self._get_equal_timesteps_array(new_data,
+                                                             timestep_changes,
+                                                             repeated_time_mask)
+                # sort data by number of datapoints for each timepoint
+                # since for each different number of datapoints, a new dataframe
+                if new_data.shape[1] not in all_data:
+                    all_data[new_data.shape[1]] = {}
+                all_data[new_data.shape[1]][data_keyword] = new_data
 
-        all_data = {}
-        for data_keyword in data_keywords:
-            new_data, _ = self._load_data(file_name_keyword=data_keyword)
-            new_data = self._equalize_object_nb(new_data)
-            new_data = self._concat_arrays_with_removed_param_vals(new_data)
-            new_data,_ = self._get_equal_timesteps_array(new_data,
-                                                       timestep_changes,
-                                                       repeated_time_mask)
-
-            # sort data by number of datapoints for each timepoint
-            # since for each different number of datapoints, a new dataframe
-            if new_data.shape[1] not in all_data:
-                all_data[new_data.shape[1]] = {}
-            all_data[new_data.shape[1]][data_keyword] = new_data
-
-        all_data = self._add_single_datapoint_data_to_other_sets(all_data)
-        self._save_all(all_data, time_array, parameters)
+            all_data = self._add_single_datapoint_data_to_other_sets(all_data)
+            self._save_all(all_data, time_array, parameters, data_path)
 
         # get expected number of nonzero elements
         # expected_nb_nonzero_elements = ((self.max_timestep+1) *
@@ -130,12 +162,12 @@ class Analyzer():
         # Load all files of one type from data_folder
         # each file type has a unique starting name, until "_number"
 
-    def _get_data_keywords(self):
+    def _get_data_keywords(self, data_folder):
         data_keyword_finder = re.compile("([\s\S]+)_[\d]+.pt")
         all_data_keyword = set()
         #rename files to be sorted for incrementing time when sorted by name
         max_nb = 0
-        for file_name in sorted(os.listdir(self.data_folder)):
+        for file_name in sorted(os.listdir(data_folder)):
             if file_name.startswith("param_"):
                 continue
             data_keyword = data_keyword_finder.search(file_name)
@@ -145,27 +177,30 @@ class Analyzer():
             all_data_keyword.add(data_keyword)
         return all_data_keyword
 
-    def _rename_files_for_sorting(self):
+    def _rename_files_for_sorting(self, data_folder):
         iteration_nb_finder = re.compile("[\D]([\d]+).pt")
         #rename files to be sorted for incrementing time when sorted by name
         max_nb = 0
-        for file_name in sorted(os.listdir(self.data_folder)):
+        for file_name in sorted(os.listdir(data_folder)):
             iteration_nb = iteration_nb_finder.search(file_name)
             if iteration_nb is None:
                 continue
             iteration_nb = iteration_nb.group(1)
             max_nb = max(max_nb, int(iteration_nb))
 
-        for file_name in sorted(os.listdir(self.data_folder)):
+        for file_name in sorted(os.listdir(data_folder)):
             iteration_nb = iteration_nb_finder.search(file_name)
             if iteration_nb is None:
                 continue
             iteration_nb = iteration_nb.group(1)
+            # check whether renaming is needed
+            if len(iteration_nb) == len(str(max_nb)):
+                continue
             new_iteration_nb = iteration_nb.zfill(len(str(max_nb)))
             new_file_name = file_name.replace(iteration_nb+".pt",
                                          new_iteration_nb+".pt")
-            os.replace(os.path.join(self.data_folder, file_name),
-                      os.path.join(self.data_folder, new_file_name))
+            os.replace(os.path.join(data_folder, file_name),
+                      os.path.join(data_folder, new_file_name))
         return None
 
 
@@ -181,48 +216,50 @@ class Analyzer():
                 continue
             param_name = param_name.group(1)
             file_path = os.path.join(self.data_folder, file_name)
-            parameters[param_name] = torch.load(file_path)
+            parameters[param_name] = torch.load(file_path,
+                                                map_location=torch.device(self.device))
         return parameters
 
 
-    def _load_data(self, file_name_keyword):
+    def _load_data(self, data_folder, file_name_keyword):
         keyword_finder = re.compile(file_name_keyword+"_[\d]+.pt")
-        all_times = []
+        all_data = []
         old_shape = ()
-        new_time_array = None
+        new_data_array = None
         params_removed = False
-        # Load all time files, then concatenate together
-        for file_name in sorted(os.listdir(self.data_folder)):
+        # Load all data files, then concatenate together
+        file_nb = 0
+        for file_name in sorted(os.listdir(data_folder)):
             if keyword_finder.search(file_name) is None:
                 continue
-            file_path = os.path.join(self.data_folder, file_name)
-            new_times = torch.load(file_path).to(self.device)
-            new_times = new_times.unsqueeze(0)
-            new_shape = new_times.shape
+            file_nb += 1
+            file_path = os.path.join(data_folder, file_name)
+            new_data = torch.load(file_path,
+                                   map_location=torch.device(self.device))
+            # new_data = new_data.unsqueeze(0)
+            new_shape = new_data.shape
             # combine all time and data arrays that have the same shape
             # by opening a new array when the shape changes and concatenating next
             # arrays to it
             if new_shape != old_shape:
-                if new_time_array is not None:
+                if new_data_array is not None:
                     # compare shapes without the first two dimension (since the
                     # second dimension indicates the number of objects,
                     # which does not inform about whether parameter values
                     # were removed)
                     if new_shape[2:] != old_shape[2:]:
                         params_removed = True
-                    all_times.append(new_time_array)
-                new_time_array = new_times
+                    all_data.append(torch.concat(new_data_array))
+                new_data_array = [new_data]
                 old_shape = new_shape
             else:
-                new_time_array = torch.concat([new_time_array,
-                                               new_times])
+                new_data_array.append(new_data)
 
-        all_times.append(new_time_array)
+        all_data.append(torch.concat(new_data_array))
 
-        return all_times, params_removed
+        return all_data, params_removed
 
     def _build_array_resize_dict(self, removed_params):
-
         iteration_nb = removed_params["iteration_nb"].unique()[0]
         removed_params = removed_params.set_index("dimension")
         for dim in range(len(self.all_dim_list)):
@@ -241,15 +278,16 @@ class Analyzer():
             # positions in that dimension
             # therefore, create new tensor from that perspective,
             # with removed positions set to -1
-            nb_nonzero = np.count_nonzero(self.all_dim_list[dim] > -1)
+            nb_nonzero = torch.count_nonzero(self.all_dim_list[dim] > -1)
             new_indices = torch.IntTensor(range(0, nb_nonzero))
             new_indices[removed_positions] = -1
             # removed positions will also shift the dimensions
             # to account for that map all non -1 positions
             # to integers from 0 to (len(non -1 positions) - 1)
-            nb_nonzero = np.count_nonzero(new_indices > -1)
+            nb_nonzero = torch.count_nonzero(new_indices > -1)
             re_numbered_indices = torch.IntTensor(range(0, nb_nonzero))
             new_indices[new_indices > -1] = re_numbered_indices
+            new_indices = new_indices.to(self.device)
             self.all_dim_list[dim][self.all_dim_list[dim] > -1] = new_indices
         # save array resizing information for all dimensions in
         # current iteration
@@ -259,10 +297,11 @@ class Analyzer():
         # use this index list to create equal sized arrays
         current_iteration_nb = 0
         array_resizer = None
-        data_concat = torch.FloatTensor()
+        data_concat = torch.FloatTensor().to(self.device)
         # go through all time arrays while keeping track of the current
         # iteration_nb
-        #change their size
+        # change their size
+        new_data_list = []
         for data in data_list:
             # get the current array resizer
             array_resizer = self.array_resizing_dict.get(current_iteration_nb,
@@ -280,7 +319,7 @@ class Analyzer():
                 ended_sim_marker = torch.clone(dim_resizer)
 
                 # index_select does not work with index -1
-                dim_resizer[dim_resizer <0] = 0
+                dim_resizer[dim_resizer < 0] = 0
                 # resize the array by selecting the dimensions based on
                 # the array resizer, also duplicating positions,
                 # in order to get the array to the full size (same size as
@@ -312,7 +351,9 @@ class Analyzer():
                 new_data += ended_sim_marker
             new_data[new_data < 0] = -1
             # concatenate newly enlarged array to previous arrays
-            data_concat = torch.concat([data_concat, new_data])
+            new_data_list.append(new_data)
+
+        data_concat = torch.concat([data_concat, *new_data_list])
 
         return data_concat
 
@@ -377,6 +418,7 @@ class Analyzer():
         # simulation
         # and that this number is the expected (max) number of timesteps
         jump_sum = torch.sum(timestep_changes, dim=0)
+
         assert ((jump_sum.min() == jump_sum.max()) &
                 (jump_sum.min() == self.max_timestep + 1))
 
@@ -490,13 +532,17 @@ class Analyzer():
             del all_data[1]
         return all_data
 
-    def _save_all(self, all_data, time_array, parameters):
+    def _save_all(self, all_data, time_array, parameters, data_folder):
+        data_shapes = None
         for nb_datapoints, data_dict in all_data.items():
             # get datashapes
             all_data_shapes = [data.shape for data in data_dict.values()]
-            if nb_datapoints != 1:
+            if (nb_datapoints != 1):
                 data_shapes = [shape for shape in all_data_shapes
                                if shape[1] != 1]
+            if data_shapes is None:
+                data_shapes = [shape for shape in all_data_shapes]
+
             data_shape = data_shapes[0]
 
             # prepare data to be saved in dataframe
@@ -507,6 +553,14 @@ class Analyzer():
             data_values.append(time_array.expand(data_shape)
                                .flatten().unsqueeze(1))
             column_names.append("time")
+
+            # add information about simulation number
+            simulation_array_shape = [1 for _ in data_shape]
+            simulation_array_shape[2] = data_shape[2]
+            simulation_array = torch.arange(data_shape[2]).view(simulation_array_shape)
+            data_values.append(simulation_array.expand(data_shape).flatten().unsqueeze(1))
+            column_names.append("simulation_nb")
+
             # next add all simulation parameters
             for name, parameter in parameters.items():
                 data_values.append(parameter.cpu().expand(data_shape)
@@ -523,5 +577,5 @@ class Analyzer():
             dataframe = pd.DataFrame(data=data, columns=column_names)
             # file_name = "_".join(column_names[1:])
             file_name = "data"
-            dataframe.to_feather(os.path.join(self.data_folder,
+            dataframe.to_feather(os.path.join(data_folder,
                                               file_name + ".feather"))
