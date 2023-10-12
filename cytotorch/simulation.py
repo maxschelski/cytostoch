@@ -151,7 +151,7 @@ class SSA():
               max_number_objects=None,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
-              max_iters_no_data_extraction=10000,
+              max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=True, save_states=False,
               use_assertion_checks=True, reset_folder=True):
         """
@@ -188,7 +188,7 @@ class SSA():
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                max_number_objects=None, ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
-                max_iters_no_data_extraction=10000,
+                max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=True, save_states=False,
                use_assertion_checks=True, reset_folder=True):
         """
@@ -253,7 +253,6 @@ class SSA():
         else:
             self.max_number_objects = max_number_objects
 
-
         # array size contains for each combination of parameters to explore
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths]
@@ -303,6 +302,7 @@ class SSA():
         self.data_buffer = []
         self.last_data_extraction = 0
         self.last_data_saving = 0
+
         while True:
             current_min_time = torch.min(self.times)
             if current_min_time >= min_time:
@@ -315,17 +315,16 @@ class SSA():
                 print(time.time() - start_time)
                 start_time = time.time()
                 times_tracked.add(whole_time)
-                if len(self.data_buffer) > 0:
-                    # print("\n")
-                    data_keyword_to_analyze = []
-                    for keyword, data_extraction in data_extractions.items():
-                        if data_extraction.print_regularly:
-                            data_keyword_to_analyze.append(keyword)
-                    for keyword in data_keyword_to_analyze:
-                        data_to_print = self.data_buffer[-1][keyword]
-                        for data_name, data_array in data_to_print.items():
-                            print(data_name," : ",
-                                  torch.nanmean(data_array.to(torch.float)).item())
+                # only print data if the current data was not yet printed
+                # and if there is data buffer to be printed
+                for keyword, data_extraction in data_extractions.items():
+                    if not data_extraction.print_regularly:
+                        continue
+                    data = data_extraction.extract(self)
+                    for data_name, data_array in data.items():
+                        mean = torch.nanmean(data_array.to(torch.float))
+                        if (not np.isnan(mean.item())) & (mean.item() != 0):
+                            print(data_name," : ",mean.item())
 
             self._run_iteration(iteration_nb)
 
@@ -366,11 +365,6 @@ class SSA():
         # print(3, time.time() - start)
         start = time.time()
 
-        # if np.nanmin(self.properties[1].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]) < 0:
-        #     print(self.object_states[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-        #     print(self.properties[1].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-        #     dasd
-
         self._update_object_states()
         # print(4, time.time() - start)
         start = time.time()
@@ -404,7 +398,9 @@ class SSA():
                 self.max_iters_no_data_extraction):
             all_concat_data = self._concat_data_from_buffer()
             self._save_data(all_concat_data, iteration_nb)
-            self.lat_data_saving = iteration_nb
+            self.last_data_saving = iteration_nb
+            del all_concat_data
+            gc.collect
 
         if self.dynamically_increase_nb_objects:
             positions_object = torch.max(self.object_states[-1])
@@ -415,15 +411,10 @@ class SSA():
                 if self.last_data_extraction != iteration_nb:
                     self.data_buffer.append(self._extract_data())
 
-                    # print(66, time.time() - start)
-                    start = time.time()
-
                     if self.device.find("cuda") != -1:
                         self._free_gpu_memory()
 
                     self._save_times_and_object_states(iteration_nb)
-                    # self._save_data(data, iteration_nb)
-                    # print(77, time.time() - start)
                     self.last_data_extraction = iteration_nb
 
                 start = time.time()
@@ -465,9 +456,10 @@ class SSA():
                 self._save_data(all_concat_data, iteration_nb)
                 self.last_data_saving = iteration_nb
                 # print(999, time.time() - start)
+                del all_concat_data
+                gc.collect
 
             # print(11111, time.time() - start)
-            del all_concat_data
 
         # print(9, time.time() - start)
         start = time.time()
@@ -475,13 +467,13 @@ class SSA():
     def _empty_buffers(self):
         for property in self.properties:
             property.array_buffer = []
-        self.object_states_buffer = []
 
     def _extract_data(self):
         all_data = {}
         for data_name, data_extraction in self.data_extractions.items():
             all_data[data_name] = data_extraction.extract(self)
         self._empty_buffers()
+        gc.collect
         return all_data
 
     def _add_objects_to_full_tensor(self):
@@ -805,11 +797,11 @@ class SSA():
         for transition in self.transitions:
             transition_mask = transition.simulation_mask
             array_size = self._simulation_array_size
-            possible_transition_positions = self.index_array.expand(array_size)
+            possible_transition_positions = self.index_array.expand(array_size) + 1
             possible_transition_positions =possible_transition_positions.clone()
             # exclude simulations where the transition did not happen
 
-            no_transition_nb = self._simulation_array_size[0] + 2
+            no_transition_nb = self._simulation_array_size[0] + 3
 
             possible_transition_positions[~transition_mask.expand(
                 *self.object_states.shape)] = no_transition_nb
@@ -820,13 +812,59 @@ class SSA():
                 start_state = transition.start_state.number
             start_state_positions = self.object_states == start_state
             possible_transition_positions[~start_state_positions] =no_transition_nb
-            idx_positions = torch.amin(possible_transition_positions,
-                                       dim=0, keepdim=True)
 
-            transition_positions = ((possible_transition_positions ==
-                                     idx_positions) &
-                                    (possible_transition_positions <
-                                     no_transition_nb))
+            # for nucleation of new objects, always start at the leftmost
+            # position
+            if start_state == 0:
+                # get the minimum object index for each simulation
+                idx_positions = torch.amin(possible_transition_positions,
+                                           dim=0, keepdim=True)
+                # since all simulations with the wrong start state and where
+                # the transition did not happen at all have object indexes
+                # no_transition_nb (which is larger than the largest possible
+                # index), the transition positions are the the smallest object
+                # indices that are still smaller than no_transition_nb
+                transition_positions = ((possible_transition_positions ==
+                                         idx_positions) &
+                                        (possible_transition_positions <
+                                         no_transition_nb))
+            # for any other transition, a random object must be selected!
+            # Otherwise there will be a strong bias towards the first objects
+            # undergoing all dynamics
+            else:
+                # first set no transition points to 0, since to get the random
+                # position the maximum possible position must be used
+                # (which must not be the artificial no_transition_nb)
+                no_transition_mask = (possible_transition_positions ==
+                                      no_transition_nb)
+                possible_transition_positions[no_transition_mask] = 0
+                # use the maximum allowed transition position for each
+                # simulation and multiply it with a random uniform number
+                # between 0 and 1
+                max_positions = torch.amax(possible_transition_positions,
+                                           dim=0, keepdim=True)
+                rand_pos = torch.rand((1,
+                                       *possible_transition_positions.shape[1:]
+                                       ))
+                rand_pos = rand_pos * max_positions
+                # now get the position closest to this random position by
+                # subtracting the random pos from the possible
+                # transition_positions
+                distance_from_random = possible_transition_positions - rand_pos
+                distance_from_random = torch.abs(distance_from_random)
+                # then set the points not allowed for transition to the high
+                # no_transition_nb
+                distance_from_random[no_transition_mask] = no_transition_nb
+                # then take the minimum number, which is the minimum distance
+                # from the random number
+                transition_idxs = torch.amin(distance_from_random,
+                                             dim=0, keepdim=True)
+                # print(transition_idxs[:,0,0,0,0,0,0,0,0,0,0,0,0,0])
+                # dasd
+                transition_positions = ((distance_from_random ==
+                                         transition_idxs) &
+                                        (distance_from_random <
+                                         no_transition_nb))
 
             transition.transition_positions = transition_positions
         return None
@@ -1112,11 +1150,10 @@ class SSA():
 
     def _add_data_to_buffer(self):
         # add buffer for all data
-        self.object_states_buffer.append(self.object_states.unsqueeze(0))
+        self.object_states_buffer.append(self.object_states.unsqueeze(0).clone())
         for property in self.properties:
-            property.array_buffer.append(property.array.unsqueeze(0))
-        self.times_buffer.append(self.times.unsqueeze(0))
-
+            property.array_buffer.append(property.array.unsqueeze(0).clone())
+        self.times_buffer.append(self.times.unsqueeze(0).clone())
 
     def _save_times_and_object_states(self, iteration_nb):
 
@@ -1124,6 +1161,7 @@ class SSA():
         file_path = os.path.join(self.data_folder,
                                     "times_" + str(iteration_nb) + ".pt")
         torch.save(times_array, file_path)
+
         self.times_buffer = []
 
         if self.save_states:
@@ -1131,7 +1169,7 @@ class SSA():
             file_path = os.path.join(self.data_folder,
                                         "states_" + str(iteration_nb) + ".pt")
             torch.save(object_state_array, file_path)
-            self.object_states_buffer = []
+        self.object_states_buffer = []
 
     def _concat_data_from_buffer(self):
         all_data = {}
