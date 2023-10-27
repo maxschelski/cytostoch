@@ -1,7 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-Write stochastic model of microtubules in neurite
-"""
 
 import torch
 import copy
@@ -42,8 +39,10 @@ What classes?
 - action class (defines what happens to a property, gets property supplied and
                 what happens with it)
 - state class for each state
-- action stategit pu transition class (includes one transition, rates 
+- transition class (includes one transition, rates 
                                  (rate can be supplied as lifetime))
+- action state (for changes to properties)
+- Parameter class for each value of transition or action
 """
 
 class tRSSA():
@@ -168,7 +167,7 @@ class SSA():
                                "to" + str(end_state))
 
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
-              time_resolution,
+              time_resolution, save_initial_state=False,
               max_number_objects=None,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
@@ -196,7 +195,7 @@ class SSA():
         # and reduce backend processes
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
-                        time_resolution,
+                        time_resolution, save_initial_state,
                         max_number_objects, ignore_errors,
                         print_update_time_step,
                         nb_objects_added_per_step,
@@ -258,15 +257,14 @@ class SSA():
         max_nb_min_value_properties = 0
         max_nb_max_value_properties = 0
         for property in self.properties:
-
             if ((str(type(property._min_value)) ==
-                 "<class 'cytotorch.basic.PropertyGeometry'>") &
+                 "<class 'cytostoch.basic.PropertyGeometry'>") &
                     (property.min_value is not None)):
                 nb_min_value_properties = len(property._min_value.properties)
                 max_nb_min_value_properties = max(max_nb_min_value_properties,
                                                   nb_min_value_properties)
             if ((str(type(property._max_value)) ==
-                 "<class 'cytotorch.basic.PropertyGeometry'>") &
+                 "<class 'cytostoch.basic.PropertyGeometry'>") &
                     (property.max_value is not None)):
                 nb_max_value_properties = len(property._max_value.properties)
                 max_nb_max_value_properties = max(max_nb_max_value_properties,
@@ -491,7 +489,7 @@ class SSA():
         return object_removal_operations
 
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
-               time_resolution,
+               time_resolution, save_initial_state=False,
                max_number_objects=None, ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                 max_iters_no_data_extraction=2000,
@@ -630,6 +628,7 @@ class SSA():
         # with the first axis being the number of objects
         self.times = np.array(self.times.reshape((self.times.shape[0],
                                                   self.times.shape[1], -1)))
+
         self.object_states = self.object_states.reshape((self.object_states.shape[0],
                                                          self.object_states.shape[1],
                                                          -1))
@@ -650,24 +649,6 @@ class SSA():
         # to make run_iteration compatible with numba.njit(debug=True) (numba no python)
         # use numpy arrays for everything instead of python objects
         # create one array for
-
-        # get free GPU memory if device is cuda, to do calculations in batches
-        # that fit on the GPU
-        (free_memory,
-         total_memory) = numba.cuda.current_context().get_memory_info()
-
-        # get size of all arrays that will be created
-        # the size depends on
-        # - the number of simulations
-        # - the number of parameter combinations
-        # - the number of objects
-        # - the number of timepoints that should be saved together
-        #   plus one (because one set of array is needed for the current values)
-        # - and the datatype of the arrays that determines the size of one
-        #   element in the array
-        # all of which is reflected in array shape.
-
-        # allow option to not save initial state! (should be default)
 
         # create arrays with the parameter size to be explored in one round
 
@@ -720,7 +701,10 @@ class SSA():
             nb_objects_all_states[state_nb] = np.sum(self.object_states ==
                                                      state.number, axis=0)
 
-        nb_timepoints = math.ceil(self.min_time/time_resolution) + 1
+        # get number of timepoints
+        nb_timepoints = math.ceil(self.min_time/time_resolution)
+        if save_initial_state:
+            nb_timepoints += 1
 
         # set arrays for values over time
         current_timepoint_array = np.zeros((self.object_states.shape[1:]))
@@ -728,20 +712,23 @@ class SSA():
         timepoint_array = np.full((nb_timepoints,
                                    *self.object_states.shape[1:]),
                                   math.nan)
-        timepoint_array[0] = 0
+        if save_initial_state:
+            timepoint_array[0] = 0
 
         object_state_time_array = np.full((nb_timepoints,
                                            *self.object_states.shape),
                                           math.nan)
-        object_state_time_array[0] = self.object_states
+        if save_initial_state:
+            object_state_time_array[0] = self.object_states
 
         nb_properties = len(self.properties)
         properties_time_array = np.full((nb_timepoints, nb_properties,
                                          *self.object_states.shape),
                                         math.nan)
 
-        for property_nb, property in enumerate(self.properties):
-            properties_time_array[0, property_nb] = property.array
+        if save_initial_state:
+            for property_nb, property in enumerate(self.properties):
+                properties_time_array[0, property_nb] = property.array
 
         # current_min_time = np.min(self.times)
         # if current_min_time >= min_time:
@@ -758,15 +745,12 @@ class SSA():
 
         device = "gpu"
 
+        nb_simulations = self.object_states.shape[1]
         nb_parameter_combinations = self.object_states.shape[2]
 
         if self.device.find("cuda") != -1:
             simulation_numba._decorate_all_functions_for_gpu()
-            current_timepoint_array = cuda.to_device(current_timepoint_array)
-            timepoint_array = cuda.to_device(timepoint_array)
-            object_state_time_array = cuda.to_device(object_state_time_array)
-            properties_time_array = cuda.to_device(properties_time_array)
-            time_resolution = cuda.to_device(time_resolution)
+
             start = time.time()
 
             to_cuda = cuda.to_device
@@ -774,55 +758,172 @@ class SSA():
             # get number of cuda stream managers and cores per stream manager
             nb_SM, nb_cc = self._get_number_of_cuda_cores()
 
-            rng_states = numba.cuda.random.create_xoroshiro128p_states(nb_SM *
-                                                                       nb_cc,
-                                                                       seed=
-                                                                       seed)
+            # get way to get unique number for each combination of simulation
+            # and parameter combination
+            parameters_log10 = math.log10(nb_parameter_combinations)
+            simulations_log10 = math.log10(nb_simulations)
+            if parameters_log10 < simulations_log10:
+                simulation_factor = int(10**(math.floor(parameters_log10) + 1))
+                parameter_factor = 1
+            else:
+                simulation_factor = 1
+                parameter_factor = int(10**(math.floor(simulations_log10) + 1))
 
-            print("Starting simulation...")
-            sim = simulation_numba._execute_simulation_gpu
-            sim[nb_SM,
-                nb_cc](to_cuda(convert_array(self.object_states)),
-                        to_cuda(convert_array(properties_array)),
-                        to_cuda(convert_array(self.times)),
-                        nb_simulations, nb_parameter_combinations,
-                        to_cuda(convert_array(parameter_value_array)),
-                        to_cuda(convert_array(transition_parameters)),
-                        to_cuda(convert_array(all_transition_states)),
-                        to_cuda(convert_array(action_parameters)),
-                        to_cuda(convert_array(action_state_array)),
-                        to_cuda(convert_array(all_action_properties)),
-                        to_cuda(convert_array(action_operation_array)),
-                        to_cuda(convert_array(current_transition_rates)),
-                        to_cuda(convert_array(property_start_values)),
-                        to_cuda(convert_array(property_min_values)),
-                        to_cuda(convert_array(property_max_values)),
-                        to_cuda(convert_array(all_transition_tranferred_vals)),
-                        to_cuda(convert_array(
-                            all_transition_set_to_zero_properties)),
-                        to_cuda(convert_array(all_object_removal_properties)),
-                        to_cuda(convert_array(object_removal_operations)),
+            nb_states = ((nb_parameter_combinations+1) * parameter_factor +
+                         (nb_simulations+1) * simulation_factor)
+            random_number_func = numba.cuda.random.create_xoroshiro128p_states
+            rng_states = random_number_func(nb_states, seed=seed)
 
-                        to_cuda(convert_array(nb_objects_all_states)),
-                        to_cuda(convert_array(total_rates)),
-                        to_cuda(convert_array(reaction_times)),
-                        to_cuda(convert_array(current_transitions)),
-                        to_cuda(convert_array(all_transition_positions)),
+            # get free GPU memory if device is cuda, to do calculations in batches
+            # that fit on the GPU
+            (free_memory,
+             total_memory) = numba.cuda.current_context().get_memory_info()
 
-                        current_timepoint_array, timepoint_array,
-                        object_state_time_array, properties_time_array,
-                        time_resolution, self.min_time, seed, rng_states
-                         )
-            print(time.time() - start)
-            numba.cuda.synchronize()
-            self.object_states = torch.Tensor(object_state_time_array.copy_to_host())
-            self.object_states = self.object_states.to(self.device)
+            # get size of all arrays that were created
+            # the size depends on
+
+            # get size of object states
+            size_states = (self.object_states.size *
+                           self.object_states.itemsize)
+
+            # get size of properties times the number of properties+
+            size_properties = (len(self.properties) *
+                               self.properties[0].array.size *
+                               self.properties[0].array.itemsize)
+
+            total_size = (nb_timepoints+1) * (size_states + size_properties)
+
+            # think about sorting parameter values in the array by
+            # their magnitude - higher transition rates should be separate from
+            # lower transition rates to allow for splitting simulation batches
+            # into higher and lower rates. Thereby, all simulations with lower
+            # rates will be faster, while only the simulations with higher
+            # rates will be slower.
+            # If each batch would contain higher and lower rates, all batches
+            # would take longer.
+
+
+            # if total size is larger than free memory on GPU
+            # split array by number of parameters into smaller pieces
+            nb_memory_batches = int(math.ceil(total_size/free_memory))
+            # also check how many parameter combinations can be processed
+            # with the number of cuda cores available
+            total_nb_simulations = (self.object_states.shape[1] *
+                                    self.object_states.shape[2])
+            nb_core_batches = int(math.ceil(total_nb_simulations / (nb_SM *
+                                                                    nb_cc)))
+
+            nb_batches = max(nb_memory_batches, 1)
+
+            parameter_combinations_per_batch = int(math.floor(
+                (nb_parameter_combinations / nb_batches)))
+
+            object_states_batches = None
+            properties_batches_array = None
+            times_batches = None
+
+            for batch_nb in range(nb_batches):
+                start_parameter_comb = (batch_nb *
+                                        parameter_combinations_per_batch)
+                end_parameter_comb = (start_parameter_comb +
+                                      parameter_combinations_per_batch)
+                param_slice = slice(start_parameter_comb, end_parameter_comb)
+
+                current_timepoint_array_batch = cuda.to_device(
+                    convert_array(current_timepoint_array[:,param_slice]))
+                timepoint_array_batch = cuda.to_device(
+                    convert_array(timepoint_array[:,:,param_slice]))
+                object_state_time_array_batch = cuda.to_device(
+                    convert_array(object_state_time_array[:,:,:,param_slice]))
+                properties_time_array_batch = cuda.to_device(
+                    convert_array(properties_time_array[:,:,:,:,param_slice]))
+                time_resolution = cuda.to_device(time_resolution)
+
+                print("Starting simulation batch...")
+                sim = simulation_numba._execute_simulation_gpu
+                object_states_batch = self.object_states[:,:,param_slice]
+                property_array_batch = properties_array[:,:,:,param_slice]
+                times_batch = self.times[:,:,param_slice]
+                param_val_array_batch = parameter_value_array[:,:,param_slice]
+                current_trans_rates = current_transition_rates[:,:,param_slice]
+                nb_obj_all_states_batch = nb_objects_all_states[:,:,param_slice]
+                total_rates_batch = total_rates[:,param_slice]
+                reaction_times_batch = reaction_times[:,param_slice]
+                current_transitions_batch = current_transitions[:,param_slice]
+                all_trans_pos_batch = all_transition_positions[:,param_slice]
+
+                sim[nb_SM,
+                    nb_cc](to_cuda(convert_array(object_states_batch)),
+                            to_cuda(convert_array(property_array_batch)),
+                            to_cuda(convert_array(times_batch)),
+                            nb_simulations, parameter_combinations_per_batch,
+                            to_cuda(convert_array(param_val_array_batch)),
+                            to_cuda(convert_array(transition_parameters)),
+                            to_cuda(convert_array(all_transition_states)),
+                            to_cuda(convert_array(action_parameters)),
+                            to_cuda(convert_array(action_state_array)),
+                            to_cuda(convert_array(all_action_properties)),
+                            to_cuda(convert_array(action_operation_array)),
+                            to_cuda(convert_array(current_trans_rates)),
+                            to_cuda(convert_array(property_start_values)),
+                            to_cuda(convert_array(property_min_values)),
+                            to_cuda(convert_array(property_max_values)),
+                            to_cuda(convert_array(
+                                all_transition_tranferred_vals)),
+                            to_cuda(convert_array(
+                                all_transition_set_to_zero_properties)),
+                            to_cuda(convert_array(
+                                all_object_removal_properties)),
+                            to_cuda(convert_array(object_removal_operations)),
+
+                            to_cuda(convert_array(nb_obj_all_states_batch)),
+                            to_cuda(convert_array(total_rates_batch)),
+                            to_cuda(convert_array(reaction_times_batch)),
+                            to_cuda(convert_array(current_transitions_batch)),
+                            to_cuda(convert_array(all_trans_pos_batch)),
+
+                           current_timepoint_array_batch,
+                           timepoint_array_batch,
+                           object_state_time_array_batch,
+                           properties_time_array_batch,
+                           time_resolution, self.min_time, save_initial_state,
+                           seed, rng_states, simulation_factor, parameter_factor
+                             )
+
+                print(time.time() - start)
+
+                numba.cuda.synchronize()
+                object_state_batch = torch.Tensor(
+                    object_state_time_array_batch.copy_to_host())
+                property_array_batch = torch.Tensor(
+                    properties_time_array_batch.copy_to_host())
+                times_batch = torch.Tensor(timepoint_array_batch.copy_to_host())
+
+                if object_states_batches is None:
+                    object_states_batches = object_state_batch
+                else:
+                    object_states_batches = torch.concat((object_states_batches,
+                                                         object_state_batch),
+                                                         axis=-1)
+                if properties_batches_array is None:
+                    properties_batches_array = property_array_batch
+                else:
+                    properties_batches_array = torch.concat((properties_batches_array,
+                                                            property_array_batch),
+                                                            axis=-1)
+                if times_batches is None:
+                    times_batches = times_batch
+                else:
+                    times_batches = torch.concat((times_batches, times_batch),
+                                                 axis=-1)
+
+            self.times = (times_batches * time_resolution.copy_to_host())
+            self.times = self.times.unsqueeze(1).to(self.device)
+
             for property_nb, property in enumerate(self.properties):
-                property.array = torch.Tensor(properties_time_array.copy_to_host()[:, property_nb])
+                property.array = properties_batches_array[:, property_nb]
                 property.array = property.array.to(self.device)
-            self.times = torch.Tensor(timepoint_array.copy_to_host()) * time_resolution.copy_to_host()
-            self.times = self.times.unsqueeze(1)
-            self.times = self.times.to(self.device)
+            self.object_states = object_states_batches.to(self.device)
 
         else:
             simulation_numba._decorate_all_functions_for_cpu()
@@ -857,14 +958,11 @@ class SSA():
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
-                        time_resolution, self.min_time,seed
+                        time_resolution, self.min_time, save_initial_state,seed
                         )
             print(time.time() - start)
 
             self.object_states = torch.Tensor(np.copy(object_state_time_array))
-            # nan_pos = self.object_states[-2,:,0] == 0
-            # print("nb 0 states: ", nan_pos.sum())
-            # print(self.object_states[-2,:,0])
 
             for property_nb, property in enumerate(self.properties):
                 property.array = torch.Tensor(np.copy(

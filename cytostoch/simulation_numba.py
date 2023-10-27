@@ -30,25 +30,26 @@ def _execute_simulation_gpu(object_states, properties_array, times,
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
-                        time_resolution, min_time, seed,
-                        rng_states = None
+                        time_resolution, min_time, save_initial_state,
+                            _, rng_states, simulation_factor, parameter_factor
                         ):
     # np.random.seed(seed)
     iteration_nb = 0
-    thread_id = cuda.grid(1)
-    # thread_id = 0
 
+    nb_processes = cuda.gridsize(1)
     thread_id = cuda.grid(1)
     grid = cuda.cg.this_grid()
 
-    # For each parameter combination the defined number of simulations are done
-    param_id = int(math.floor(thread_id / nb_simulations))
-    sim_id = int(thread_id - param_id * nb_simulations)
-
-    if thread_id < (nb_simulations * nb_parameter_combinations):
+    total_nb_simulations = nb_simulations * nb_parameter_combinations
+    # print(cuda.gridsize(1), total_nb_simulations)
+    current_sim_nb = thread_id
+    while current_sim_nb < total_nb_simulations:
+        # For each parameter combination the defined number of simulations are done
+        param_id = int(math.floor(current_sim_nb / nb_simulations))
+        sim_id = int(current_sim_nb - param_id * nb_simulations)
         while True:
-            _run_iteration(sim_id, param_id, object_states, properties_array, times,
-                           parameter_value_array,
+            _run_iteration(sim_id, param_id, object_states, properties_array,
+                           times, parameter_value_array,
                            transition_parameters, all_transition_states,
                            action_parameters, action_state_array,
                            all_action_properties, action_operation_array,
@@ -67,12 +68,14 @@ def _execute_simulation_gpu(object_states, properties_array, times,
 
                            current_timepoint_array, timepoint_array,
                            object_state_time_array, properties_time_array,
-                           time_resolution, rng_states
+                           time_resolution, save_initial_state,
+                           rng_states, simulation_factor, parameter_factor
                            )
-            if current_timepoint_array[sim_id, param_id] >= math.floor(min_time/
-                                                               time_resolution[0]):
+            if (current_timepoint_array[sim_id, param_id] >=
+                    math.floor(min_time/time_resolution[0])):
                 break
             iteration_nb += 1
+        current_sim_nb += nb_processes
     grid.sync()
     numba.cuda.syncthreads()
 
@@ -97,7 +100,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
-                        time_resolution, min_time, seed,
+                        time_resolution, min_time, save_initial_state, seed,
                         rng_states = None
                         ):
     np.random.seed(seed)
@@ -131,12 +134,10 @@ def _execute_simulation_cpu(object_states, properties_array, times,
 
                            current_timepoint_array, timepoint_array,
                            object_state_time_array, properties_time_array,
-                           time_resolution, rng_states
+                           time_resolution, save_initial_state, rng_states
                            )
-            # if current_timepoint_array[sim_id, param_id] >= math.floor(min_time/
-            #                                                    time_resolution[0]):
-            #     break
-            if iteration_nb == 20000:
+            if current_timepoint_array[sim_id, param_id] >= math.floor(min_time/
+                                                               time_resolution[0]):
                 break
             iteration_nb += 1
             # print(properties_array[0][object_states == 3])
@@ -166,7 +167,8 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
 
                    current_timepoint_array, timepoint_array,
                    object_state_time_array, properties_time_array,
-                   time_resolution, rng_states
+                   time_resolution, save_initial_state, rng_states,
+                   simulation_factor=None, parameter_factor=None
                    ):
 
     # create tensor for x (position in neurite), l (length of microtubule)
@@ -175,24 +177,33 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
     # UPDATE nb_objects_all_states in each iteration at each iteration
     # thereby there is no need to go through all object states
     # get_rates_func = _get_total_and_single_rates_for_state_transitions
+
+    # increase performance through an array for each object state
+    # of which transitions are influenced by it
+    # then don't recalculate the transition rates each iteration
+    # but just update the few rates affected by the changed object state
     _get_rates = _get_total_and_single_rates_for_state_transitions
     _get_rates(parameter_value_array, transition_parameters,
                all_transition_states, current_transition_rates, total_rates,
                nb_objects_all_states, sim_id, param_id)
+
     get_reaction_times = _get_times_of_next_transition
     get_reaction_times(total_rates, reaction_times, sim_id, param_id,
-                       rng_states)
+                       rng_states, simulation_factor, parameter_factor)
 
     _determine_next_transition(total_rates, current_transition_rates,
                                current_transitions, sim_id, param_id,
-                               rng_states)
+                               rng_states, simulation_factor, parameter_factor)
 
+    # speed up searching for xth object with correct state
+    # by keeping track of the position of each object in each state
     _determine_positions_of_transitions(current_transitions,
                                         all_transition_states,
                                         nb_objects_all_states,
                                         all_transition_positions,
                                         object_states,
-                                        sim_id, param_id, rng_states)
+                                        sim_id, param_id, rng_states,
+                                        simulation_factor, parameter_factor)
 
     _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 action_state_array,
@@ -211,7 +222,8 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                           all_transition_tranferred_vals,
                           all_transition_set_to_zero_properties,
                           property_start_values,
-                          sim_id, param_id, rng_states)
+                          sim_id, param_id,
+                          rng_states, simulation_factor, parameter_factor)
 
     _remove_objects(all_object_removal_properties, object_removal_operations,
                     object_states, properties_array, sim_id, param_id)
@@ -224,7 +236,8 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                                           properties_time_array,
                                           current_timepoint_array, times,
                                           object_states, properties_array,
-                                          time_resolution, sim_id, param_id)
+                                          time_resolution, save_initial_state,
+                                          sim_id, param_id)
 
 def _get_random_number():
     pass
@@ -289,66 +302,71 @@ def _decorate_all_functions_for_cpu():
         _remove_objects = numba.njit(_remove_objects)
 
 
-def _decorate_all_functions_for_gpu():
+def _decorate_all_functions_for_gpu(debug=False):
+    opt = debug != True
     global _get_random_number
     if not isinstance(_get_random_number,
                       numba.cuda.dispatcher.CUDADispatcher):
-        _get_random_number = numba.cuda.jit(_get_random_number_gpu)
+        _get_random_number = numba.cuda.jit(_get_random_number_gpu, debug=debug,
+                                            opt=opt)
 
     global _execute_simulation_gpu
     if not isinstance(_execute_simulation_gpu,
                       numba.cuda.dispatcher.CUDADispatcher):
-        _execute_simulation_gpu = numba.cuda.jit(_execute_simulation_gpu)
+        _execute_simulation_gpu = numba.cuda.jit(_execute_simulation_gpu,
+                                                 debug=debug, opt=opt)
 
     global _run_iteration
     if not isinstance(_run_iteration,
                       numba.cuda.dispatcher.CUDADispatcher):
-        _run_iteration = numba.cuda.jit(_run_iteration)
+        _run_iteration = numba.cuda.jit(_run_iteration, debug=debug, opt=opt)
 
     global _get_total_and_single_rates_for_state_transitions
     if not isinstance(_get_total_and_single_rates_for_state_transitions,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_total_and_single_rates_for_state_transitions = numba.cuda.jit(
-        _get_total_and_single_rates_for_state_transitions)
+        _get_total_and_single_rates_for_state_transitions, debug=debug, opt=opt)
 
     global _get_times_of_next_transition
     if not isinstance(_get_times_of_next_transition,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_times_of_next_transition = numba.cuda.jit(
-            _get_times_of_next_transition)
+            _get_times_of_next_transition, debug=debug, opt=opt)
 
     global _determine_next_transition
     if not isinstance(_determine_next_transition,
                       numba.cuda.dispatcher.CUDADispatcher):
-        _determine_next_transition = numba.cuda.jit(_determine_next_transition)
+        _determine_next_transition = numba.cuda.jit(_determine_next_transition,
+                                                    debug=debug, opt=opt)
 
     global _determine_positions_of_transitions
     if not isinstance(_determine_positions_of_transitions,
                       numba.cuda.dispatcher.CUDADispatcher):
         _determine_positions_of_transitions = numba.cuda.jit(
-            _determine_positions_of_transitions)
+            _determine_positions_of_transitions, debug=debug, opt=opt)
 
     global _execute_actions_on_objects
     if not isinstance(_execute_actions_on_objects,
                       numba.cuda.dispatcher.CUDADispatcher):
         _execute_actions_on_objects = numba.cuda.jit(
-            _execute_actions_on_objects)
+            _execute_actions_on_objects, debug=debug, opt=opt)
 
     global _update_object_states
     if not isinstance(_update_object_states,
                       numba.cuda.dispatcher.CUDADispatcher):
-        _update_object_states = numba.cuda.jit(_update_object_states)
+        _update_object_states = numba.cuda.jit(_update_object_states,
+                                               debug=debug, opt=opt)
 
     global _save_values_with_temporal_resolution
     if not isinstance(_save_values_with_temporal_resolution,
                       numba.cuda.dispatcher.CUDADispatcher):
         _save_values_with_temporal_resolution = numba.cuda.jit(
-            _save_values_with_temporal_resolution)
+            _save_values_with_temporal_resolution, debug=debug, opt=opt)
 
     global _remove_objects
     if not isinstance(_remove_objects,
                       numba.cuda.dispatcher.CUDADispatcher):
-        _remove_objects = numba.cuda.jit(_remove_objects)
+        _remove_objects = numba.cuda.jit(_remove_objects, debug=debug, opt=opt)
 
 
 def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
@@ -382,30 +400,32 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                                   sim_id, param_id]
         transition_nb += 1
 
-def _get_random_number_cpu(sim_id, param_id, rng_states):
+def _get_random_number_cpu(sim_id, param_id, rng_states,
+                           simulation_factor, parameter_factor):
     return np.random.rand()
 
-def _get_random_number_gpu(sim_id, param_id, rng_states):
+def _get_random_number_gpu(sim_id, param_id,
+                           rng_states, simulation_factor, parameter_factor):
+    state = (sim_id+1)*simulation_factor + (param_id+1)*parameter_factor
     random_nb = cuda.random.xoroshiro128p_uniform_float32(rng_states,
-                                                          (sim_id+1)*
-                                                          (param_id+1))
+                                                          state)
     return random_nb
 
 
 def _get_times_of_next_transition(total_rates, reaction_times,
-                                  sim_id, param_id, rng_states):
+                                  sim_id, param_id, rng_states,
+                                  simulation_factor, parameter_factor):
     # get time of next event for each simulation
     #
     number_threads = 128
-    random_nb = _get_random_number(sim_id, param_id, rng_states)
+    random_nb = _get_random_number(sim_id, param_id, rng_states,
+                                   simulation_factor, parameter_factor)
     reaction_times[sim_id, param_id] = - (1/total_rates[sim_id, param_id] *
                                  math.log(random_nb))
 
-
 def _determine_next_transition(total_rates, current_transition_rates,
-                               current_transitions, sim_id, param_id, rng_states):
-    # get which event happened in each simulation
-    random_number = _get_random_number(sim_id, param_id, rng_states)
+                               current_transitions, sim_id, param_id,
+                               rng_states, simulation_factor, parameter_factor):
 
     # set random number in zero rate positions to >1 to make threshold
     # higher than total rate, thereby preventing any reaction from
@@ -413,6 +433,10 @@ def _determine_next_transition(total_rates, current_transition_rates,
     if total_rates[sim_id, param_id] == 0:
         current_transitions[sim_id, param_id] = math.nan
         return
+
+    # get which event happened in each simulation
+    random_number = _get_random_number(sim_id, param_id, rng_states,
+                                       simulation_factor, parameter_factor)
 
     threshold = total_rates[sim_id, param_id] * random_number
 
@@ -436,7 +460,8 @@ def _determine_positions_of_transitions(current_transitions,
                                         nb_objects_all_states,
                                         all_transition_positions,
                                         object_states,
-                                        sim_id, param_id, rng_states):
+                                        sim_id, param_id, rng_states,
+                                        simulation_factor, parameter_factor):
 
     # the transitions masks only tell which reaction happens in each
     # stimulation, but not which object in this simulation is affected
@@ -462,7 +487,9 @@ def _determine_positions_of_transitions(current_transitions,
         # for all other states, choose a random position with that state
         nb_objects = nb_objects_all_states[int(start_state-1), sim_id, param_id]
         random_object_pos = round(_get_random_number(sim_id, param_id,
-                                                        rng_states)
+                                                     rng_states,
+                                                     simulation_factor,
+                                                     parameter_factor)
                                      * nb_objects)
         object_pos = 0
         current_nb_state_objects = 0
@@ -626,7 +653,8 @@ def _update_object_states(current_transitions, all_transition_states,
                           all_transition_tranferred_vals,
                           all_transition_set_to_zero_properties,
                           property_start_vals,
-                          sim_id, param_id, rng_states):
+                          sim_id, param_id,
+                          rng_states, simulation_factor, parameter_factor):
     # update the simulations according to executed transitions
     transition_number = current_transitions[sim_id, param_id]
     if math.isnan(transition_number):
@@ -661,7 +689,9 @@ def _update_object_states(current_transitions, all_transition_states,
                 # two numbers, with the first number indicating the start
                 # (lower value) and the second number the end of the
                 # interval (higher value)
-                random_nb = _get_random_number(sim_id, param_id, rng_states)
+                random_nb = _get_random_number(sim_id, param_id, rng_states,
+                                               simulation_factor,
+                                               parameter_factor)
                 # to get a random number in that range take a random nb
                 # between 0 and 1 and multiply it with the range of the
                 # interval, then add the start point of the interval
@@ -685,6 +715,7 @@ def _update_object_states(current_transitions, all_transition_states,
                              int(transition_position),
                              sim_id, param_id] = math.nan
             property_nb += 1
+
     # if the object is not removed, it might be that the transition triggers
     # other events as well
     if end_state != 0:
@@ -759,34 +790,34 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                                                       sim_id, param_id]
             if math.isnan(combined_property_vals):
                 object_pos += 1
-                continue
-            property_idx = 1
-            while property_idx < properties.shape[0]:
-                property_nb = int(properties[property_idx])
-                property_val = properties_array[property_nb,
-                                                int(object_pos),
-                                                sim_id, param_id]
-                combined_property_vals += property_operation * property_val
-                property_idx += 1
-            # check whether combined property values
-            # are above or below threshold
-            if threshold_operation == -1:
-                remove_object = combined_property_vals > threshold
-            elif threshold_operation == 1:
-                remove_object = combined_property_vals < threshold
+            else:
+                property_idx = 1
+                while property_idx < properties.shape[0]:
+                    property_nb = int(properties[property_idx])
+                    property_val = properties_array[property_nb,
+                                                    int(object_pos),
+                                                    sim_id, param_id]
+                    combined_property_vals += property_operation * property_val
+                    property_idx += 1
+                # check whether combined property values
+                # are above or below threshold
+                if threshold_operation == -1:
+                    remove_object = combined_property_vals > threshold
+                elif threshold_operation == 1:
+                    remove_object = combined_property_vals < threshold
 
-            # if object should be removed, set state to 0 and properties to NaN
-            if remove_object:
-                object_states[int(object_pos),
-                              sim_id, param_id] = 0
-                property_nb = 0
-                while property_nb < properties_array.shape[0]:
-                    properties_array[property_nb,
-                                     int(object_pos),
-                                     sim_id, param_id] = math.nan
+                # if object should be removed, set state to 0 and properties to NaN
+                if remove_object:
+                    object_states[int(object_pos),
+                                  sim_id, param_id] = 0
+                    property_nb = 0
+                    while property_nb < properties_array.shape[0]:
+                        properties_array[property_nb,
+                                         int(object_pos),
+                                         sim_id, param_id] = math.nan
 
-                    property_nb += 1
-            object_pos += 1
+                        property_nb += 1
+                object_pos += 1
 
         removal_nb += 1
 
@@ -795,11 +826,11 @@ def _save_values_with_temporal_resolution(timepoint_array,
                                          properties_time_array,
                                          current_timepoint_array, times,
                                          object_states, properties_array,
-                                         time_resolution, sim_id, param_id):
+                                         time_resolution, save_initial_state,
+                                          sim_id, param_id):
     # check .if the next timepoint was reached, then save all values
     # at correct position
     current_timepoint = current_timepoint_array[sim_id, param_id]
-
     if times[0, sim_id, param_id] >= (current_timepoint * time_resolution[0] +
                                time_resolution[0]):
         time_jump = math.floor((times[0,sim_id, param_id] -
@@ -808,23 +839,29 @@ def _save_values_with_temporal_resolution(timepoint_array,
         current_timepoint += time_jump
 
         current_timepoint_array[sim_id, param_id] = current_timepoint
-        timepoint_array[int(current_timepoint),
+        # if the initial state was not saved then the index is actually the
+        # timepoint minus 1
+        if save_initial_state:
+            timepoint_idx = int(current_timepoint)
+        else:
+            timepoint_idx = int(current_timepoint) - 1
+
+        timepoint_array[timepoint_idx,
                         sim_id, param_id] = current_timepoint
         # copy all current data into time-resolved data
         object_pos = 0
         while object_pos < object_states.shape[0]:
             object_state = object_states[object_pos, sim_id, param_id]
-            object_state_time_array[int(current_timepoint),
+
+            object_state_time_array[timepoint_idx,
                                     object_pos,
                                     sim_id, param_id] = object_state
-            # print(object_state_time_array[int(current_timepoint),
-            #                         object_pos,
-            #                         sim_id, param_id],int(current_timepoint),object_pos, sim_id, param_id)
+
             property_nb = 0
             while property_nb < properties_array.shape[0]:
                 property_val = properties_array[property_nb,
                                                 object_pos, sim_id, param_id]
-                properties_time_array[int(current_timepoint),
+                properties_time_array[timepoint_idx,
                                       property_nb,
                                       object_pos,
                                       sim_id, param_id] = property_val
