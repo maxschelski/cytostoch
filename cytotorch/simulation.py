@@ -14,7 +14,19 @@ import gc
 import os
 import psutil
 
+# NUMBA_DEBUG=1
+# NUMBA_DEVELOPER_MODE = 1
+# NUMBA_DEBUGINFO = 1
+import numba
+import numba.cuda.random
+import math
+from numba import cuda
+from matplotlib import pyplot as plt
+import seaborn as sns
+
 from . import analyzer
+from .basic import PropertyGeometry
+from . import simulation_numba
 
 """
 This is for single type modeling! (e.g. just MTs or actin) 
@@ -115,6 +127,8 @@ class SSA():
 
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
+        torch.set_default_tensor_type(torch.FloatTensor)
+        torch.set_default_device("cpu")
         # create tensors object to reference the correct tensor class
         # depending on the device
         if (device.lower() == "gpu") & (torch.cuda.device_count() > 0):
@@ -123,17 +137,23 @@ class SSA():
                     break
             self.device = "cuda:"+str(GPU_nb)
             self.tensors = torch.cuda
-            torch.set_default_tensor_type(torch.cuda.FloatTensor)
-            torch.set_default_device(self.device)
+            # torch.set_default_tensor_type(torch.cuda.FloatTensor)
+            # torch.set_default_device(self.device)
         else:
             self.device = "cpu"
             self.tensors = torch
             torch.set_default_tensor_type(torch.FloatTensor)
 
+        if (device.lower() == "gpu") & (len(numba.cuda.gpus) > 0):
+            self.device = "cuda"
+
         # since state 0 is reserved for no state (no object), start
         for state_nb, state in enumerate(self.states):
             state.number = state_nb + 1
             state.name += "_" + str(state.number)
+
+        for property_nb, property in enumerate(self.properties):
+            property.number = property_nb
 
         for transition in self.transitions:
             if transition.name != "":
@@ -148,11 +168,13 @@ class SSA():
                                "to" + str(end_state))
 
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
+              time_resolution,
               max_number_objects=None,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
               max_iters_no_data_extraction=2000,
-               dynamically_increase_nb_objects=True, save_states=False,
+               dynamically_increase_nb_objects=False,
+              remove_finished_sims=False, save_states=False,
               use_assertion_checks=True, reset_folder=True):
         """
 
@@ -160,6 +182,7 @@ class SSA():
             nb_simulations (int): Number of simulations to run per parameter
                 combination
             min_time (float): minimum time
+            time_resolution ( float): time resolution of output data (in min)
             data_extractions (Dict of DataExtraction objects): Dict in which
                 values are different DataExtraciton objects. Keys are names
                 of extracted data.
@@ -173,11 +196,13 @@ class SSA():
         # and reduce backend processes
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
+                        time_resolution,
                         max_number_objects, ignore_errors,
                         print_update_time_step,
                         nb_objects_added_per_step,
                         max_iters_no_data_extraction,
-                        dynamically_increase_nb_objects,save_states,
+                        dynamically_increase_nb_objects,
+                        remove_finished_sims, save_states,
                         use_assertion_checks, reset_folder)
 
     def save(self, time_resolution, max_time):
@@ -185,11 +210,293 @@ class SSA():
         analysis.start(time_resolution, max_time,
                        use_assertion_checks=self.use_assertion_checks)
 
+    def _regularly_print_data(self):
+        # only print data if the current data was not yet printed
+        # and if there is data buffer to be printed
+        for keyword, data_extraction in self.data_extractions.items():
+            if not data_extraction.print_regularly:
+                continue
+            data = data_extraction.extract(self, regular_print=True)
+            for data_name, data_array in data.items():
+                mean = torch.nanmean(data_array.to(torch.float))
+                if (not np.isnan(mean.item())) & (mean.item() != 0):
+                    print(data_name," : ",mean.item())
+
+    def _get_property_start_val_arrays(self):
+        # - all object properties over time
+        nb_properties = len(self.properties)
+
+        property_start_values = np.full((nb_properties, 2), math.nan)
+        for property_nb, property in enumerate(self.properties):
+            start_value = property.start_value
+            if property.start_value is None:
+                continue
+            if type(property.start_value) in [float, int]:
+                property_start_values[property_nb, 0] = start_value
+            else:
+                property_start_values[property_nb, :] = start_value
+        return property_start_values
+
+    def _get_property_vals_array(self):
+        nb_properties = len(self.properties)
+        properties_array = np.zeros((nb_properties,
+                                     *self.properties[0].array.shape))
+        for property_nb, property in enumerate(self.properties):
+            properties_array[property_nb] = property.array
+        return properties_array
+
+    def _get_property_min_max_val_arrays(self):
+        nb_properties = len(self.properties)
+        # if there is just one non-nan value in min_value
+        # then this is the min_value
+        # if there are multiple non-nan values in min_value
+        # then these are property numbers, except
+        # for the first value, which is threshold
+        # and the second value, which is the operation
+        # (-1 for subtracting property values,
+        #  +1 for adding property values)
+        max_nb_min_value_properties = 0
+        max_nb_max_value_properties = 0
+        for property in self.properties:
+
+            if ((str(type(property._min_value)) ==
+                 "<class 'cytotorch.basic.PropertyGeometry'>") &
+                    (property.min_value is not None)):
+                nb_min_value_properties = len(property._min_value.properties)
+                max_nb_min_value_properties = max(max_nb_min_value_properties,
+                                                  nb_min_value_properties)
+            if ((str(type(property._max_value)) ==
+                 "<class 'cytotorch.basic.PropertyGeometry'>") &
+                    (property.max_value is not None)):
+                nb_max_value_properties = len(property._max_value.properties)
+                max_nb_max_value_properties = max(max_nb_max_value_properties,
+                                                  nb_max_value_properties)
+        # add two to the maximum size since two more entries are added for
+        # the additional options (threshold and operation)
+        if max_nb_max_value_properties > 0:
+            max_nb_max_value_properties += 2
+        if max_nb_min_value_properties > 0:
+            max_nb_min_value_properties += 2
+
+        property_min_values = np.full((nb_properties,
+                                       max(1, max_nb_min_value_properties)),
+                                      math.nan)
+        property_max_values = np.full((nb_properties,
+                                       max(1, max_nb_max_value_properties)),
+                                      math.nan)
+
+        for property_nb, property in enumerate(self.properties):
+            min_value = property._min_value
+            if type(min_value) in [float, int]:
+                property_min_values[property_nb, 0] = min_value
+            elif min_value is not None:
+                property_min_values[property_nb, 0] = min_value.properties[
+                    0].min_value
+                operation = min_value._operation
+                if operation == "same_dimension_forward":
+                    property_min_values[property_nb, 1] = 1
+                for (min_val_nb,
+                     min_val_property) in enumerate(min_value.properties):
+                    property_min_values[property_nb,
+                                        min_val_nb + 2] = min_val_property.number
+
+            max_value = property._max_value
+            if type(max_value) in [float, int]:
+                property_max_values[property_nb, 0] = max_value
+            elif max_value is not None:
+                property_max_values[property_nb, 0] = \
+                    max_value.properties[0].max_value
+                operation = max_value._operation
+                if operation == "same_dimension_forward":
+                    property_max_values[property_nb, 1] = 1
+                for (min_val_nb,
+                     min_val_property) in enumerate(max_value.properties):
+                    property_max_values[property_nb,
+                                        min_val_nb + 2] = min_val_property.number
+
+        return property_min_values, property_max_values
+
+    def _get_parameter_value_array(self):
+        nb_parameters = len(self.parameters)
+        parameter_value_shape = self.parameters[0].value_array.shape
+        parameter_value_array = np.zeros((nb_parameters,
+                                          *parameter_value_shape))
+        for nb, parameter in enumerate(self.parameters):
+            parameter_value_array[nb] = parameter.value_array
+        return parameter_value_array
+
+    def _get_transition_parameters(self):
+        # - all transition rates
+        nb_transitions = len(self.transitions)
+        transition_parameters = np.zeros((nb_transitions))
+        for nb, transition in enumerate(self.transitions):
+            transition_parameters[nb] = transition.parameter.number
+        return transition_parameters
+
+    def _get_transition_state_arrays(self):
+        nb_transitions = len(self.transitions)
+        # - all transition start and end states
+        all_transition_states = np.zeros((nb_transitions, 2))
+        for nb, transition in enumerate(self.transitions):
+            if transition.start_state is None:
+                start_state = 0
+            else:
+                start_state = transition.start_state.number
+            if transition.end_state is None:
+                end_state = 0
+            else:
+                end_state = transition.end_state.number
+            all_transition_states[nb, :] = (start_state, end_state)
+        return all_transition_states
+
+    def _get_transition_transferred_vals_array(self):
+        nb_transitions = len(self.transitions)
+        all_transition_tranferred_vals = np.full((nb_transitions, 2),
+                                                 math.nan)
+        for nb, transition in enumerate(self.transitions):
+            transfer_property = transition.transfer_property
+            if transfer_property is None:
+                continue
+            all_transition_tranferred_vals[nb, 0] = transfer_property[0].number
+            all_transition_tranferred_vals[nb, 1] = transfer_property[1].number
+
+        return all_transition_tranferred_vals
+
+    def _get_transition_set_to_zero_properties(self):
+        nb_transitions = len(self.transitions)
+        max_nb_properties_set_to_zero = 0
+        for nb, transition in enumerate(self.transitions):
+            properties_set_to_zero = transition.properties_set_to_zero
+            if properties_set_to_zero is None:
+                continue
+            max_nb_properties_set_to_zero = max(max_nb_properties_set_to_zero,
+                                                len(properties_set_to_zero))
+
+        all_transition_set_to_zero_properties = np.full((nb_transitions,
+                                                         max_nb_properties_set_to_zero),
+                                                        math.nan)
+        for nb, transition in enumerate(self.transitions):
+            properties_set_to_zero = transition.properties_set_to_zero
+            if properties_set_to_zero is None:
+                continue
+            property_nbs_set_to_zero = [prop.number
+                                        for prop in properties_set_to_zero]
+            all_transition_set_to_zero_properties[nb,
+            :] = property_nbs_set_to_zero
+
+        return all_transition_set_to_zero_properties
+
+    def _get_action_parameter_array(self):
+        # - all action rates
+        nb_actions = len(self.actions)
+        action_parameters = np.zeros((nb_actions))
+        for action_nb, action in enumerate(self.actions):
+            action_parameters[action_nb] = action.parameter.number
+        return action_parameters
+
+    def _get_action_properties_array(self):
+        nb_actions = len(self.actions)
+        all_action_properties = np.zeros((nb_actions, 1))
+        for action_nb, action in enumerate(self.actions):
+            all_action_properties[action_nb] = action.object_property.number
+        return all_action_properties
+
+    def _get_action_states_array(self):
+        # - all states for each action
+        nb_actions = len(self.actions)
+        max_nb_action_states = 0
+        nb_action_states = []
+        for action in self.actions:
+            if action.states is None:
+                nb_states = 1
+            else:
+                nb_states = len(action.states)
+            nb_action_states.append(nb_states)
+            max_nb_action_states = max(max_nb_action_states,nb_states)
+
+        action_state_array = np.zeros((nb_actions, max_nb_action_states))
+        for action_nb, action in enumerate(self.actions):
+            # for each action get list of length max_nb_action_states
+            # fill the first elements with the actual states that
+            # the action should be applied to and the remaining states
+            # with nans (as no additional state)
+            # 0 state means that action should be applied to all states
+            nb_nans = max_nb_action_states - nb_action_states[action_nb]
+            if action.states is None:
+                states = [0]
+            else:
+                states = [state.number for state in action.states]
+            states = [*states, *([math.nan] * nb_nans) ]
+            action_state_array[action_nb] = states
+
+        return action_state_array
+
+    def _get_action_operation_array(self):
+        nb_actions = len(self.actions)
+        action_operation_array = np.zeros((nb_actions))
+        for action_nb, action in enumerate(self.actions):
+            if action._operation == "subtract":
+                action_operation_array[action_nb] = -1
+            else:
+                action_operation_array[action_nb] = 1
+        return action_operation_array
+
+    def get_object_removal_property_array(self):
+        # for object removal, there are two array with
+        # several values for each condition
+        # in all_object_removal_properties
+        # the first value is the operation used to combine property values
+        # with 1 meaning summing and -1 meaning subtracting
+        # for subtracting all properties after the first one are subtracted
+        # from the first one
+        # the following values are property numbers
+        # also give object removal function as parameter.
+        max_nb_properties = 0
+        for object_removal in self.object_removal:
+            nb_properties_for_removal = len(object_removal.object_properties)
+            max_nb_properties = max(max_nb_properties,
+                                    nb_properties_for_removal)
+
+        all_object_removal_properties = np.full((len(self.object_removal),
+                                                 max_nb_properties+1),
+                                                math.nan)
+
+        for removal_nb, object_removal in enumerate(self.object_removal):
+            object_removal_properties = [property.number
+                                            for property
+                                            in object_removal.object_properties]
+            if object_removal.combine_properties_operation == "sum":
+                all_object_removal_properties[removal_nb,:] = [1,
+                                                               *object_removal_properties]
+            elif object_removal.combine_properties_operation == "subtract":
+                all_object_removal_properties[removal_nb,:] = [-1,
+                                                               *object_removal_properties]
+        return all_object_removal_properties
+
+    def _get_object_removal_property_array(self):
+        # for the second array, object_removal_operations
+        # the first value is the operation, which can be 1 for the combined
+        # property value being larger then a threshold
+        # and -1 for the combined property value being smaller then a threshold
+        # the second value is the threshold
+        object_removal_operations = np.zeros((len(self.object_removal),
+                                              2))
+        for removal_nb, object_removal in enumerate(self.object_removal):
+            if object_removal.compare_to_threshold == "smaller":
+                object_removal_operations[removal_nb, 0] = -1
+            else:
+                object_removal_operations[removal_nb, 0] = 1
+
+            object_removal_operations[removal_nb, 1] = object_removal.threshold
+        return object_removal_operations
+
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
+               time_resolution,
                max_number_objects=None, ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                 max_iters_no_data_extraction=2000,
-               dynamically_increase_nb_objects=True, save_states=False,
+               dynamically_increase_nb_objects=False,
+               remove_finished_sims=False, save_states=False,
                use_assertion_checks=True, reset_folder=True):
         """
 
@@ -207,6 +514,7 @@ class SSA():
         if reset_folder:
             if os.path.exists(data_folder):
                 shutil.rmtree(data_folder)
+                time.sleep(0.1)
             os.mkdir(data_folder)
 
         self.min_time = min_time
@@ -218,6 +526,7 @@ class SSA():
         self.save_states = save_states
         self.use_assertion_checks = use_assertion_checks
         self.max_iters_no_data_extraction = max_iters_no_data_extraction
+        self.remove_finished_sims = remove_finished_sims
 
         self.all_data = []
         self.all_times = []
@@ -232,16 +541,44 @@ class SSA():
 
         self.all_removed_positions = pd.DataFrame()
 
+        # get different parameters from all events#, so that no parameter is
+        # used twice (some transitions may have the same parameter)
+        parameters = [event.parameter for event in [*self.transitions,
+                                                    *self.actions]]
+        param_nb = 0
+        self.parameters = []
+        for parameter in parameters:
+            if parameter.number is None:
+                parameter.number = param_nb
+                if parameter.name == "":
+                    parameter.name = str(parameter.number)
+                param_nb += 1
+                self.parameters.append(parameter)
+
         # create list with all transitions and then with all actions
-        self._all_simulation_parameters = [*self.states,
-                                          *self.transitions, *self.actions]
+        self._all_simulation_parameters = [*self.states, *self.parameters]
 
         # create list of length of all model parameters
         simulation_parameter_lengths = [len(parameters.values)
                                         for parameters
                                         in self._all_simulation_parameters]
+        all_parameter_combinations = False
+        # if not all parameter combinations should be used
+        # use the first parameter value as the standard and the other as single
+        # changes that should be done (while leaving the other parameters
+        # undchanged) - therefore for each simulation only one parameter is
+        # changed from the standard set of parameter values
+        if not all_parameter_combinations:
+            # the number of simulations is 1 (for all standard parameter values)
+            # plus the number of parameters beyond the standard parameter values
+            # (which is the number of parameter values minus 1 for each
+            # parameter)
+            simulation_parameter_lengths = (np.sum(simulation_parameter_lengths)
+                                            - len(simulation_parameter_lengths)
+                                            + 1)
+            simulation_parameter_lengths = [simulation_parameter_lengths]
 
-        if dynamically_increase_nb_objects:
+        if dynamically_increase_nb_objects | (max_number_objects is None):
             # if the number of objects allowed in the simulation should be
             # dynamically increased, first check the maximum number of objects
             # that the simulation starts with
@@ -257,10 +594,9 @@ class SSA():
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths]
 
-        self._zero_tensor = torch.HalfTensor([0]).to(device=self.device)
-
         self._initialize_parameter_arrays(self._all_simulation_parameters,
-                                          simulation_parameter_lengths)
+                                          simulation_parameter_lengths,
+                                          all_parameter_combinations)
 
         self.times = torch.zeros((1,*self._simulation_array_size[1:]))
 
@@ -290,179 +626,307 @@ class SSA():
         #
         # self._save_data(data, 0)
 
-        self._add_data_to_buffer()
+        # reshape to have all different parameter values in one axis
+        # with the first axis being the number of objects
+        self.times = np.array(self.times.reshape((self.times.shape[0],
+                                                  self.times.shape[1], -1)))
+        self.object_states = self.object_states.reshape((self.object_states.shape[0],
+                                                         self.object_states.shape[1],
+                                                         -1))
+
+        for property in self.properties:
+            property.array = property.array.reshape((property.array.shape[0],
+                                                     property.array.shape[1],
+                                                     -1))
+            property.array = np.array(property.array)
+
+        # self._add_data_to_buffer()
         self._save_simulation_parameters()
 
-        # continue simulation until all simulations have reached at least the
-        # minimum time
-        times_tracked = set()
-
-        iteration_nb = 1
-        start_time = time.time()
         self.data_buffer = []
         self.last_data_extraction = 0
         self.last_data_saving = 0
 
-        while True:
-            current_min_time = torch.min(self.times)
-            if current_min_time >= min_time:
-                break
-            # print regular current min time in all simulations
-            whole_time = current_min_time.item() // print_update_time_step
-            if whole_time not in times_tracked:
-                print("\n",iteration_nb, "; Current time: ",
-                      whole_time * print_update_time_step)
-                print(time.time() - start_time)
-                start_time = time.time()
-                times_tracked.add(whole_time)
-                # only print data if the current data was not yet printed
-                # and if there is data buffer to be printed
-                for keyword, data_extraction in data_extractions.items():
-                    if not data_extraction.print_regularly:
+        # to make run_iteration compatible with numba.njit(debug=True) (numba no python)
+        # use numpy arrays for everything instead of python objects
+        # create one array for
+
+        # get free GPU memory if device is cuda, to do calculations in batches
+        # that fit on the GPU
+        (free_memory,
+         total_memory) = numba.cuda.current_context().get_memory_info()
+
+        # get size of all arrays that will be created
+        # the size depends on
+        # - the number of simulations
+        # - the number of parameter combinations
+        # - the number of objects
+        # - the number of timepoints that should be saved together
+        #   plus one (because one set of array is needed for the current values)
+        # - and the datatype of the arrays that determines the size of one
+        #   element in the array
+        # all of which is reflected in array shape.
+
+        # allow option to not save initial state! (should be default)
+
+        # create arrays with the parameter size to be explored in one round
+
+        self.object_states = np.array(self.object_states)
+
+        property_start_values = self._get_property_start_val_arrays()
+
+        properties_array = self._get_property_vals_array()
+
+        (property_min_values,
+         property_max_values) = self._get_property_min_max_val_arrays()
+
+        parameter_value_array = self._get_parameter_value_array()
+
+        transition_parameters = self._get_transition_parameters()
+        all_transition_states = self._get_transition_state_arrays()
+        all_transition_set_to_zero_properties = self._get_transition_set_to_zero_properties()
+        all_transition_tranferred_vals = self._get_transition_transferred_vals_array()
+
+        action_parameters = self._get_action_parameter_array()
+        all_action_properties = self._get_action_properties_array()
+        action_operation_array = self._get_action_operation_array()
+        action_state_array = self._get_action_states_array()
+
+        all_object_removal_properties = self.get_object_removal_property_array()
+        object_removal_operations = self._get_object_removal_property_array()
+
+        # -  current rates of all transitions (empty)
+        nb_transitions = len(self.transitions)
+        current_transition_rates = np.zeros((nb_transitions,
+                                             *self.object_states.shape[1:]))
+        # print(action_parameters, transition_parameters,
+        #       current_parameter_values.shape,
+        #       parameter_value_array.shape)
+
+        # - all total transition rates (empty)
+        total_rates = np.zeros(self.object_states.shape[1:])
+
+        # - current reaction times (empty)
+        reaction_times = np.zeros(self.object_states.shape[1:])
+
+        current_transitions = np.zeros(self.object_states.shape[1:])
+
+        all_transition_positions = np.zeros(self.object_states.shape[1:])
+
+        # calculate number of objects for all states
+        nb_objects_all_states = np.zeros((len(self.states),
+                                          *self.object_states.shape[1:]))
+        for state_nb, state in enumerate(self.states):
+            nb_objects_all_states[state_nb] = np.sum(self.object_states ==
+                                                     state.number, axis=0)
+
+        nb_timepoints = math.ceil(self.min_time/time_resolution) + 1
+
+        # set arrays for values over time
+        current_timepoint_array = np.zeros((self.object_states.shape[1:]))
+
+        timepoint_array = np.full((nb_timepoints,
+                                   *self.object_states.shape[1:]),
+                                  math.nan)
+        timepoint_array[0] = 0
+
+        object_state_time_array = np.full((nb_timepoints,
+                                           *self.object_states.shape),
+                                          math.nan)
+        object_state_time_array[0] = self.object_states
+
+        nb_properties = len(self.properties)
+        properties_time_array = np.full((nb_timepoints, nb_properties,
+                                         *self.object_states.shape),
+                                        math.nan)
+
+        for property_nb, property in enumerate(self.properties):
+            properties_time_array[0, property_nb] = property.array
+
+        # current_min_time = np.min(self.times)
+        # if current_min_time >= min_time:
+        #     break
+        convert_array = np.ascontiguousarray
+
+        current_timepoint_array = convert_array(current_timepoint_array)
+        timepoint_array = convert_array(timepoint_array)
+        object_state_time_array = convert_array(object_state_time_array)
+        properties_time_array = convert_array(properties_time_array)
+        time_resolution = convert_array(time_resolution)
+
+        seed = 42
+
+        device = "gpu"
+
+        nb_parameter_combinations = self.object_states.shape[2]
+
+        if self.device.find("cuda") != -1:
+            simulation_numba._decorate_all_functions_for_gpu()
+            current_timepoint_array = cuda.to_device(current_timepoint_array)
+            timepoint_array = cuda.to_device(timepoint_array)
+            object_state_time_array = cuda.to_device(object_state_time_array)
+            properties_time_array = cuda.to_device(properties_time_array)
+            time_resolution = cuda.to_device(time_resolution)
+            start = time.time()
+
+            to_cuda = cuda.to_device
+
+            # get number of cuda stream managers and cores per stream manager
+            nb_SM, nb_cc = self._get_number_of_cuda_cores()
+
+            rng_states = numba.cuda.random.create_xoroshiro128p_states(nb_SM *
+                                                                       nb_cc,
+                                                                       seed=
+                                                                       seed)
+
+            print("Starting simulation...")
+            sim = simulation_numba._execute_simulation_gpu
+            sim[nb_SM,
+                nb_cc](to_cuda(convert_array(self.object_states)),
+                        to_cuda(convert_array(properties_array)),
+                        to_cuda(convert_array(self.times)),
+                        nb_simulations, nb_parameter_combinations,
+                        to_cuda(convert_array(parameter_value_array)),
+                        to_cuda(convert_array(transition_parameters)),
+                        to_cuda(convert_array(all_transition_states)),
+                        to_cuda(convert_array(action_parameters)),
+                        to_cuda(convert_array(action_state_array)),
+                        to_cuda(convert_array(all_action_properties)),
+                        to_cuda(convert_array(action_operation_array)),
+                        to_cuda(convert_array(current_transition_rates)),
+                        to_cuda(convert_array(property_start_values)),
+                        to_cuda(convert_array(property_min_values)),
+                        to_cuda(convert_array(property_max_values)),
+                        to_cuda(convert_array(all_transition_tranferred_vals)),
+                        to_cuda(convert_array(
+                            all_transition_set_to_zero_properties)),
+                        to_cuda(convert_array(all_object_removal_properties)),
+                        to_cuda(convert_array(object_removal_operations)),
+
+                        to_cuda(convert_array(nb_objects_all_states)),
+                        to_cuda(convert_array(total_rates)),
+                        to_cuda(convert_array(reaction_times)),
+                        to_cuda(convert_array(current_transitions)),
+                        to_cuda(convert_array(all_transition_positions)),
+
+                        current_timepoint_array, timepoint_array,
+                        object_state_time_array, properties_time_array,
+                        time_resolution, self.min_time, seed, rng_states
+                         )
+            print(time.time() - start)
+            numba.cuda.synchronize()
+            self.object_states = torch.Tensor(object_state_time_array.copy_to_host())
+            self.object_states = self.object_states.to(self.device)
+            for property_nb, property in enumerate(self.properties):
+                property.array = torch.Tensor(properties_time_array.copy_to_host()[:, property_nb])
+                property.array = property.array.to(self.device)
+            self.times = torch.Tensor(timepoint_array.copy_to_host()) * time_resolution.copy_to_host()
+            self.times = self.times.unsqueeze(1)
+            self.times = self.times.to(self.device)
+
+        else:
+            simulation_numba._decorate_all_functions_for_cpu()
+            print("Starting simulation...")
+            start = time.time()
+            _execute_sim = simulation_numba._execute_simulation_cpu
+            _execute_sim(convert_array(self.object_states),
+                        convert_array(properties_array),
+                        convert_array(self.times),
+                        nb_simulations, nb_parameter_combinations,
+                        convert_array(parameter_value_array),
+                        convert_array(transition_parameters),
+                        convert_array(all_transition_states),
+                        convert_array(action_parameters),
+                        convert_array(action_state_array),
+                        convert_array(all_action_properties),
+                        convert_array(action_operation_array),
+                        convert_array(current_transition_rates),
+                        convert_array(property_start_values),
+                        convert_array(property_min_values),
+                        convert_array(property_max_values),
+                        convert_array(all_transition_tranferred_vals),
+                        convert_array(all_transition_set_to_zero_properties),
+                        convert_array(all_object_removal_properties),
+                        convert_array(object_removal_operations),
+
+                        convert_array(nb_objects_all_states),
+                        convert_array(total_rates),
+                        convert_array(reaction_times),
+                        convert_array(current_transitions),
+                        convert_array(all_transition_positions),
+
+                        current_timepoint_array, timepoint_array,
+                        object_state_time_array, properties_time_array,
+                        time_resolution, self.min_time,seed
+                        )
+            print(time.time() - start)
+
+            self.object_states = torch.Tensor(np.copy(object_state_time_array))
+            # nan_pos = self.object_states[-2,:,0] == 0
+            # print("nb 0 states: ", nan_pos.sum())
+            # print(self.object_states[-2,:,0])
+
+            for property_nb, property in enumerate(self.properties):
+                property.array = torch.Tensor(np.copy(
+                    properties_time_array[:, property_nb]))
+
+            self.times = (torch.Tensor(np.copy(timepoint_array)).unsqueeze(1)
+                          * time_resolution)
+
+        all_data = {}
+        for data_name, data_extraction in self.data_extractions.items():
+            start = time.time()
+            all_data[data_name] = data_extraction.extract(self)
+            print(data_name, "extraction time: ", time.time() - start)
+            if data_name.startswith("local_density"):
+                for sub_name, sub_data in all_data[data_name].items():
+                    if sub_data.sum() == 0:
                         continue
-                    data = data_extraction.extract(self)
-                    for data_name, data_array in data.items():
-                        mean = torch.nanmean(data_array.to(torch.float))
-                        if (not np.isnan(mean.item())) & (mean.item() != 0):
-                            print(data_name," : ",mean.item())
+                    plt.figure()
+                    plt.plot(torch.mean(sub_data[-1].cpu(),dim=(1)))
+                    plt.title(sub_name)
+                    plt.ylim(0,plt.ylim()[1])
+                    # plt.figure()
+                    # plt.plot(torch.mean(sub_data[-1],dim=(1)))
+                    # plt.ylim(0,3.5)
+            else:
+                for sub_name, sub_data in all_data[data_name].items():
+                    if sub_name.find("mean") == -1:
+                        continue
+                    # if sub_name.find("inside") == -1:
+                    #     continue
+                    mean = np.nanmean(sub_data[-1].cpu())
+                    if mean == 0:
+                        continue
+                    if np.isnan(mean):
+                        continue
+                    print(sub_name, mean)
+        self._save_times_and_object_states(0)
+        self._save_data(all_data, 0)
 
-            self._run_iteration(iteration_nb)
+    def _get_number_of_cuda_cores(self):
+        cc_cores_per_SM_dict = {
+            (2, 0): 32,
+            (2, 1): 48,
+            (3, 0): 192,
+            (3, 5): 192,
+            (3, 7): 192,
+            (5, 0): 128,
+            (5, 2): 128,
+            (6, 0): 64,
+            (6, 1): 128,
+            (7, 0): 64,
+            (7, 5): 64,
+            (8, 0): 64,
+            (8, 6): 128,
+            (8, 9): 128,
+            (9, 0): 128
+        }
 
-            iteration_nb += 1
-
-        removed_pos_file = os.path.join(self.data_folder,
-                                        "removed_param_values.feather")
-        self.all_removed_positions.to_feather(removed_pos_file)
-
-    def _run_iteration(self, iteration_nb):
-        # create tensor for x (position in neurite), l (length of microtubule)
-        # and time
-        start = time.time()
-        total_rates = self._get_total_and_single_rates_for_state_transitions()
-        reaction_times = self._get_times_of_next_transition(total_rates)
-        # print(1, time.time() - start)
-        start = time.time()
-
-        # print(self.object_states[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-        # print(self.properties[0].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-        # print(self.properties[1].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-        # print(self.properties[2].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-        # print(self.properties[1].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-
-        # if transition.name == "labile_pausing_to_stable":
-        # if len(np.unique(transition_positions[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])) == 2:
-
-        # print("State 1:", len(self.object_states[self.object_states == 1]))
-        # print("State 2:", len(self.object_states[self.object_states == 2]))
-
-        self._determine_next_transition(total_rates)
-
-        self._determine_positions_of_transitions()
-        # print(2, time.time() - start)
-        start = time.time()
-
-        self._execute_actions_on_objects(reaction_times)
-        # print(3, time.time() - start)
-        start = time.time()
-
-        self._update_object_states()
-        # print(4, time.time() - start)
-        start = time.time()
-
-        # remove objects based on properties
-        objects_to_remove = self.object_removal.get_objects_to_remove()
-        for object_property in self.properties:
-            object_property.array[objects_to_remove] = float("nan")
-
-        self.object_states[objects_to_remove] = 0
-        objects_to_remove = None
-
-        self.times += reaction_times
-
-        # print(5, time.time() - start)
-        start = time.time()
-
-        # self.get_tensor_memory()
-        # check whether there is a simulation in which all object positions
-        # are occupied, if so, increase tensor size to make space for more
-        # objects
-        self._add_data_to_buffer()
-
-        if ((iteration_nb - self.last_data_extraction) >
-                self.max_iters_no_data_extraction):
-            self.data_buffer.append(self._extract_data())
-            self._save_times_and_object_states(iteration_nb)
-            self.last_data_extraction = iteration_nb
-
-        if ((iteration_nb - self.last_data_saving) >
-                self.max_iters_no_data_extraction):
-            all_concat_data = self._concat_data_from_buffer()
-            self._save_data(all_concat_data, iteration_nb)
-            self.last_data_saving = iteration_nb
-            del all_concat_data
-            gc.collect
-
-        if self.dynamically_increase_nb_objects:
-            positions_object = torch.max(self.object_states[-1])
-            if positions_object > 0:
-                self._add_objects_to_full_tensor()
-
-                start = time.time()
-                if self.last_data_extraction != iteration_nb:
-                    self.data_buffer.append(self._extract_data())
-
-                    if self.device.find("cuda") != -1:
-                        self._free_gpu_memory()
-
-                    self._save_times_and_object_states(iteration_nb)
-                    self.last_data_extraction = iteration_nb
-
-                start = time.time()
-
-        # print(8, time.time() - start)
-        start = time.time()
-        # only reduce array size, if not all simulations are done
-        current_min_time = torch.min(self.times)
-        if current_min_time >= self.min_time:
-            return
-
-        # reduce array size every defined number of iterations
-        # by checking whether all simulations for a parameter value are done
-        dim_list = list(range(len(self.times.shape)))
-
-        all_finished_sim_positions = self._get_finished_simulation(dim_list,
-                                                                   iteration_nb)
-        nb_finished_sim_positions = [len(finished_sim_pos)
-                                     for finished_sim_pos
-                                     in all_finished_sim_positions]
-        if np.max(nb_finished_sim_positions) > 0:
-            self._remove_finished_positions_from_all_arrays(all_finished_sim_positions)
-
-            if self.last_data_extraction != iteration_nb:
-                self.data_buffer.append(self._extract_data())
-                self.last_data_extraction = iteration_nb
-
-                if self.device.find("cuda") != -1:
-                    self._free_gpu_memory()
-
-                start = time.time()
-                self._save_times_and_object_states(iteration_nb)
-
-            if self.last_data_saving != iteration_nb:
-                start = time.time()
-                all_concat_data = self._concat_data_from_buffer()
-                # print(888, time.time() - start)
-                start = time.time()
-                self._save_data(all_concat_data, iteration_nb)
-                self.last_data_saving = iteration_nb
-                # print(999, time.time() - start)
-                del all_concat_data
-                gc.collect
-
-            # print(11111, time.time() - start)
-
-        # print(9, time.time() - start)
-        start = time.time()
+        device = cuda.get_current_device()
+        nb_SM = device.MULTIPROCESSOR_COUNT
+        nb_cc_cores = cc_cores_per_SM_dict[device.compute_capability]
+        return nb_SM, nb_cc_cores
 
     def _empty_buffers(self):
         for property in self.properties:
@@ -500,7 +964,7 @@ class SSA():
         # information
         zero_array_float_to_add = torch.full((self.nb_objects_added_per_step,
                                                *self.object_states.shape[1:]),
-                                             float("nan"), dtype=torch.float)
+                                             math.nan, dtype=torch.float)
         for property in self.properties:
             property.array = torch.cat((property.array,
                                         zero_array_float_to_add))
@@ -544,33 +1008,54 @@ class SSA():
         for state in self.states:
             if state.initial_condition is None:
                 continue
-            max_number_objects_with_state += torch.max(state.initial_condition)
+            max_number_objects_with_state += np.max(state.initial_condition)
 
         return max_number_objects_with_state.item()
 
     def _initialize_parameter_arrays(self, all_simulation_parameters,
-                                     simulation_parameter_lengths):
+                                     simulation_parameter_lengths,
+                                     all_parameter_combinations):
         # go through all model parameters and expand array to simulation
         # specific size
-        self.dimension_to_parameter_map = {}
-        self.parameter_to_dimension_map = {}
         all_dimensions = [dim for dim
                           in range(len(simulation_parameter_lengths) + 2)]
+
+        nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
-            array_dimension = dimension + 2
-            expand_dimensions = copy.copy(all_dimensions)
-            expand_dimensions.remove(array_dimension)
-            # expand dimensions of parameter values to simulation array
-            array = np.expand_dims(model_parameters.values, expand_dimensions)
-            # save array in object, therefore also change objects saved in
-            # self.transitions and self.actions
-            array = torch.HalfTensor(array).to(device=self.device)
+
+            if all_parameter_combinations:
+                array_dimension = dimension + 2
+                expand_dimensions = copy.copy(all_dimensions)
+                expand_dimensions.remove(array_dimension)
+                # expand dimensions of parameter values to simulation array
+                array = np.expand_dims(model_parameters.values,
+                                       expand_dimensions)
+                # save array in object, therefore also change objects saved in
+                # self.transitions and self.actions
+                array = torch.HalfTensor(array)
+            else:
+                standard_value = model_parameters.values[0]
+                standard_value = torch.Tensor([standard_value])
+                # use standard value across entire array
+                array = standard_value.repeat((simulation_parameter_lengths))
+                # then get the position/s at which the values should be changed
+                # which is starting at the number of previously changed
+                # positions (for other parameters)
+                # the first position should be all the standard values without
+                # any change
+                # the following positions should be the single parameter changes
+                # therefore, the number of additional parameters is the total
+                # number minus 1
+                nb_add_params = len(model_parameters.values) - 1
+                if len(model_parameters.values) > 1:
+                    start = nb_previous_params + 1
+                    end = start + nb_add_params
+                    array[start:end] = model_parameters.values[1:]
+                nb_previous_params += nb_add_params
             array = array.expand(1,*self._simulation_array_size[1:])
-            model_parameters.value_array = array
-            # assign model parameter to the correct dimension
-            # in the simulation arrays
-            self.dimension_to_parameter_map[array_dimension] = model_parameters
-            self.parameter_to_dimension_map[model_parameters.name] = dimension
+            # reshape to have all different parameter values in one axis
+            model_parameters.value_array = np.array(array.reshape((array.shape[1],
+                                                                  -1)))
         return None
 
     def _initialize_object_states(self):
@@ -593,7 +1078,7 @@ class SSA():
                 continue
             # expand the initial condition array, to add them up
             initial_cond = state.initial_condition
-            expanded_array = torch.ShortTensor(initial_cond).to(device=self.device)
+            expanded_array = torch.ShortTensor(initial_cond)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
             nb_objects_with_states += expanded_array
 
@@ -619,7 +1104,7 @@ class SSA():
             # expand the initial condition array, to add them up and get number
             # of assigned objects for each simulation
             initial_cond = state.initial_condition
-            expanded_array = torch.ShortTensor(initial_cond).to(device=self.device)
+            expanded_array = torch.ShortTensor(initial_cond)
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
             object_state_mask = (self.index_array.expand(
@@ -643,7 +1128,7 @@ class SSA():
             random_property_vals = False
             object_property.array = torch.zeros(self._simulation_array_size,
                                                 dtype=torch.float)
-            object_property.array[:] = float("nan")
+            object_property.array[:] = math.nan
             initial_cond = object_property.initial_condition
 
             if ((initial_cond is not None) &
@@ -693,353 +1178,10 @@ class SSA():
                 # mask directly is small
             if type(property_values) != type(object_property.array):
                 object_property.array[object_state_mask] = property_values
-                continue
-            object_property.array = object_property.array.masked_scatter(object_state_mask, 
-                                                                        property_values)
-        return None
-
-    def _get_total_and_single_rates_for_state_transitions(self):
-        # get number of objects in each state
-        nb_objects_all_states = torch.ShortTensor().to(device=self.device)
-        # add 1 to number of states since 0 is not explicitly defined
-        for state in range(1,len(self.states) + 1):
-            nb_objects = torch.sum(self.object_states == state, dim=0)
-            # add a new dimension in first position
-            nb_objects = nb_objects[None]
-            nb_objects_all_states = torch.cat((nb_objects_all_states,
-                                               nb_objects))
-        # get rates for all state transitions, depending on number of objects
-        # in corresponding start state of transition
-        all_transition_rates = torch.HalfTensor().to(device=self.device)
-        for transition in self.transitions:
-            if transition.start_state is None:
-                # for state 0, the number of objects in state 0 is of course
-                # not important
-                transition.current_rates = transition.value_array
             else:
-                start_state = transition.start_state.number - 1
-                transition.current_rates = (transition.value_array *
-                                            nb_objects_all_states[start_state])
-            # if a time-dependent function is defined, modify the rates by
-            # this time-dependent function
-            if transition.time_dependency is not None:
-                transition.current_rates = (transition.current_rates *
-                                            transition.time_dependency(self.times))
-            current_rates = transition.current_rates
-            all_transition_rates = torch.cat((all_transition_rates,
-                                             current_rates.unsqueeze(0)))
-
-        # add current nucleation rate to catastrophe rate for each simulation
-        total_rates = torch.sum(all_transition_rates, dim=0, dtype=torch.float)
-
-        return total_rates
-
-    def _get_times_of_next_transition(self, total_rates):
-        # get time of next event for each simulation
-        exponential_func = torch.distributions.exponential.Exponential
-        reaction_times = exponential_func(total_rates,
-                                          validate_args=False).sample()
-        # print("rate:", total_rates.min(), total_rates.mean(),
-        #       "\nreac:", reaction_times.max(),reaction_times.mean(),
-        #       reaction_times.min())
-        return reaction_times
-
-    def _determine_next_transition(self, total_rates):
-        # get which event happened in each simulation
-        random_numbers = torch.rand(total_rates.shape, dtype=torch.half)
-
-        # set random number in zero rate positions to >1 to make threshold
-        # higher than total rate, thereby preventing any reaction from
-        # being executed
-        random_numbers[total_rates == 0] = 1.1
-        thresholds = total_rates * random_numbers
-
-        # go through each transition and check whether it will occur
-        rate_array_shape = self.transitions[0].current_rates.shape
-        current_rate_sum = torch.zeros(rate_array_shape, dtype=torch.float)
-        all_transitions_mask = torch.zeros(rate_array_shape, dtype=torch.bool)
-        for transition in self.transitions:
-            current_rate_sum += transition.current_rates
-            transition_mask = ((current_rate_sum - thresholds) >=
-                               self._zero_tensor)
-            # exclude positions for previous transitions from an additional
-            # transition to happen
-            transition_mask[all_transitions_mask] = False
-
-            # transition_happened = transition_mask[:,0,0,0,0,0,0,0,0,0,
-            #                                     0,0,0,0,0,0,0,0,0]
-            # if transition_happened:
-            #    print(transition.name)
-
-            # include current transition in mask of all transitions so far
-            all_transitions_mask = all_transitions_mask | transition_mask
-            transition.simulation_mask = transition_mask
-
-        if self.use_assertion_checks:
-            # test whether the expected number of transitions
-            # (one per simulation) is observed
-            nb_no_transitions = len(torch.nonzero(total_rates == 0))
-            expected_total_nb_transitions = np.prod(rate_array_shape[1:])
-            nb_transitions = len(torch.nonzero(all_transitions_mask))
-            assert expected_total_nb_transitions == (nb_no_transitions +
-                                                     nb_transitions)
-
-        return None
-
-    def _determine_positions_of_transitions(self):
-
-        # the transitions masks only tell which reaction happens in each
-        # stimulation, but not which object in this simulation is affected
-        # To get one random object of the possible objects,
-        # first, create mask of index positions, so that each object for each
-        # simulation has a unique identifier (index) within this simulation
-        # setting all positions where no catastrophe can take place to 0
-        for transition in self.transitions:
-            transition_mask = transition.simulation_mask
-            array_size = self._simulation_array_size
-            possible_transition_positions = self.index_array.expand(array_size) + 1
-            possible_transition_positions =possible_transition_positions.clone()
-            # exclude simulations where the transition did not happen
-
-            no_transition_nb = self._simulation_array_size[0] + 3
-
-            possible_transition_positions[~transition_mask.expand(
-                *self.object_states.shape)] = no_transition_nb
-            # exclude positions in simulations that were not in the start state
-            if transition.start_state is None:
-                start_state = 0
-            else:
-                start_state = transition.start_state.number
-            start_state_positions = self.object_states == start_state
-            possible_transition_positions[~start_state_positions] =no_transition_nb
-
-            # for nucleation of new objects, always start at the leftmost
-            # position
-            if start_state == 0:
-                # get the minimum object index for each simulation
-                idx_positions = torch.amin(possible_transition_positions,
-                                           dim=0, keepdim=True)
-                # since all simulations with the wrong start state and where
-                # the transition did not happen at all have object indexes
-                # no_transition_nb (which is larger than the largest possible
-                # index), the transition positions are the the smallest object
-                # indices that are still smaller than no_transition_nb
-                transition_positions = ((possible_transition_positions ==
-                                         idx_positions) &
-                                        (possible_transition_positions <
-                                         no_transition_nb))
-            # for any other transition, a random object must be selected!
-            # Otherwise there will be a strong bias towards the first objects
-            # undergoing all dynamics
-            else:
-                # first set no transition points to 0, since to get the random
-                # position the maximum possible position must be used
-                # (which must not be the artificial no_transition_nb)
-                no_transition_mask = (possible_transition_positions ==
-                                      no_transition_nb)
-                possible_transition_positions[no_transition_mask] = 0
-                # use the maximum allowed transition position for each
-                # simulation and multiply it with a random uniform number
-                # between 0 and 1
-                max_positions = torch.amax(possible_transition_positions,
-                                           dim=0, keepdim=True)
-                rand_pos = torch.rand((1,
-                                       *possible_transition_positions.shape[1:]
-                                       ))
-                rand_pos = rand_pos * max_positions
-                # now get the position closest to this random position by
-                # subtracting the random pos from the possible
-                # transition_positions
-                distance_from_random = possible_transition_positions - rand_pos
-                distance_from_random = torch.abs(distance_from_random)
-                # then set the points not allowed for transition to the high
-                # no_transition_nb
-                distance_from_random[no_transition_mask] = no_transition_nb
-                # then take the minimum number, which is the minimum distance
-                # from the random number
-                transition_idxs = torch.amin(distance_from_random,
-                                             dim=0, keepdim=True)
-                # print(transition_idxs[:,0,0,0,0,0,0,0,0,0,0,0,0,0])
-                # dasd
-                transition_positions = ((distance_from_random ==
-                                         transition_idxs) &
-                                        (distance_from_random <
-                                         no_transition_nb))
-
-            transition.transition_positions = transition_positions
-        return None
-
-    def _execute_actions_on_objects(self, reaction_times):
-        # execute actions on objects depending on state, before changing state
-        for action in self.actions:
-            # get a mask that includes all objects on which the action should be
-            # executed
-            start = time.time()
-            if action.states is None:
-                action_positions = self.object_states > 0
-                # assume that almost always in all the simulations at least one
-                # there is at least one object
-                # even if not, the mask multiplication 
-                # will prevent wrong values
-                any_objects = True
-            else:
-                action_positions = torch.zeros(self.object_states.shape,
-                                               dtype=torch.bool)
-                for state in action.states:
-                    action_positions = (action_positions |
-                                        (self.object_states ==
-                                         state.number))
-                any_objects = action_positions.any()
-            if not any_objects:
-                continue
-            # print(3.1, time.time() - start)
-            start = time.time()
-            object_property_array = action.object_property.array
-            sim_array_shape = self.object_states.shape
-            action_reaction_times = reaction_times.expand(*sim_array_shape)
-            value_array = action.value_array
-            # print(3.2, time.time() - start)
-            start = time.time()
-            value_array = value_array.expand(*self.object_states.shape)
-
-            #transformed_property_array = object_property_array + action_reaction_times*value_array*action_positions
-            transformed_property_array = action.operation(object_property_array,
-                                                          action_reaction_times,
-                                                          value_array,
-                                                          action_positions)
-
-            # if action.name == "Act_MT_growth":
-            #     print(transformed_property_array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-            #     if np.nanmin(transformed_property_array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]) < 0:
-            #         print(self.object_states[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-            #         print(transformed_property_array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-
-            # print(3.3, time.time() - start)
-            start = time.time()
-            # transformed_property_array = transformed_property_array.bfloat16()
-            object_property_array = transformed_property_array
-
-            # print(object_property_array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-            # print(3.4, time.time() - start)
-            start = time.time()
-
-            # prevent object properties going below min or above max value
-            min_property_value = action.object_property.min_value
-            if min_property_value is not None:
-                objects_below_min = (object_property_array <
-                                     min_property_value)
-                # if max property is not a tensor, but just a single value
-                if type(min_property_value) != type(object_property_array):
-                    object_property_array[objects_below_min] = min_property_value
-                else:
-                    diff = min_property_value - object_property_array
-                    object_property_array += diff * objects_below_min
-
-            # print(3.5, time.time() - start)
-            # start = time.time()
-            max_property_value = action.object_property.max_value
-            if max_property_value is not None:
-                objects_above_max = (object_property_array >
-                                     max_property_value)
-                # if max property is not a tensor, but just a single value
-                if type(max_property_value) != type(object_property_array):
-                    object_property_array[objects_above_max] = max_property_value
-                else:
-                    diff = object_property_array - max_property_value
-                    object_property_array -= diff*objects_above_max
-            action.object_property.array = object_property_array
-            # print(3.6, time.time() - start)
-
-            start = time.time()
-        return None
-
-    def _update_object_states(self):
-        # update the simulations according to executed transitions
-        for transition in self.transitions:
-            transition_positions = transition.transition_positions
-            if transition.start_state is None:
-                start_state = 0
-            else:
-                start_state = transition.start_state.number
-            if transition.end_state is None:
-                end_state = 0
-            else:
-                end_state = transition.end_state.number
-
-            self.object_states[transition_positions] = end_state
-
-            # if transition.name == "labile_pausing_to_stable":
-            #     if len(np.unique(transition_positions[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])) == 2:
-            #         print(self.object_states[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-            #         print(self.properties[0].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-            #         print(self.properties[1].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-            #         print(self.properties[2].array[:,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0])
-            #         dasd
-
-            # transfer values from one property to another upon transition
-            if transition.transfer_property is not None:
-                source = transition.transfer_property[0].array
-                target = transition.transfer_property[1].array
-                target[transition_positions] += source[transition_positions]
-                source[transition_positions] = 0
-
-            # set defined property to zero
-            if transition.property_set_to_zero is not None:
-                transition.property_set_to_zero.array[transition_positions] = 0
-
-            # save all properties defined in saved_properties
-            if transition.saved_properties is not None:
-                for object_property in transition.saved_properties:
-                    if object_property.saved is None:
-                        empty_array = torch.zeros_like(object_property.array)
-                        object_property.saved = empty_array
-                    vals_to_save = object_property.array[transition_positions]
-                    object_property.saved[transition_positions] = vals_to_save
-
-            # Retrieve all properties defined in retrieved_properties
-            if transition.retrieved_properties is not None:
-                for object_property in transition.retrieved_properties:
-                    if object_property.saved is None:
-                        continue
-                    saved_values = object_property.saved[transition_positions]
-                    object_property.array[transition_positions] = saved_values
-                    #reset saved vaues
-                    object_property.saved[transition_positions] = float("nan")
-
-            # if state ended in state 0, set property array at position to NaN
-            if end_state == 0:
-                for object_property in self.properties:
-                    object_property.array[transition_positions] = float("nan")
-                transition.transition_positions = None
-                continue
-            # if state started in state 0, add new entry in property arrays
-            if start_state != 0:
-                transition.transition_positions = None
-                continue
-
-            nb_creations = len(torch.nonzero(transition_positions))
-            transition.transition_positions = None
-            for object_property in self.properties:
-                if type(object_property.start_value) == list:
-                    get_property_vals = self._get_random_poperty_values
-                    min_value = object_property.start_value[0]
-                    max_value = object_property.start_value[1]
-                    property_values = get_property_vals(min_value, max_value,
-                                                        nb_creations)
-                else:
-                    property_values = object_property.start_value
-
-                # if there is just one property value (its not a tensor)
-                # use another way of assinging values
-                # masked_scatter has advantage of much smaller memory footprint
-                # but when just assigning one value, memory footprint using
-                # mask directly is small
-                if type(property_values) != type(object_property.array):
-                    object_property.array[
-                        transition_positions] = property_values
-                    continue
-                object_property.array = object_property.array.masked_scatter(transition_positions,
+                object_property.array = object_property.array.masked_scatter(object_state_mask,
                                                                              property_values)
+
         return None
 
     def _get_random_poperty_values(self, min_value,
@@ -1098,7 +1240,7 @@ class SSA():
             for finished_sim_position in finished_sim_positions:
                 dim_list.remove(finished_sim_position)
             # make all arrays smaller
-            dim_list_tensor = torch.IntTensor(dim_list).to(device=self.device)
+            dim_list_tensor = torch.IntTensor(dim_list)
             self.times = torch.index_select(self.times, dim=dim,
                                             index=dim_list_tensor)
             for property in self.properties:
@@ -1157,7 +1299,8 @@ class SSA():
 
     def _save_times_and_object_states(self, iteration_nb):
 
-        times_array = torch.concat(self.times_buffer)
+        # times_array = torch.concat(self.times_buffer)
+        times_array = self.times
         file_path = os.path.join(self.data_folder,
                                     "times_" + str(iteration_nb) + ".pt")
         torch.save(times_array, file_path)
@@ -1165,7 +1308,8 @@ class SSA():
         self.times_buffer = []
 
         if self.save_states:
-            object_state_array = torch.concat(self.object_states_buffer)
+            # object_state_array = torch.concat(self.object_states_buffer)
+            object_state_array = self.object_states
             file_path = os.path.join(self.data_folder,
                                         "states_" + str(iteration_nb) + ".pt")
             torch.save(object_state_array, file_path)

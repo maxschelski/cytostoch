@@ -1,6 +1,195 @@
 import torch
 import numpy as np
 import time
+import math
+import numba
+import functools
+
+
+def _run_operation_2D_to_1D_density_numba(sim_id, param_id, object_states, properties_array, times,
+                                           transition_rates_array, all_transition_states,
+                                           action_values, action_state_array,
+                                           all_action_properties, action_operation_array,
+                                           current_transition_rates,
+                                           property_start_values,
+                                           property_min_values, property_max_values,
+                                           all_transition_tranferred_vals,
+                                           all_transition_set_to_zero_properties,
+                                           all_object_removal_properties,
+                                           object_removal_operations,
+
+                                           nb_objects_all_states,
+                                           total_rates, reaction_times,
+                                           current_transitions,
+                                           all_transition_positions,
+
+                                           current_timepoint_array, timepoint_array,
+                                           object_state_time_array, properties_time_array,
+                                           time_resolution, rng_states,
+                                          execute_action_properties
+                                           ):
+
+    length_array = 0
+    for length in dimensions[0].lengths:
+        new_length_array = length.array
+        # if regular_print:
+        #     new_length_array = length.array
+        # else:
+        #     new_length_array = torch.concat(length.array_buffer)
+        length_array = length_array + new_length_array
+
+    if state_numbers is not None:
+        # get mask for all objects in defined state
+        object_states = simulation_object.object_states
+        # if regular_print:
+        #     object_states = simulation_object.object_states
+        # else:
+        #     object_states = torch.concat(simulation_object.object_states_buffer)
+        mask = torch.zeros_like(object_states).to(torch.bool)
+        for state in state_numbers:
+            mask = (mask | (object_states == state))
+        # get the maximum number of objects that should be analyzed
+        # (from all simulations)
+        # first sort mask so that first in the matrix there are all True
+        # elements
+        mask_sorted, idx = torch.sort(mask.to(torch.int), dim=1,
+                                      stable=True, descending=True)
+        # the first position that is not True is the sum of all True
+        # elements across the first dim
+        first_false_position = torch.count_nonzero(mask_sorted, dim=1)
+        # then get the maximum of all simulations
+        max_nb_objects = first_false_position.max()
+
+        # set all properties of objects outside of mask to NaN
+        # also use the maximum number of objects of interest for all
+        # simulations, to discard all parts of the sorted array that only
+        # contains objects which are not of interest
+        position_array[~mask] = float("nan")
+        position_array = torch.gather(position_array, dim=1, index=idx)
+        position_array = position_array[:, :max_nb_objects]
+
+        length_array[~mask] = float("nan")
+        length_array = torch.gather(length_array, dim=1, index=idx)
+        length_array = length_array[:, :max_nb_objects]
+
+    # create boolean data array later by expanding each microtubule in space
+    # size of array will be:
+    # (max_position of neurite / resolution) x nb of microtubules
+    min_position = dimensions[0].position.min_value
+    if min_position is None:
+        min_position = 0
+    max_position = dimensions[0].position.max_value
+
+    device = simulation_object.device
+
+    positions = torch.arange(min_position, max_position + resolution * 0.9,
+                             resolution).to(device)
+
+    # print(position_array.shape, positions.shape)
+    all_data = torch.zeros((position_array.shape[0], positions.shape[0],
+                            *position_array.shape[2:])).to(device)
+
+    # only if at least one element is True, analyze the data
+    if mask.sum() > 0:
+
+        position_dimension = int(round((max_position - min_position)
+                                       / resolution, 5))
+        # print(1, time.time() - start)
+        start = time.time()
+        # create tensors on correct device
+        tensors = simulation_object.tensors
+
+        # data type depends on dimension 0 - since that is the number of
+        # different int values needed (int8 for <=256; int16 for >=256)
+        # (dimension 0 is determined by max_x of neurite / resolution)
+        if (position_dimension + 1) < 256:
+            indices_tensor = torch.ByteTensor
+            indices_dtype = torch.uint8
+        else:
+            indices_tensor = torch.ShortTensor
+            indices_dtype = torch.short
+
+        # extract positions of the array that actually contains objects
+        # crop data so that positions that don't contain objects
+        # are excluded
+        # objects_array = ~torch.isnan(position_array)
+        # positions_object = torch.nonzero(objects_array)
+        # min_pos_with_object = positions_object[:,0].min()
+
+        position_start = position_array
+        # max_nb_objects = position_start.shape[0]
+        # position_start = position_start[min_pos_with_object:max_nb_objects]
+
+        # transform object properties into multiples of resolution
+        # then transform length into end position
+        position_start = torch.div(position_start, resolution,
+                                   rounding_mode="floor")  # .to(torch.short)
+        position_start = torch.unsqueeze(position_start, 1)
+
+        position_end = length_array.unsqueeze(1)
+
+        # position_end = position_end[min_pos_with_object:max_nb_objects]
+        position_end = torch.div(position_end + position_array.unsqueeze(1),
+                                 resolution,
+                                 rounding_mode="floor")  # .to(indices_dtype)
+
+        # # remove negative numbers to only look at inside the neurite
+        # position_start[position_start < 0] = 0
+        # position_start = position_start#.to(indices_dtype)
+
+        # create indices array which each number
+        # corresponding to one position in space (in dimension 0)
+        indices = np.linspace(0, position_dimension, position_dimension + 1)
+        indices = np.expand_dims(indices,
+                                 tuple(range(1, len(position_start.shape) - 1)))
+        indices = indices_tensor(indices).unsqueeze(0).to(device=device)
+
+        # split by simulations to reduce memory usage, if needed
+        # otherwise high memory usage leads to
+        # massively increased processing time
+        # with this split, processing time increases linearly with
+        # array size (up to a certain max array size beyond which
+        # the for loop leads to a supralinear increase in processing time)
+
+        nb_objects = position_start.shape[2]
+        # find way to dynamically determine ideal step size!
+        step_size = nb_objects  # 5
+        nb_steps = int(nb_objects / step_size)
+        start_nb_objects = torch.linspace(0, nb_objects - step_size, nb_steps)
+
+        # print(2, time.time() - start)
+        start = time.time()
+        for start_nb_object in start_nb_objects:
+            end_nb_object = int((start_nb_object + step_size).item())
+            start_nb_object = int(start_nb_object.item())
+            # create boolean data array later by expanding each microtubule in space
+            # use index array to set all positions in boolean data array to True
+            # that are between start point and end point
+            nb_timepoints = position_start.shape[0]
+            data_array = ((indices.expand(nb_timepoints, -1, step_size,
+                                          *position_start.shape[3:])
+                           >= position_start[:, :,
+                              start_nb_object:end_nb_object]) &
+                          (indices.expand(nb_timepoints, -1, step_size,
+                                          *position_start.shape[3:])
+                           <= position_end[:, :,
+                              start_nb_object:end_nb_object]))
+
+            # then sum across microtubules to get number of MTs at each position
+            data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
+
+            all_data = all_data + data_array_sum
+            # val_tmp = all_data[:2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+    # print(3, time.time() - start)
+    start = time.time()
+    data_array = all_data[:, :-1]
+
+    dimensions = [-1] + [1] * (len(data_array.shape) - 2)
+    positions = positions.view(*dimensions)[:-1]
+    positions = positions.unsqueeze(0).expand([data_array.shape[0],
+                                               *positions.shape])
+
 
 class PropertyGeometry():
 
@@ -11,7 +200,9 @@ class PropertyGeometry():
 
         Args:
             properties (list of ObjectProperty objects): List of properties that
-                defines the input to the operation function
+                defines the input to the operation function. For currently
+                implemented operations, the first property must have the
+                max_value defined as number (int or float).
             operation (function or string): function that has 'properties'
                 as input and outputs per position allowed value as flattened
                 array  (can be min or max, depending on the ObjectProperty
@@ -29,6 +220,7 @@ class PropertyGeometry():
         new_operation = self.operation_same_dimension_forward
         implemented_operations["same_dimension_forward"] = new_operation
         self.properties = properties
+        self._operation = operation
         if type(operation) == str:
             if operation not in implemented_operations:
                 raise ValueError(f"The supplied PropertyGeometry operation "
@@ -118,6 +310,9 @@ class DataExtraction():
                 (e.g. for [[1,2],[3]], where each number is a State object,
                 state 1 and 2 will be analyzed as one state but state 3
                 will be analyzed as a separate state)
+            regular_print (bool): Whether the extraction is part of the regular
+                print for monitoring and therefore should only contain data from
+                the last iteration
         """
         self.dimensions = dimensions
         self.kwargs = kwargs
@@ -143,10 +338,11 @@ class DataExtraction():
         else:
             self.operation = operation
 
-    def extract(self, simulation_object):
+    def extract(self, simulation_object, regular_print=False):
 
         if self.state_groups is None:
             data, _ = self.operation(self.dimensions, simulation_object,
+                                     regular_print=regular_print,
                                 **self.kwargs)
             all_data = data
         elif type(self.state_groups) == str:
@@ -160,6 +356,8 @@ class DataExtraction():
                                                   simulation_object,
                                                   state_numbers=
                                                   [state.number],
+                                                      regular_print=
+                                                      regular_print,
                                                   **self.kwargs)
 
                 # extract the actual data and not auxiliary information
@@ -185,6 +383,8 @@ class DataExtraction():
                                                  simulation_object,
                                                   state_numbers=
                                                   state_numbers,
+                                                      regular_print=
+                                                      regular_print,
                                                  **self.kwargs)
                 # extract the actual data and not auxiliary information
                 # which would be the same between different state groups
@@ -202,7 +402,7 @@ class DataExtraction():
         return all_data
 
     def _operation_global(self, dimensions, simulation_object, properties,
-                                     state_numbers, **kwargs):
+                                     state_numbers, regular_print, **kwargs):
         """
         Get global properties of object in states.
         Args:
@@ -219,9 +419,14 @@ class DataExtraction():
         Returns:
 
         """
+        object_states = simulation_object.object_states
 
-        object_states = torch.concat(simulation_object.object_states_buffer)
-        mask = torch.zeros_like(object_states).to(torch.bool)
+        # if regular_print:
+        #     object_states = simulation_object.object_states.unsqueeze(0)
+        # else:
+        #     object_states = torch.concat(simulation_object.object_states_buffer)
+
+        mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
         for state in state_numbers:
             mask = (mask | (object_states == state))
 
@@ -247,35 +452,49 @@ class DataExtraction():
             if type(property) in [list, tuple]:
                 property_array = 0
                 for sub_property in property:
-                    sub_property_array = torch.concat(sub_property.array_buffer)
+                    sub_property_array = sub_property.array
+                    # if regular_print:
+                    #     sub_property_array = sub_property.array.unsqueeze(0)
+                    # else:
+                    #     sub_property_array = torch.concat(sub_property.array_buffer)
                     property_array = property_array + sub_property_array
             else:
-                property_array = torch.concat(property.array_buffer)
+                property_array = property.array
+                # if regular_print:
+                #     property_array = property.array.unsqueeze(0)
+                # else:
+                #     property_array = torch.concat(property.array_buffer)
+
             property_array[~mask] = float("nan")
             analysis_properties[name] = property_array
 
         data_dict = {}
         object_number = mask.sum(dim=1).unsqueeze(1)
-        data_dict["number"] = object_number
+        data_dict["number"] = object_number.cpu()
 
         all_data_columns = ["number"]
         for name, values in analysis_properties.items():
             mean_values = values.nanmean(dim=1).unsqueeze(1)
-            data_dict["mean_"+name] = mean_values
-            data_dict["mass_"+name] = mean_values * object_number
+            data_dict["mean_"+name] = mean_values.cpu()
+            # get mean data for objects completely inside (position >= 0)
+            values[dimensions[0].position.array < 0] = math.nan
+            inside_mean_values = values.nanmean(dim=1).unsqueeze(1)
+            data_dict["mean_inside_"+name] = inside_mean_values.cpu()
+            data_dict["mass_"+name] = (mean_values * object_number).cpu()
             all_data_columns.append("mean_"+name)
+            all_data_columns.append("mean_inside_"+name)
             all_data_columns.append("mass_"+name)
 
         return data_dict, all_data_columns
 
     def _operation_raw(self, dimensions, **kwargs):
         data_dict = {}
-        data_dict["position"] = dimensions.position.array
-        data_dict["length"] = dimensions.length.array
+        data_dict["position"] = dimensions[0].position.array.cpu()
+        data_dict["length"] = dimensions[0].length.array.cpu()
         return data_dict
 
-    def _operation_2D_to_1D_density(self, dimensions, simulation_object,
-                                    state_numbers=None,
+    def _operation_2D_to_1D_density_numba(self, dimensions, simulation_object,
+                                    state_numbers=None, regular_print=False,
                                     resolution=0.2, **kwargs):
         """
         Create 1D density array from start and length information without
@@ -292,25 +511,36 @@ class DataExtraction():
             return ValueError(f"The operation '2D_to_1D_density' is only "
                               f"implemented for 1 dimension. DataExtraction "
                               f"received {len(dimensions)} dimensions instead.")
-
-        position_array = torch.concat(dimensions[0].position.array_buffer)
+        position_array = dimensions[0].position.array.clone()
+        # if regular_print:
+        #     position_array = dimensions[0].position.array
+        # else:
+        #     position_array = torch.concat(dimensions[0].position.array_buffer)
 
         length_array = 0
         for length in dimensions[0].lengths:
-            length_array = length_array + torch.concat(length.array_buffer)
+            new_length_array = length.array
+            # if regular_print:
+            #     new_length_array = length.array
+            # else:
+            #     new_length_array = torch.concat(length.array_buffer)
+            length_array = length_array + new_length_array
 
         if state_numbers is not None:
             # get mask for all objects in defined state
-            object_states = torch.concat(simulation_object.object_states_buffer)
+            object_states = simulation_object.object_states
+            # if regular_print:
+            #     object_states = simulation_object.object_states
+            # else:
+            #     object_states = torch.concat(simulation_object.object_states_buffer)
             mask = torch.zeros_like(object_states).to(torch.bool)
             for state in state_numbers:
                 mask = (mask | (object_states == state))
-
             # get the maximum number of objects that should be analyzed
             # (from all simulations)
             # first sort mask so that first in the matrix there are all True
             # elements
-            mask_sorted, idx = torch.sort(mask, dim=1,
+            mask_sorted, idx = torch.sort(mask.to(torch.int), dim=1,
                                           stable=True, descending=True)
             # the first position that is not True is the sum of all True
             # elements across the first dim
@@ -338,20 +568,24 @@ class DataExtraction():
             min_position = 0
         max_position = dimensions[0].position.max_value
 
+        device = simulation_object.device
+
         positions = torch.arange(min_position, max_position+resolution*0.9,
-                                 resolution)
+                                 resolution).to(device)
+
+        # print(position_array.shape, positions.shape)
         all_data = torch.zeros((position_array.shape[0], positions.shape[0],
-                                *position_array.shape[2:]))
+                                *position_array.shape[2:])).to(device)
 
         # only if at least one element is True, analyze the data
         if mask.sum() > 0:
 
-            position_dimension = int((max_position - min_position) // resolution)
+            position_dimension = int(round((max_position - min_position)
+                                           / resolution,5))
             # print(1, time.time() - start)
             start = time.time()
             # create tensors on correct device
             tensors = simulation_object.tensors
-            device = simulation_object.device
 
             # data type depends on dimension 0 - since that is the number of
             # different int values needed (int8 for <=256; int16 for >=256)
@@ -387,9 +621,9 @@ class DataExtraction():
                                      resolution,
                                      rounding_mode="floor")#.to(indices_dtype)
 
-            # remove negative numbers to allow uint8 dtype
-            position_start[position_start < 0] = 0
-            position_start = position_start#.to(indices_dtype)
+            # # remove negative numbers to only look at inside the neurite
+            # position_start[position_start < 0] = 0
+            # position_start = position_start#.to(indices_dtype)
 
             # create indices array which each number
             # corresponding to one position in space (in dimension 0)
@@ -398,11 +632,12 @@ class DataExtraction():
                                      tuple(range(1,len(position_start.shape)-1)))
             indices = indices_tensor(indices).unsqueeze(0).to(device=device)
 
-            # split by simulations to reduce memory usage
+            # split by simulations to reduce memory usage, if needed
             # otherwise high memory usage leads to
             # massively increased processing time
             # with this split, processing time increases linearly with
-            # array size
+            # array size (up to a certain max array size beyond which
+            # the for loop leads to a supralinear increase in processing time)
 
             nb_objects = position_start.shape[2]
             # find way to dynamically determine ideal step size!
@@ -442,11 +677,198 @@ class DataExtraction():
                                                    *positions.shape])
 
         data_dict = {}
-        data_dict["1D_density_position"] = positions
-        data_dict["1D_density"] = data_array
+        data_dict["1D_density_position"] = positions.cpu()
+        data_dict["1D_density"] = data_array.cpu()
 
-        # print(4, time.time() - start)
+        return data_dict, ["1D_density"]
+
+    def _operation_2D_to_1D_density(self, dimensions, simulation_object,
+                                    state_numbers=None, regular_print=False,
+                                    resolution=0.2, **kwargs):
+        """
+        Create 1D density array from start and length information without
+        direction.
+        Args:
+            dimensions (list of Dimension objects):
+            resolution (float): resolution in dimension for data export
+            state_numbers (list of ints): State numbers to analyze
+
+        Returns:
+
+        """
+        if len(dimensions) > 1:
+            return ValueError(f"The operation '2D_to_1D_density' is only "
+                              f"implemented for 1 dimension. DataExtraction "
+                              f"received {len(dimensions)} dimensions instead.")
+        position_array = dimensions[0].position.array.clone()
+        # if regular_print:
+        #     position_array = dimensions[0].position.array
+        # else:
+        #     position_array = torch.concat(dimensions[0].position.array_buffer)
+
+        length_array = 0
+        for length in dimensions[0].lengths:
+            new_length_array = length.array
+            # if regular_print:
+            #     new_length_array = length.array
+            # else:
+            #     new_length_array = torch.concat(length.array_buffer)
+            length_array = length_array + new_length_array
+
+        if state_numbers is not None:
+            # get mask for all objects in defined state
+            object_states = simulation_object.object_states
+            # if regular_print:
+            #     object_states = simulation_object.object_states
+            # else:
+            #     object_states = torch.concat(simulation_object.object_states_buffer)
+            mask = torch.zeros_like(object_states).to(torch.bool)
+            for state in state_numbers:
+                mask = (mask | (object_states == state))
+            # get the maximum number of objects that should be analyzed
+            # (from all simulations)
+            # first sort mask so that first in the matrix there are all True
+            # elements
+            mask_sorted, idx = torch.sort(mask.to(torch.int), dim=1,
+                                          stable=True, descending=True)
+            # the first position that is not True is the sum of all True
+            # elements across the first dim
+            first_false_position = torch.count_nonzero(mask_sorted, dim=1)
+            # then get the maximum of all simulations
+            max_nb_objects = first_false_position.max()
+
+            # set all properties of objects outside of mask to NaN
+            # also use the maximum number of objects of interest for all
+            # simulations, to discard all parts of the sorted array that only
+            # contains objects which are not of interest
+            position_array[~mask] = float("nan")
+            position_array = torch.gather(position_array, dim=1, index=idx)
+            position_array = position_array[:, :max_nb_objects]
+
+            length_array[~mask] = float("nan")
+            length_array = torch.gather(length_array, dim=1, index=idx)
+            length_array = length_array[:, :max_nb_objects]
+
+        # create boolean data array later by expanding each microtubule in space
+        # size of array will be:
+        # (max_position of neurite / resolution) x nb of microtubules
+        min_position = dimensions[0].position.min_value
+        if min_position is None:
+            min_position = 0
+        max_position = dimensions[0].position.max_value
+
+        device = simulation_object.device
+
+        positions = torch.arange(min_position, max_position+resolution*0.9,
+                                 resolution).to(device)
+
+        # print(position_array.shape, positions.shape)
+        all_data = torch.zeros((position_array.shape[0], positions.shape[0],
+                                *position_array.shape[2:])).to(device)
+
+        # only if at least one element is True, analyze the data
+        if mask.sum() > 0:
+
+            position_dimension = int(round((max_position - min_position)
+                                           / resolution,5))
+            # print(1, time.time() - start)
+            start = time.time()
+            # create tensors on correct device
+            tensors = simulation_object.tensors
+
+            # data type depends on dimension 0 - since that is the number of
+            # different int values needed (int8 for <=256; int16 for >=256)
+            # (dimension 0 is determined by max_x of neurite / resolution)
+            if (position_dimension+1) < 256:
+                indices_tensor = torch.ByteTensor
+                indices_dtype = torch.uint8
+            else:
+                indices_tensor = torch.ShortTensor
+                indices_dtype = torch.short
+
+            # extract positions of the array that actually contains objects
+            # crop data so that positions that don't contain objects
+            # are excluded
+            #objects_array = ~torch.isnan(position_array)
+            #positions_object = torch.nonzero(objects_array)
+            #min_pos_with_object = positions_object[:,0].min()
+
+            position_start = position_array
+            #max_nb_objects = position_start.shape[0]
+            #position_start = position_start[min_pos_with_object:max_nb_objects]
+
+            # transform object properties into multiples of resolution
+            # then transform length into end position
+            position_start = torch.div(position_start, resolution,
+                                       rounding_mode="floor")#.to(torch.short)
+            position_start = torch.unsqueeze(position_start, 1)
+
+            position_end = length_array.unsqueeze(1)
+
+            #position_end = position_end[min_pos_with_object:max_nb_objects]
+            position_end = torch.div(position_end + position_array.unsqueeze(1),
+                                     resolution,
+                                     rounding_mode="floor")#.to(indices_dtype)
+
+            # # remove negative numbers to only look at inside the neurite
+            # position_start[position_start < 0] = 0
+            # position_start = position_start#.to(indices_dtype)
+
+            # create indices array which each number
+            # corresponding to one position in space (in dimension 0)
+            indices = np.linspace(0,position_dimension, position_dimension+1)
+            indices = np.expand_dims(indices,
+                                     tuple(range(1,len(position_start.shape)-1)))
+            indices = indices_tensor(indices).unsqueeze(0).to(device=device)
+
+            # split by simulations to reduce memory usage, if needed
+            # otherwise high memory usage leads to
+            # massively increased processing time
+            # with this split, processing time increases linearly with
+            # array size (up to a certain max array size beyond which
+            # the for loop leads to a supralinear increase in processing time)
+
+            nb_objects = position_start.shape[2]
+            # find way to dynamically determine ideal step size!
+            step_size = nb_objects#5
+            nb_steps = int(nb_objects/step_size)
+            start_nb_objects = torch.linspace(0, nb_objects-step_size, nb_steps)
+
+            # print(2, time.time() - start)
+            start = time.time()
+            for start_nb_object in start_nb_objects:
+                end_nb_object = int((start_nb_object + step_size).item())
+                start_nb_object = int(start_nb_object.item())
+                # create boolean data array later by expanding each microtubule in space
+                # use index array to set all positions in boolean data array to True
+                # that are between start point and end point
+                nb_timepoints = position_start.shape[0]
+                data_array = ((indices.expand(nb_timepoints, -1, step_size,
+                                              *position_start.shape[3:])
+                            >= position_start[:,:, start_nb_object:end_nb_object]) &
+                            (indices.expand(nb_timepoints,-1, step_size,
+                                            *position_start.shape[3:])
+                            <= position_end[:,:, start_nb_object:end_nb_object]))
+
+                # then sum across microtubules to get number of MTs at each position
+                data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
+
+                all_data = all_data + data_array_sum
+                # val_tmp = all_data[:2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+        # print(3, time.time() - start)
         start = time.time()
+        data_array = all_data[:,:-1]
+
+        dimensions = [-1] + [1] * (len(data_array.shape) - 2)
+        positions = positions.view(*dimensions)[:-1]
+        positions = positions.unsqueeze(0).expand([data_array.shape[0],
+                                                   *positions.shape])
+
+        data_dict = {}
+        data_dict["1D_density_position"] = positions.cpu()
+        data_dict["1D_density"] = data_array.cpu()
+
         return data_dict, ["1D_density"]
 
 class ObjectProperty():
@@ -550,7 +972,7 @@ class ObjectProperty():
 
 class Action():
 
-    def __init__(self, object_property, operation, values, states = None,
+    def __init__(self, object_property, operation, parameter, states = None,
                  name=""):
         """
 
@@ -563,16 +985,14 @@ class Action():
                  and then outputs the transformed property tensor.
                 Alternatively use one of the following standard_positions as
                 string: "add", "subtract"
-            values (1D iterable): values that should be used for the action.
-                For each value, a separate set of simulations will be run.
+            parameter (Parameter object): Parameter that contains values used
+                for the action.
             states (list of State objects): States in which action will be
                 executed. If None, will be executed on all non zero states
             name (String): Name of action, used for data export and readability
         """
         self.states = states
-        if type(values) in [float, int]:
-            values = [values]
-        self.values = torch.HalfTensor(values)
+        self.parameter = parameter
         self.object_property = object_property
         if name != "":
             self.name = "Act_"+name
@@ -588,6 +1008,8 @@ class Action():
         implemented_operations = {}
         implemented_operations["add"] = self._operation_add
         implemented_operations["subtract"] = self._operation_subtract
+
+        self._operation = operation
 
         # FINISH TRANSFERING OPERATION FROM SIMULATION TO ACTION CLASS
         # ONLY EXECUTE OPERATION FROM SIMULATION
@@ -613,9 +1035,6 @@ class Action():
         else:
             self.operation = operation
 
-        # define variables which will be used in simulation
-        self.value_array = torch.HalfTensor([])
-
     def _operation_add(self, property_values, values, time, mask):
         return property_values + values*time*mask
 
@@ -638,7 +1057,7 @@ class State():
             self.name += "_" + name
 
         if type(self.initial_condition) is not list:
-            self.initial_condition = torch.ShortTensor([self.initial_condition])
+            self.initial_condition = np.array([self.initial_condition])
 
         # set variable to treat initial condtions as other simulation parameters
         self.values = self.initial_condition
@@ -650,7 +1069,9 @@ class ObjectRemovalCondition():
     prevent objects from moving out.
     """
 
-    def __init__(self, object_properties, operation, threshold):
+    def __init__(self, object_properties, combine_properties_operation,
+                 compare_to_threshold, threshold):
+
         """
 
         Args:
@@ -661,39 +1082,89 @@ class ObjectRemovalCondition():
             threshold (float): Value of last not removed object for operation
         """
         self.object_properties = object_properties
-        implemented_operations = {}
-        new_operation = self.operation_sum_smaller_than
-        implemented_operations["sum_smaller_than"] = new_operation
-        if type(operation) == str:
-            if operation not in implemented_operations:
-                raise ValueError(f"For ObjectRemovalCondition only the following"
-                                 f" operations are implemented and can be "
-                                 f"refered to by name in the 'operation' "
-                                 f"paramter: "
-                                 f"{', '.join(implemented_operations.keys())}."
-                                 f" Instead the following name was supplied: "
-                                 f"{operation}.")
-            self.operation = implemented_operations[operation]
-        else:
-            self.operation = operation
+        self.combine_properties_operation = combine_properties_operation
+        self.compare_to_threshold = compare_to_threshold
+        # implemented_operations = {}
+        # new_operation = self.operation_sum_smaller_than
+        # implemented_operations["sum_smaller_than"] = new_operation
+        implemented_property_operations = {}
+        implemented_property_operations["sum"] = np.sum
+        implemented_property_operations["subtract"] = lambda x: x[0] - np.sum(x[1:])
+
+        implemented_comparison_ooperations = {}
+        implemented_comparison_ooperations["smaller"] = (lambda x, y:
+                                                         x < threshold)
+        implemented_comparison_ooperations["larger"] = (lambda x, y:
+                                                         x > threshold)
+
+        implemented_operations = {"combine_properties":
+                                      implemented_property_operations,
+                                  "compare": implemented_comparison_ooperations}
+
+        operations = {"combine_properties": combine_properties_operation,
+                      "compare": compare_to_threshold}
+        self.operations = {}
+        for operation_name, operation in operations.items():
+            if type(operation) == str:
+                if (operation
+                        not in implemented_operations[operation_name]):
+                    operation_strings = implemented_operations[operation_name].keys()
+                    raise ValueError(f"For ObjectRemovalCondition only the following"
+                                     f" operations are implemented and can be "
+                                     f"refered to by name in the 'operation' "
+                                     f"paramter: "
+                                     f"{', '.join(operation_strings)}."
+                                     f" Instead the following name was supplied: "
+                                     f"{operation}.")
+                operation = implemented_operations[operation_name][operation]
+                self.operations[operation_name] = operation
+            else:
+                self.operations[operation_name] = operation
         self.threshold = threshold
 
-    def operation_sum_smaller_than(self, object_properties, threshold):
-        sum_of_properties = torch.zeros_like(object_properties[0].array,
-                                             dtype=torch.half)
-        for object_property in object_properties:
-            sum_of_properties += object_property.array
-        return sum_of_properties < threshold
+    # def get_objects_to_remove(self):
 
-    def get_objects_to_remove(self):
-        return self.operation(self.object_properties, self.threshold)
+    # @numba.njit
+    # @staticmethod
+    # def operation_sum_smaller_than(object_properties, threshold):
+    #     sum_of_properties = np.zeros_like(object_properties[0].array)
+    #     for object_property in object_properties:
+    #         sum_of_properties += object_property.array
+    #     return sum_of_properties < threshold
 
+    # def get_objects_to_remove_func(self):
+    #     return functools.partial(self.operations[],
+    #                              threshold=self.threshold)
+
+class Parameter():
+
+    def __init__(self, values, type="rates", convert_half_lifes=True,
+                 name=""):
+        """
+
+        Args:
+            values (Iterable): 1D Iterable (list, numpy array) of all values
+                which should be used. If type is half-lifes, then values will
+                be converted to rates if convert_half_lifes is True.
+            type (String): Type of values supplied, can be "rates", "half-lifes"
+                or "other". For half-lifes, values will be converted to rates
+                if convert_half_lifes is True.
+            name (string): Name of parameter
+        """
+        if (type == "half-lifes") & (convert_half_lifes):
+            lifetime_to_rates_factor = np.log(np.array([2]))
+            self.values = torch.HalfTensor(lifetime_to_rates_factor / values)
+        else:
+            self.values = torch.HalfTensor(values)
+
+        self.name = name
+        self.number = None
+        self.value_array = torch.HalfTensor([])
 
 class StateTransition():
 
-    def __init__(self, start_state=None, end_state=None, rates=None,
-                 half_lifes=None,
-                 transfer_property=None, property_set_to_zero=None,
+    def __init__(self, start_state=None, end_state=None, parameter=None,
+                 transfer_property=None, properties_set_to_zero=None,
                  saved_properties=None, retrieved_properties=None,
                  time_dependency = None, name=""):
         """
@@ -703,11 +1174,8 @@ class StateTransition():
                 starts, If None, then the end_state is created (from state 0)
             end_state (State object): Name of state at which the transition ends
                 If None, then the start_date is destroyed (to state 0)
-            rates (Iterable): 1D Iterable (list, numpy array) of all rates which
-                should be used; rates or half_lifes need to be defined
-            half_lifes (Iterable): 1D Iterable (list, numpy array) of all
-                half_lifes which should be used, will be converted to rates;
-                rates or half_lifes need to be defined
+            parameter (Parameter object): Parameter that defines the rate of
+                the transition.
             transfer_property (Iterable): 1D Iterable (list, tuple) of two
                 ObjectProperty objects. The first object is the property from
                 which the values will be transfered and the second object is
@@ -724,28 +1192,16 @@ class StateTransition():
                 supplied rates maximum rates.
             name (str): Name of transition, used for data export and readability
         """
-        if (rates is None) & (half_lifes is None):
-            return ValueError("Rates or half_lifes need to be specified for "
-                              "the state transition from state"
-                              f"{start_state} to state {end_state}.")
         self.start_state = start_state
         self.end_state = end_state
-        lifetime_to_rates_factor = np.log(np.array([2]))
-        if type(half_lifes) in [list, tuple]:
-            half_lifes = np.array(half_lifes)
-        if rates is None:
-            self.rates = lifetime_to_rates_factor / half_lifes
-        else:
-            self.rates = torch.HalfTensor(rates)
-        self.values = self.rates
+        self.parameter = parameter
         self.saved_properties = saved_properties
         self.retrieved_properties = retrieved_properties
         self.time_dependency = time_dependency
         self.transfer_property = transfer_property
-        self.property_set_to_zero = property_set_to_zero
+        self.properties_set_to_zero = properties_set_to_zero
         self.name = name
 
         # initialize variable that will be filled during simulation
-        self.value_array = torch.HalfTensor([])
         self.simulation_mask = torch.HalfTensor([])
         self.transition_positions = torch.HalfTensor([])

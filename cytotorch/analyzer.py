@@ -78,9 +78,11 @@ class Analyzer():
                              "param values were removed. Maybe the file name"
                              "is not 'removed_param_values.feather' anymore or "
                              "the file was moved to another folder?")
-
-        removed_param_vals = pd.read_feather(os.path.join(self.data_folder,
-                                                          removed_vals_filename))
+        removed_param_vals_path = os.path.join(self.data_folder,
+                                               removed_vals_filename)
+        removed_param_vals = None
+        if os.path.exists(removed_param_vals_path):
+            removed_param_vals = pd.read_feather(removed_param_vals_path)
 
         self.array_resizing_dict = {}
 
@@ -90,35 +92,18 @@ class Analyzer():
         self.all_dim_list = [torch.IntTensor(range(shape)).to(self.device)
                              for shape in all_times[0].shape[2:]]
 
-        removed_param_vals.groupby(["iteration_nb"]
-                                   ).apply(self._build_array_resize_dict)
+        if removed_param_vals is not None:
+            removed_param_vals.groupby(["iteration_nb"]
+                                       ).apply(self._build_array_resize_dict)
 
-        print("Starting concatenating arrays with removed params")
+            print("Starting concatenating arrays with removed params")
+            # for time in all_times:
 
-        all_times = self._concat_arrays_with_removed_param_vals(all_times)
+            all_times = self._concat_arrays_with_removed_param_vals(all_times)
+        else:
+            all_times = torch.concat(all_times)
 
-        print("All files loaded.")
-        # times_tmp = torch.clone(all_times)
-
-        # Get how many timepoints at the end of each simulation were jumped
-        # over, use the expected max timestep for that
-        self.max_timestep = self.max_time / self.time_resolution
-
-        # Simulations are asynchronous.
-        # Therefore discard timepoints above the maximum time, to have the same
-        # number of timesteps for all simulations
-        all_times[all_times >= (self.max_time + self.time_resolution)] = 0
-
-        # Floor division by time resolution to get time steps
-        all_times = torch.div(all_times, self.time_resolution,
-                              rounding_mode="floor")
-
-        timestep_changes = self._get_timestep_changes_and_repeats(all_times)
-
-        time_array, repeated_time_mask = self._get_equal_timesteps_array(all_times,
-                                                     timestep_changes,
-                                                     type="time")
-
+        time_array = all_times
         # go through each folder that contains sub data
         # There is one folder for each function in DataExtraction used.
         # Time and parameter data is in the parent folder and therefore does
@@ -143,9 +128,6 @@ class Analyzer():
                 except:
                     concat_func = self._concat_arrays_with_removed_param_vals
                     new_data = concat_func(new_data)
-                new_data,_ = self._get_equal_timesteps_array(new_data,
-                                                             timestep_changes,
-                                                             repeated_time_mask)
                 # sort data by number of datapoints for each timepoint
                 # since for each different number of datapoints, a new dataframe
                 if new_data.shape[1] not in all_data:
@@ -153,6 +135,7 @@ class Analyzer():
                 all_data[new_data.shape[1]][data_keyword] = new_data
 
             all_data = self._add_single_datapoint_data_to_other_sets(all_data)
+
             self._save_all(all_data, time_array, parameters, data_path)
 
         # get expected number of nonzero elements
@@ -418,7 +401,6 @@ class Analyzer():
         # simulation
         # and that this number is the expected (max) number of timesteps
         jump_sum = torch.sum(timestep_changes, dim=0)
-
         assert ((jump_sum.min() == jump_sum.max()) &
                 (jump_sum.min() == self.max_timestep + 1))
 
@@ -461,7 +443,6 @@ class Analyzer():
 
         # and move time axis back to dimension 0
         data_timesteps = torch.moveaxis(data_timesteps, -1, 0)
-
         if self.use_assertion_checks & (type == "time"):
             # make sure that the maximum timestep is the expected max_timestep
             assert data_timesteps_flat.max() == self.max_timestep
@@ -479,6 +460,7 @@ class Analyzer():
         if repeated_time_mask is None:
             repeated_time_mask = self._get_repeated_timesteps_mask(data_timesteps)
         # Use mask to set values of all data arrays to nan
+        data_timesteps = data_timesteps.to(torch.float32)
         data_timesteps[repeated_time_mask.expand(data_timesteps.shape)] = float("nan")
 
         return data_timesteps, repeated_time_mask
@@ -537,10 +519,13 @@ class Analyzer():
         for nb_datapoints, data_dict in all_data.items():
             # get datashapes
             all_data_shapes = [data.shape for data in data_dict.values()]
+
             if (nb_datapoints != 1):
                 data_shapes = [shape for shape in all_data_shapes
-                               if shape[1] != 1]
+                               if shape[2] != 1]
             if data_shapes is None:
+                data_shapes = [shape for shape in all_data_shapes]
+            if len(data_shapes) == 0:
                 data_shapes = [shape for shape in all_data_shapes]
 
             data_shape = data_shapes[0]
@@ -550,7 +535,7 @@ class Analyzer():
             data_values = []
             column_names = []
             # first add time data
-            data_values.append(time_array.expand(data_shape)
+            data_values.append(time_array.cpu().expand(data_shape)
                                .flatten().unsqueeze(1))
             column_names.append("time")
 
@@ -558,18 +543,18 @@ class Analyzer():
             simulation_array_shape = [1 for _ in data_shape]
             simulation_array_shape[2] = data_shape[2]
             simulation_array = torch.arange(data_shape[2]).view(simulation_array_shape)
-            data_values.append(simulation_array.expand(data_shape).flatten().unsqueeze(1))
+            data_values.append(simulation_array.cpu().expand(data_shape).flatten().unsqueeze(1))
             column_names.append("simulation_nb")
 
             # next add all simulation parameters
             for name, parameter in parameters.items():
-                data_values.append(parameter.cpu().expand(data_shape)
+                data_values.append(torch.Tensor(parameter).cpu().expand(data_shape)
                                    .flatten().unsqueeze(1))
                 column_names.append(name)
 
             # now add all data
             for column_name, data in data_dict.items():
-                data_values.append(data.expand(data_shape)
+                data_values.append(data.cpu().expand(data_shape)
                                    .flatten().unsqueeze(1))
                 column_names.append(column_name)
 
