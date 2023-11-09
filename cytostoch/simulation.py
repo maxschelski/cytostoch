@@ -665,8 +665,10 @@ class SSA():
 
         transition_parameters = self._get_transition_parameters()
         all_transition_states = self._get_transition_state_arrays()
-        all_transition_set_to_zero_properties = self._get_transition_set_to_zero_properties()
-        all_transition_tranferred_vals = self._get_transition_transferred_vals_array()
+        get_set_zero_array = self._get_transition_set_to_zero_properties()
+        all_transition_set_to_zero_properties = get_set_zero_array
+        get_transfer_vals_array = self._get_transition_transferred_vals_array()
+        all_transition_tranferred_vals = get_transfer_vals_array
 
         action_parameters = self._get_action_parameter_array()
         all_action_properties = self._get_action_properties_array()
@@ -853,7 +855,7 @@ class SSA():
                 all_trans_pos_batch = all_transition_positions[:,param_slice]
 
                 sim[nb_SM,
-                    nb_cc](to_cuda(convert_array(object_states_batch)),
+                 nb_cc](to_cuda(convert_array(object_states_batch)),
                             to_cuda(convert_array(property_array_batch)),
                             to_cuda(convert_array(times_batch)),
                             nb_simulations, parameter_combinations_per_batch,

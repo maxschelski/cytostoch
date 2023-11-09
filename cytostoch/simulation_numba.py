@@ -111,11 +111,11 @@ def _execute_simulation_cpu(object_states, properties_array, times,
     # For each parameter combination the defined number of simulations are done
     param_id = int(math.floor(thread_id / nb_simulations))
     sim_id = int(thread_id - param_id * nb_simulations)
-
+    assertion_checks = False
     if thread_id < (nb_simulations * nb_parameter_combinations):
         while True:
-            _run_iteration(sim_id, param_id, object_states, properties_array, times,
-                           parameter_value_array,
+            _run_iteration(sim_id, param_id, object_states, properties_array,
+                           times, parameter_value_array,
                            transition_parameters, all_transition_states,
                            action_parameters, action_state_array,
                            all_action_properties, action_operation_array,
@@ -136,15 +136,29 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                            object_state_time_array, properties_time_array,
                            time_resolution, save_initial_state, rng_states
                            )
-            if current_timepoint_array[sim_id, param_id] >= math.floor(min_time/
-                                                               time_resolution[0]):
+            if (current_timepoint_array[sim_id, param_id] >=
+                    math.floor(min_time/time_resolution[0])):
                 break
+            if assertion_checks:
+                for state in range(1,np.max(object_states)):
+                    # check that no property value of an object is nan
+                    for property_nb in range(properties_array.shape[0]):
+                        property_vals = properties_array[property_nb]
+                        property_vals_state = property_vals[object_states ==
+                                                            state]
+                        nb_nan = len(property_vals_state[
+                                         np.isnan(property_vals_state)])
+                        assert nb_nan == 0
+                    # check that the calculated number of objects is correct
+                    nb_objects = len(object_states[object_states == state])
+                    saved_nb_objects = nb_objects_all_states[state-1]
+                    assert nb_objects == saved_nb_objects
+                    # check that the maximum transition position is within
+                    # the size of the array
+                    max_position = all_transition_positions.max()
+                    assert max_position < object_states.shape[0]
+
             iteration_nb += 1
-            # print(properties_array[0][object_states == 3])
-            # print(properties_array[1][object_states == 3])
-            # print(properties_array[2][object_states == 3])
-            # print(properties_array[1][object_states == 1] +
-            #       properties_array[0][object_states == 1])
 
 
 def _run_iteration(sim_id, param_id, object_states, properties_array, times,
@@ -226,7 +240,8 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                           rng_states, simulation_factor, parameter_factor)
 
     _remove_objects(all_object_removal_properties, object_removal_operations,
-                    object_states, properties_array, sim_id, param_id)
+                    nb_objects_all_states, object_states, properties_array,
+                    sim_id, param_id)
 
     times[0, sim_id, param_id] = (times[0, sim_id, param_id] +
                                   reaction_times[sim_id, param_id])
@@ -267,7 +282,8 @@ def _decorate_all_functions_for_cpu():
     global _get_times_of_next_transition
     if not isinstance(_get_times_of_next_transition,
                       numba.core.registry.CPUDispatcher):
-        _get_times_of_next_transition = numba.njit(_get_times_of_next_transition)
+        _get_times_of_next_transition = numba.njit(
+            _get_times_of_next_transition)
 
     global _determine_next_transition
     if not isinstance(_determine_next_transition,
@@ -475,6 +491,7 @@ def _determine_positions_of_transitions(current_transitions,
         return
     start_state = all_transition_states[int(transition_nb), 0]
     # if start state is 0, choose the first object with state 0
+
     if start_state == 0:
         object_pos = 0
         while object_pos < object_states.shape[0]:
@@ -486,11 +503,11 @@ def _determine_positions_of_transitions(current_transitions,
     else:
         # for all other states, choose a random position with that state
         nb_objects = nb_objects_all_states[int(start_state-1), sim_id, param_id]
-        random_object_pos = round(_get_random_number(sim_id, param_id,
+        random_object_pos = math.floor(_get_random_number(sim_id, param_id,
                                                      rng_states,
                                                      simulation_factor,
                                                      parameter_factor)
-                                     * nb_objects)
+                                       * nb_objects)
         object_pos = 0
         current_nb_state_objects = 0
 
@@ -759,7 +776,8 @@ def _update_object_states(current_transitions, all_transition_states,
     return None
 
 def _remove_objects(all_object_removal_properties, object_removal_operations,
-                    object_states, properties_array, sim_id, param_id):
+                    nb_objects_all_states, object_states, properties_array,
+                    sim_id, param_id):
     removal_nb = 0
     while removal_nb < len(all_object_removal_properties):
         # for object removal, there are two array with
@@ -808,6 +826,10 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
 
                 # if object should be removed, set state to 0 and properties to NaN
                 if remove_object:
+                    object_state_to_remove = object_states[int(object_pos),
+                                                           sim_id, param_id]
+                    nb_objects_all_states[object_state_to_remove-1,
+                                          sim_id, param_id] -= 1
                     object_states[int(object_pos),
                                   sim_id, param_id] = 0
                     property_nb = 0
@@ -815,7 +837,6 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                         properties_array[property_nb,
                                          int(object_pos),
                                          sim_id, param_id] = math.nan
-
                         property_nb += 1
                 object_pos += 1
 
