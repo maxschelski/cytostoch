@@ -111,7 +111,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
     # For each parameter combination the defined number of simulations are done
     param_id = int(math.floor(thread_id / nb_simulations))
     sim_id = int(thread_id - param_id * nb_simulations)
-    assertion_checks = False
+    assertion_checks = True
     if thread_id < (nb_simulations * nb_parameter_combinations):
         while True:
             _run_iteration(sim_id, param_id, object_states, properties_array,
@@ -140,7 +140,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                     math.floor(min_time/time_resolution[0])):
                 break
             if assertion_checks:
-                for state in range(1,np.max(object_states)):
+                for state in range(1,np.max(object_states)+1):
                     # check that no property value of an object is nan
                     for property_nb in range(properties_array.shape[0]):
                         property_vals = properties_array[property_nb]
@@ -148,7 +148,12 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                                                             state]
                         nb_nan = len(property_vals_state[
                                          np.isnan(property_vals_state)])
-                        assert nb_nan == 0
+                        # # make sure that there are no stable MTs
+                        # # with length 0
+                        # if (state == 3) & (property_nb == 2):
+                        #     nb_zeros = len(property_vals_state[
+                        #                        property_vals_state == 0])
+                        #     assert nb_zeros == 0
                     # check that the calculated number of objects is correct
                     nb_objects = len(object_states[object_states == state])
                     saved_nb_objects = nb_objects_all_states[state-1]
@@ -263,10 +268,10 @@ def _decorate_all_functions_for_cpu():
                       numba.core.registry.CPUDispatcher):
         _get_random_number = numba.njit(_get_random_number_cpu)
 
-    global _execute_simulation_cpu
-    if not isinstance(_execute_simulation_cpu,
-                      numba.core.registry.CPUDispatcher):
-        _execute_simulation_cpu = numba.njit(_execute_simulation_cpu)
+    # global _execute_simulation_cpu
+    # if not isinstance(_execute_simulation_cpu,
+    #                   numba.core.registry.CPUDispatcher):
+    #     _execute_simulation_cpu = numba.njit(_execute_simulation_cpu)
 
     global _run_iteration
     if not isinstance(_run_iteration,

@@ -96,7 +96,8 @@ class tRSSA():
 class SSA():
 
     def __init__(self, states, transitions, properties, actions,
-                 object_removal=None, name="", device="GPU"):
+                 object_removal=None, name="", device="GPU",
+                 use_free_gpu=False):
         """
 
         Args:
@@ -131,10 +132,21 @@ class SSA():
         # create tensors object to reference the correct tensor class
         # depending on the device
         if (device.lower() == "gpu") & (torch.cuda.device_count() > 0):
-            for GPU_nb in range(torch.cuda.device_count()):
-                if torch.cuda.memory_reserved(GPU_nb) == 0:
-                    break
-            self.device = "cuda:"+str(GPU_nb)
+            if use_free_gpu:
+                # use GPU that is not used already, in case of multiple GPUs
+                for GPU_nb in range(torch.cuda.device_count()):
+                    if torch.cuda.memory_reserved(GPU_nb) == 0:
+                        break
+                self.device = "cuda:"+str(GPU_nb)
+            else:
+                gpu_memory = []
+                for GPU_nb in range(torch.cuda.device_count()):
+                    device_props = torch.cuda.get_device_properties(GPU_nb)
+                    free_memory = (device_props.total_memory
+                                   - torch.cuda.memory_reserved(GPU_nb))
+                    gpu_memory.append(free_memory)
+                highest_free_memory_gpu = np.argmax(np.array(gpu_memory))
+                self.device = "cuda:"+str(int(highest_free_memory_gpu))
             self.tensors = torch.cuda
             # torch.set_default_tensor_type(torch.cuda.FloatTensor)
             # torch.set_default_device(self.device)
@@ -841,6 +853,7 @@ class SSA():
                     convert_array(properties_time_array[:,:,:,:,param_slice]))
                 time_resolution = cuda.to_device(time_resolution)
 
+
                 print("Starting simulation batch...")
                 sim = simulation_numba._execute_simulation_gpu
                 object_states_batch = self.object_states[:,:,param_slice]
@@ -918,6 +931,12 @@ class SSA():
                 else:
                     times_batches = torch.concat((times_batches, times_batch),
                                                  axis=-1)
+
+                del current_timepoint_array_batch
+                del timepoint_array_batch
+                del object_state_time_array_batch
+                del properties_time_array_batch
+                cuda.current_context().memory_manager.deallocations.clear()
 
             self.times = (times_batches * time_resolution.copy_to_host())
             self.times = self.times.unsqueeze(1).to(self.device)

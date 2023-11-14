@@ -9,9 +9,14 @@ import time
 
 class Analyzer():
 
-    def __init__(self, simulation=None, data_folder = None, device="gpu"):
+    def __init__(self, simulation=None, data_folder = None, device="gpu",
+                 use_free_gpu=False):
         """
-
+            params:
+                use_free_gpu (Boolean): Whether to use a free gpu (no memory
+                    occupied). If False, will use gpu with highest amount of
+                    free memory (for unused gpus, will be usually the most
+                    powerful gpu)
         """
         if (simulation is None) & (data_folder is None):
             return ValueError("Simulation or data_folder needs to be defined "
@@ -21,11 +26,21 @@ class Analyzer():
         self.data_folder = data_folder
 
         if (device.lower() == "gpu") & (torch.cuda.device_count() > 0):
-            # use GPU that is not used already, in case of multiple GPUs
-            for GPU_nb in range(torch.cuda.device_count()):
-                if torch.cuda.memory_reserved(GPU_nb) == 0:
-                    break
-            self.device = "cuda:"+str(GPU_nb)
+            if use_free_gpu:
+                # use GPU that is not used already, in case of multiple GPUs
+                for GPU_nb in range(torch.cuda.device_count()):
+                    if torch.cuda.memory_reserved(GPU_nb) == 0:
+                        break
+                self.device = "cuda:"+str(GPU_nb)
+            else:
+                gpu_memory = []
+                for GPU_nb in range(torch.cuda.device_count()):
+                    device_props = torch.cuda.get_device_properties(GPU_nb)
+                    free_memory = (device_props.total_memory
+                                   - torch.cuda.memory_reserved(GPU_nb))
+                    gpu_memory.append(free_memory)
+                highest_free_memory_gpu = np.argmax(np.array(gpu_memory))
+                self.device = "cuda:"+str(int(highest_free_memory_gpu))
             self.tensors = torch.cuda
             torch.set_default_tensor_type(torch.cuda.FloatTensor)
             torch.set_default_device(self.device)
@@ -66,7 +81,7 @@ class Analyzer():
 
         all_times, params_removed = self._load_data(self.data_folder,
                                                     file_name_keyword="times")
-
+        print("Finished loading time files.")
         parameters = self._load_parameters()
 
         removed_vals_filename = "removed_param_values.feather"
@@ -114,6 +129,7 @@ class Analyzer():
             data_path = os.path.join(self.data_folder, folder_name)
             if not os.path.isdir(data_path):
                 continue
+            print("Rename files for sorting...")
             self._rename_files_for_sorting(data_path)
             data_keywords = self._get_data_keywords(data_path)
             if "times" in data_keywords:
@@ -133,10 +149,19 @@ class Analyzer():
                 if new_data.shape[1] not in all_data:
                     all_data[new_data.shape[1]] = {}
                 all_data[new_data.shape[1]][data_keyword] = new_data
-
+                del new_data
+            print("All data batches loaded.")
             all_data = self._add_single_datapoint_data_to_other_sets(all_data)
-
+            print("Saving data...")
             self._save_all(all_data, time_array, parameters, data_path)
+
+            del all_data
+
+        del time_array
+        del all_times
+        del parameters
+        torch.cuda.empty_cache()
+        # cuda.current_context().memory_manager.deallocations.clear()
 
         # get expected number of nonzero elements
         # expected_nb_nonzero_elements = ((self.max_timestep+1) *
@@ -538,18 +563,19 @@ class Analyzer():
             data_values.append(time_array.cpu().expand(data_shape)
                                .flatten().unsqueeze(1))
             column_names.append("time")
-
             # add information about simulation number
             simulation_array_shape = [1 for _ in data_shape]
             simulation_array_shape[2] = data_shape[2]
-            simulation_array = torch.arange(data_shape[2]).view(simulation_array_shape)
-            data_values.append(simulation_array.cpu().expand(data_shape).flatten().unsqueeze(1))
+            simulation_array = torch.arange(data_shape[2]).view(
+                simulation_array_shape)
+            data_values.append(simulation_array.cpu().expand(
+                data_shape).flatten().unsqueeze(1))
             column_names.append("simulation_nb")
 
             # next add all simulation parameters
             for name, parameter in parameters.items():
-                data_values.append(torch.Tensor(parameter).cpu().expand(data_shape)
-                                   .flatten().unsqueeze(1))
+                data_values.append(torch.Tensor(parameter).cpu().expand(
+                    data_shape).flatten().unsqueeze(1))
                 column_names.append(name)
 
             # now add all data
@@ -559,8 +585,10 @@ class Analyzer():
                 column_names.append(column_name)
 
             data = torch.concat(data_values, dim=1)
+
             dataframe = pd.DataFrame(data=data, columns=column_names)
             # file_name = "_".join(column_names[1:])
             file_name = "data"
+            print("Saving dataframe...")
             dataframe.to_feather(os.path.join(data_folder,
                                               file_name + ".feather"))

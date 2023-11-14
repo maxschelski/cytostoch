@@ -680,6 +680,10 @@ class DataExtraction():
         data_dict["1D_density_position"] = positions.cpu()
         data_dict["1D_density"] = data_array.cpu()
 
+        del data_array
+        del positions
+        torch.cuda.empty_cache()
+
         return data_dict, ["1D_density"]
 
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,
@@ -829,32 +833,51 @@ class DataExtraction():
             # the for loop leads to a supralinear increase in processing time)
 
             nb_objects = position_start.shape[2]
-            # find way to dynamically determine ideal step size!
-            step_size = nb_objects#5
-            nb_steps = int(nb_objects/step_size)
-            start_nb_objects = torch.linspace(0, nb_objects-step_size, nb_steps)
 
+            # find way to dynamically determine ideal step size!
+            step_size = nb_objects
+
+            # calculate total memory needed
+            element_size = indices.element_size()
+            nb_elements = (indices.numel() * position_start.shape[0] *
+                           np.product(position_start.shape[3:]))
+            # divide by 1024 to prevent overflow
+            expected_size = 2 * ((nb_elements*element_size)/1024*step_size)
+            free_gpu_memory = (torch.cuda.get_device_properties(0).total_memory
+                               - torch.cuda.memory_reserved(0))/1024
+            if expected_size > free_gpu_memory:
+                step_size = math.floor(nb_objects /
+                                       math.ceil(expected_size/free_gpu_memory))
+            else:
+                step_size = nb_objects
+
+            nb_steps = math.ceil(nb_objects/step_size)
+            start_nb_objects = torch.linspace(0, nb_objects-step_size, nb_steps)
             # print(2, time.time() - start)
             start = time.time()
+            nb_timepoints = position_start.shape[0]
             for start_nb_object in start_nb_objects:
                 end_nb_object = int((start_nb_object + step_size).item())
                 start_nb_object = int(start_nb_object.item())
                 # create boolean data array later by expanding each microtubule in space
                 # use index array to set all positions in boolean data array to True
                 # that are between start point and end point
-                nb_timepoints = position_start.shape[0]
                 data_array = ((indices.expand(nb_timepoints, -1, step_size,
                                               *position_start.shape[3:])
                             >= position_start[:,:, start_nb_object:end_nb_object]) &
-                            (indices.expand(nb_timepoints,-1, step_size,
-                                            *position_start.shape[3:])
+                            (indices.expand(nb_timepoints, -1, step_size,
+                                              *position_start.shape[3:])
                             <= position_end[:,:, start_nb_object:end_nb_object]))
 
                 # then sum across microtubules to get number of MTs at each position
                 data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
 
+
                 all_data = all_data + data_array_sum
                 # val_tmp = all_data[:2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+                del data_array
+                del data_array_sum
+                torch.cuda.empty_cache()
 
         # print(3, time.time() - start)
         start = time.time()
@@ -868,6 +891,9 @@ class DataExtraction():
         data_dict = {}
         data_dict["1D_density_position"] = positions.cpu()
         data_dict["1D_density"] = data_array.cpu()
+        del positions
+
+        torch.cuda.empty_cache()
 
         return data_dict, ["1D_density"]
 
