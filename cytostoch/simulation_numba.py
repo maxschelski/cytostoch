@@ -113,6 +113,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
     sim_id = int(thread_id - param_id * nb_simulations)
     assertion_checks = True
     if thread_id < (nb_simulations * nb_parameter_combinations):
+        last_transition = 0
         while True:
             _run_iteration(sim_id, param_id, object_states, properties_array,
                            times, parameter_value_array,
@@ -140,14 +141,26 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                     math.floor(min_time/time_resolution[0])):
                 break
             if assertion_checks:
+                print("\n", current_transitions)
+                print(nb_objects_all_states[:,0,0])
                 for state in range(1,np.max(object_states)+1):
+                    state_mask = object_states == state
+                    if state == 1:
+                        plus_pos = (properties_array[0][state_mask]
+                                    + properties_array[1][state_mask])
+                        # print(current_transitions)
+                        # print(properties_array[0][state_mask][plus_pos == 20])
                     # check that no property value of an object is nan
                     for property_nb in range(properties_array.shape[0]):
                         property_vals = properties_array[property_nb]
-                        property_vals_state = property_vals[object_states ==
-                                                            state]
+                        property_vals_state = property_vals[state_mask]
                         nb_nan = len(property_vals_state[
                                          np.isnan(property_vals_state)])
+                        if (property_nb == 2) | (property_nb == 1):
+                            if (state == 3) | (state == 5):
+                                print(state, property_nb,
+                                      len(property_vals_state))
+                                print(property_vals_state)
                         # # make sure that there are no stable MTs
                         # # with length 0
                         # if (state == 3) & (property_nb == 2):
@@ -162,7 +175,9 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                     # the size of the array
                     max_position = all_transition_positions.max()
                     assert max_position < object_states.shape[0]
-
+                if last_transition == 10:
+                    break
+            last_transition = int(current_transitions[0])
             iteration_nb += 1
 
 
@@ -757,7 +772,7 @@ def _update_object_states(current_transitions, all_transition_states,
                                           sim_id, param_id]
             properties_array[int(target_property_number),
                              int(transition_position),
-                             sim_id, param_id] = source_val
+                             sim_id, param_id] = source_val + target_val
 
             properties_array[int(source_property_number),
                              int(transition_position),
