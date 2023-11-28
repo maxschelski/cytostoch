@@ -1187,6 +1187,8 @@ class Parameter():
         self.number = None
         self.value_array = torch.HalfTensor([])
 
+
+
 class StateTransition():
 
     def __init__(self, start_state=None, end_state=None, parameter=None,
@@ -1231,3 +1233,40 @@ class StateTransition():
         # initialize variable that will be filled during simulation
         self.simulation_mask = torch.HalfTensor([])
         self.transition_positions = torch.HalfTensor([])
+
+class ChangedStartValue():
+
+    def __init__(self,object_property, new_start_values):
+        """
+
+        Args:
+            property: ObjectProperty object
+            new_start_values (float or PropertyGeometry or list of two
+                values/ PropertyGeometry): Value at which new objects will be
+                initialized, if list, will be initialized randomly between
+                first (min_value) and second (max_value) element. Will replace
+                original start_values parameter for this object_creation.
+        """
+        self.object_property = object_property
+        self.new_start_values = new_start_values
+
+class ObjectCreation(StateTransition):
+    """
+    Special class to create new objects.
+    """
+
+    def __init__(self, state, parameter, changed_start_values=None,
+                 creation_on_objects=False,
+                 time_dependency=None, name=""):
+        """
+
+        Args:
+            state:
+            parameter:
+            changed_start_values: List or tuple of ChangedStartValue objects
+            time_dependency:
+        """
+        super().__init__(end_state=state, parameter=parameter,
+                         time_dependency=time_dependency, name=name)
+        self.changed_start_values = changed_start_values
+        self.creation_on_objects = creation_on_objects

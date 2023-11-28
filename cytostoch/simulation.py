@@ -682,6 +682,64 @@ class SSA():
         get_transfer_vals_array = self._get_transition_transferred_vals_array()
         all_transition_tranferred_vals = get_transfer_vals_array
 
+        # get changed start values for transitions
+        max_nb_changed_start_values = 0
+        for transition_nb, transition in enumerate(self.transitions):
+            if not hasattr(transition, "changed_start_values"):
+                continue
+            if transition.changed_start_values is None:
+                continue
+            nb_changed_start_values = len(transition.changed_start_values)
+            max_nb_changed_start_values = max(max_nb_changed_start_values,
+                                              nb_changed_start_values)
+
+        # changed start values array has one row for each transition
+        # and as many columns as max_nb_changed_start_values * 3
+        # since each changed start value needs the property nb and up to
+        # two columns for the new start value
+        max_nb_changed_start_values = max(1,max_nb_changed_start_values)
+        changed_start_values_array_shape = (len(self.transitions),
+                                            len(self.properties),
+                                            max_nb_changed_start_values*2)
+        changed_start_values_array = np.full(changed_start_values_array_shape,
+                                             math.nan)
+
+        for transition_nb, transition in enumerate(self.transitions):
+            if not hasattr(transition, "changed_start_values"):
+                continue
+            if transition.changed_start_values is None:
+                continue
+            if type(transition.changed_start_values) not in (list, tuple):
+                changed_start_values = [transition.changed_start_values]
+            else:
+                changed_start_values = transition.changed_start_values
+
+            for (start_val_nb,
+                 changed_start_value) in enumerate(changed_start_values):
+                property_nb = changed_start_value.object_property.number
+
+                new_start_values = changed_start_value.new_start_values
+                if type(new_start_values) in (tuple, list):
+                    first_start_val = new_start_values[0]
+                    changed_start_values_array[transition_nb,
+                                               property_nb,
+                                               0] = first_start_val
+                    second_start_val = new_start_values[1]
+                    changed_start_values_array[transition_nb,
+                                               property_nb,
+                                               1] = second_start_val
+                else:
+                    changed_start_values_array[transition_nb,
+                                               property_nb,
+                                               0] = new_start_values
+
+        creation_on_objects = np.full(len(self.transitions), math.nan)
+        for transition_nb, transition in enumerate(self.transitions):
+            if not hasattr(transition, "creation_on_objects"):
+                continue
+            if transition.creation_on_objects:
+                creation_on_objects[transition_nb] = 1
+
         action_parameters = self._get_action_parameter_array()
         all_action_properties = self._get_action_properties_array()
         action_operation_array = self._get_action_operation_array()
@@ -747,7 +805,7 @@ class SSA():
         # current_min_time = np.min(self.times)
         # if current_min_time >= min_time:
         #     break
-        convert_array = np.ascontiguousarray
+        convert_array = lambda x: np.ascontiguousarray(x)
 
         current_timepoint_array = convert_array(current_timepoint_array)
         timepoint_array = convert_array(timepoint_array)
@@ -761,6 +819,16 @@ class SSA():
 
         nb_simulations = self.object_states.shape[1]
         nb_parameter_combinations = self.object_states.shape[2]
+
+        local_resolution = 0.05
+        local_density_size = int(20 / 0.05) + 1
+        local_density = np.zeros((local_density_size, nb_simulations,
+                                  nb_parameter_combinations))
+
+        if np.nansum(creation_on_objects) > 0:
+            some_creation_on_objects = True
+        else:
+            some_creation_on_objects = False
 
         if self.device.find("cuda") != -1:
             simulation_numba._decorate_all_functions_for_gpu()
@@ -835,6 +903,7 @@ class SSA():
             object_states_batches = None
             properties_batches_array = None
             times_batches = None
+            local_density_batches = None
 
             for batch_nb in range(nb_batches):
                 start_parameter_comb = (batch_nb *
@@ -843,6 +912,7 @@ class SSA():
                                       parameter_combinations_per_batch)
                 param_slice = slice(start_parameter_comb, end_parameter_comb)
 
+                local_density_batch = cuda.to_device(convert_array(local_density[:,:,param_slice]))
                 current_timepoint_array_batch = cuda.to_device(
                     convert_array(current_timepoint_array[:,param_slice]))
                 timepoint_array_batch = cuda.to_device(
@@ -853,10 +923,9 @@ class SSA():
                     convert_array(properties_time_array[:,:,:,:,param_slice]))
                 time_resolution = cuda.to_device(time_resolution)
 
-
                 print("Starting simulation batch...")
                 sim = simulation_numba._execute_simulation_gpu
-                object_states_batch = self.object_states[:,:,param_slice]
+                object_states_batch = convert_array(self.object_states[:,:,param_slice])
                 property_array_batch = properties_array[:,:,:,param_slice]
                 times_batch = self.times[:,:,param_slice]
                 param_val_array_batch = parameter_value_array[:,:,param_slice]
@@ -867,8 +936,9 @@ class SSA():
                 current_transitions_batch = current_transitions[:,param_slice]
                 all_trans_pos_batch = all_transition_positions[:,param_slice]
 
+
                 sim[nb_SM,
-                 nb_cc](to_cuda(convert_array(object_states_batch)),
+                 nb_cc](to_cuda(object_states_batch),
                             to_cuda(convert_array(property_array_batch)),
                             to_cuda(convert_array(times_batch)),
                             nb_simulations, parameter_combinations_per_batch,
@@ -887,6 +957,9 @@ class SSA():
                                 all_transition_tranferred_vals)),
                             to_cuda(convert_array(
                                 all_transition_set_to_zero_properties)),
+                            to_cuda(convert_array(changed_start_values_array)),
+                            to_cuda(convert_array(creation_on_objects)),
+                        some_creation_on_objects,
                             to_cuda(convert_array(
                                 all_object_removal_properties)),
                             to_cuda(convert_array(object_removal_operations)),
@@ -902,6 +975,9 @@ class SSA():
                            object_state_time_array_batch,
                            properties_time_array_batch,
                            time_resolution, self.min_time, save_initial_state,
+
+                            local_density_batch, local_resolution,
+
                            seed, rng_states, simulation_factor, parameter_factor
                              )
 
@@ -932,11 +1008,24 @@ class SSA():
                     times_batches = torch.concat((times_batches, times_batch),
                                                  axis=-1)
 
+                local_density_batch = torch.Tensor(
+                    local_density_batch.copy_to_host())
+
+                if local_density_batches is None:
+                    local_density_batches = local_density_batch
+                else:
+                    local_density_batches = torch.concat((local_density_batches,
+                                                          local_density_batch),
+                                                         axis=-1)
+
                 del current_timepoint_array_batch
                 del timepoint_array_batch
                 del object_state_time_array_batch
                 del properties_time_array_batch
                 cuda.current_context().memory_manager.deallocations.clear()
+
+            plt.figure()
+            plt.plot(local_density_batches.mean(axis=1))
 
             self.times = (times_batches * time_resolution.copy_to_host())
             self.times = self.times.unsqueeze(1).to(self.device)
@@ -950,6 +1039,7 @@ class SSA():
             simulation_numba._decorate_all_functions_for_cpu()
             print("Starting simulation...")
             start = time.time()
+
             _execute_sim = simulation_numba._execute_simulation_cpu
             _execute_sim(convert_array(self.object_states),
                         convert_array(properties_array),
@@ -968,6 +1058,9 @@ class SSA():
                         convert_array(property_max_values),
                         convert_array(all_transition_tranferred_vals),
                         convert_array(all_transition_set_to_zero_properties),
+                        convert_array(changed_start_values_array),
+                        convert_array(creation_on_objects),
+                        some_creation_on_objects,
                         convert_array(all_object_removal_properties),
                         convert_array(object_removal_operations),
 
@@ -979,7 +1072,11 @@ class SSA():
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
-                        time_resolution, self.min_time, save_initial_state,seed
+                        time_resolution, self.min_time, save_initial_state,
+
+                         local_density, local_resolution,
+
+                         seed
                         )
             print(time.time() - start)
 

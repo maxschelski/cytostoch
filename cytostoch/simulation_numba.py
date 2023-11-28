@@ -20,6 +20,9 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                         property_min_values, property_max_values,
                         all_transition_tranferred_vals,
                         all_transition_set_to_zero_properties,
+                            changed_start_values_array,
+                            creation_on_objects,
+                        some_creation_on_objects,
                         all_object_removal_properties,
                         object_removal_operations,
 
@@ -31,6 +34,8 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
                         time_resolution, min_time, save_initial_state,
+
+                            local_density, local_resolution,
                             _, rng_states, simulation_factor, parameter_factor
                         ):
     # np.random.seed(seed)
@@ -58,6 +63,9 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                            property_min_values, property_max_values,
                            all_transition_tranferred_vals,
                            all_transition_set_to_zero_properties,
+                            changed_start_values_array,
+                            creation_on_objects,
+                        some_creation_on_objects,
                            all_object_removal_properties,
                            object_removal_operations,
 
@@ -69,11 +77,16 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                            current_timepoint_array, timepoint_array,
                            object_state_time_array, properties_time_array,
                            time_resolution, save_initial_state,
+
+                            local_density, local_resolution,
+
                            rng_states, simulation_factor, parameter_factor
                            )
             if (current_timepoint_array[sim_id, param_id] >=
                     math.floor(min_time/time_resolution[0])):
                 break
+            # if iteration_nb == 175:
+            #     break
             iteration_nb += 1
         current_sim_nb += nb_processes
     grid.sync()
@@ -90,6 +103,9 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                         property_min_values, property_max_values,
                         all_transition_tranferred_vals,
                         all_transition_set_to_zero_properties,
+                            changed_start_values_array,
+                            creation_on_objects,
+                        some_creation_on_objects,
                         all_object_removal_properties,
                         object_removal_operations,
 
@@ -100,8 +116,9 @@ def _execute_simulation_cpu(object_states, properties_array, times,
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
-                        time_resolution, min_time, save_initial_state, seed,
-                        rng_states = None
+                        time_resolution, min_time, save_initial_state,
+                            local_density, local_resolution,
+                            seed, rng_states = None
                         ):
     np.random.seed(seed)
     iteration_nb = 0
@@ -125,6 +142,9 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                            property_min_values, property_max_values,
                            all_transition_tranferred_vals,
                            all_transition_set_to_zero_properties,
+                            changed_start_values_array,
+                            creation_on_objects,
+                        some_creation_on_objects,
                            all_object_removal_properties,
                            object_removal_operations,
 
@@ -135,7 +155,10 @@ def _execute_simulation_cpu(object_states, properties_array, times,
 
                            current_timepoint_array, timepoint_array,
                            object_state_time_array, properties_time_array,
-                           time_resolution, save_initial_state, rng_states
+                           time_resolution, save_initial_state,
+
+                           local_density, local_resolution,
+                           rng_states
                            )
             if (current_timepoint_array[sim_id, param_id] >=
                     math.floor(min_time/time_resolution[0])):
@@ -191,6 +214,9 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                    property_min_values, property_max_values,
                    all_transition_tranferred_vals,
                    all_transition_set_to_zero_properties,
+                    changed_start_values_array,
+                    creation_on_objects,
+                        some_creation_on_objects,
                    all_object_removal_properties,
                    object_removal_operations,
 
@@ -201,8 +227,11 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
 
                    current_timepoint_array, timepoint_array,
                    object_state_time_array, properties_time_array,
-                   time_resolution, save_initial_state, rng_states,
-                   simulation_factor=None, parameter_factor=None
+                   time_resolution, save_initial_state,
+
+                   local_density, local_resolution,
+
+                   rng_states, simulation_factor=None, parameter_factor=None
                    ):
 
     # create tensor for x (position in neurite), l (length of microtubule)
@@ -212,6 +241,39 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
     # thereby there is no need to go through all object states
     # get_rates_func = _get_total_and_single_rates_for_state_transitions
 
+    if some_creation_on_objects:
+        # get density of MTs at timepoint
+        x_pos = 0
+        while x_pos < local_density.shape[0]:
+            local_density[x_pos, sim_id, param_id] = 0
+            x_pos += 1
+
+        object_pos = 0
+        total_density = 0
+        while object_pos < object_states.shape[0]:
+            if object_states[object_pos, sim_id, param_id] > 0:
+
+                start = properties_array[0,object_pos,sim_id, param_id]
+                end = start + properties_array[1,object_pos,sim_id, param_id]
+                end += properties_array[2,object_pos,sim_id, param_id]
+                if start != end:
+                    x_start = int(math.floor(start / local_resolution))
+                    x_end = int(math.ceil(end / local_resolution))
+                    x_pos = max(x_start, 0)
+                    while x_pos < x_end:
+                        if x_pos == (x_end - 1):
+                            # for the x bin in which the MT ended, don't add a full MT
+                            # but just the relative amount of the bin crossed by the MT
+                            x_um = x_pos * local_resolution
+                            diff = (end - x_um) / local_resolution
+                            local_density[x_pos, sim_id, param_id] += diff
+                            total_density = total_density + diff
+                        else:
+                            local_density[x_pos, sim_id, param_id] += 1
+                            total_density = total_density + 1
+                        x_pos += 1
+            object_pos += 1
+
     # increase performance through an array for each object state
     # of which transitions are influenced by it
     # then don't recalculate the transition rates each iteration
@@ -219,7 +281,9 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
     _get_rates = _get_total_and_single_rates_for_state_transitions
     _get_rates(parameter_value_array, transition_parameters,
                all_transition_states, current_transition_rates, total_rates,
-               nb_objects_all_states, sim_id, param_id)
+               nb_objects_all_states,creation_on_objects,
+               total_density, local_resolution,
+               sim_id, param_id)
 
     get_reaction_times = _get_times_of_next_transition
     get_reaction_times(total_rates, reaction_times, sim_id, param_id,
@@ -228,6 +292,7 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
     _determine_next_transition(total_rates, current_transition_rates,
                                current_transitions, sim_id, param_id,
                                rng_states, simulation_factor, parameter_factor)
+
 
     # speed up searching for xth object with correct state
     # by keeping track of the position of each object in each state
@@ -238,6 +303,7 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                                         object_states,
                                         sim_id, param_id, rng_states,
                                         simulation_factor, parameter_factor)
+
 
     _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 action_state_array,
@@ -256,6 +322,11 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                           all_transition_tranferred_vals,
                           all_transition_set_to_zero_properties,
                           property_start_values,
+                            changed_start_values_array,
+                            creation_on_objects,
+
+                          local_density, total_density,
+                          local_resolution,
                           sim_id, param_id,
                           rng_states, simulation_factor, parameter_factor)
 
@@ -411,6 +482,8 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                       current_transition_rates,
                                                       total_rates,
                                                       nb_objects_all_states,
+                                                      creation_on_objects,
+                                                      total_density,local_resolution,
                                                       sim_id, param_id):
 
     # get rates for all state transitions, depending on number of objects
@@ -425,8 +498,14 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                 sim_id, param_id]
         if start_state == 0:
             # for state 0, the number of objects in state 0 does not matter
-            current_transition_rates[transition_parameter,
-                                     sim_id, param_id] = transition_rate
+            if creation_on_objects[transition_nb] == 1:
+                current_transition_rates[transition_parameter,
+                                         sim_id, param_id] = (transition_rate *
+                                                              total_density *
+                                                              local_resolution)
+            else:
+                current_transition_rates[transition_parameter,
+                                         sim_id, param_id] = transition_rate
         else:
             nb_objects = nb_objects_all_states[int(start_state-1), sim_id, param_id]
             current_transition_rates[transition_nb,
@@ -536,6 +615,8 @@ def _determine_positions_of_transitions(current_transitions,
         # the start_state
         while object_pos < object_states.shape[0]:
             object_state = object_states[object_pos, sim_id, param_id]
+            # if object_state > 4:
+            #     print(555, object_state, object_pos)
             if object_state == start_state:
                 if current_nb_state_objects == random_object_pos:
                     all_transition_positions[sim_id, param_id] = object_pos
@@ -690,13 +771,18 @@ def _update_object_states(current_transitions, all_transition_states,
                           all_transition_tranferred_vals,
                           all_transition_set_to_zero_properties,
                           property_start_vals,
+                            changed_start_values_array,
+                            creation_on_objects,
+
+                          local_density, total_density, local_resolution,
                           sim_id, param_id,
                           rng_states, simulation_factor, parameter_factor):
     # update the simulations according to executed transitions
     transition_number = current_transitions[sim_id, param_id]
     if math.isnan(transition_number):
         return
-    transition_states = all_transition_states[int(transition_number)]
+    transition_number = int(transition_number)
+    transition_states = all_transition_states[transition_number]
     start_state = transition_states[0]
     end_state = transition_states[1]
     transition_position = all_transition_positions[sim_id, param_id]
@@ -712,7 +798,15 @@ def _update_object_states(current_transitions, all_transition_states,
         # defined value
         property_nb = 0
         while property_nb < property_start_vals.shape[0]:
-            property_start_val = property_start_vals[property_nb]
+            # check whether the property start values are different for the
+            # current transition
+            if math.isnan(changed_start_values_array[transition_number,
+                                                     property_nb, 0]):
+                property_start_val = property_start_vals[property_nb]
+            else:
+                property_start_val = changed_start_values_array[transition_number,
+                                                                property_nb]
+
             # if there is only one non-nan value or just one value in total
             # then the first value is the actual value that the property
             # should be set to
@@ -734,10 +828,27 @@ def _update_object_states(current_transitions, all_transition_states,
                 # interval, then add the start point of the interval
                 # to have the minimum of the random value at the start of
                 # the interval
-                interval_range = (property_start_val[1] -
-                                  property_start_val[0])
-                property_val = (random_nb * interval_range +
-                                property_start_val[0])
+
+                if creation_on_objects[transition_number] == 1:
+                    # go through local density until threshold is reached
+                    x_pos = 0
+                    threshold = random_nb * total_density
+                    density_sum = 0
+                    while x_pos < local_density.shape[0]:
+                        density_sum = density_sum + local_density[x_pos,
+                                                                  sim_id,
+                                                                  param_id]
+                        if density_sum > threshold:
+                            property_val = ((x_pos * local_resolution) +
+                                            (local_resolution * random_nb))
+                            break
+                        x_pos += 1
+                else:
+                    interval_range = (property_start_val[1] -
+                                      property_start_val[0])
+                    property_val = (random_nb * interval_range +
+                                    property_start_val[0])
+
             properties_array[property_nb,
                              int(transition_position),
                              sim_id, param_id] = property_val
@@ -845,9 +956,11 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                     remove_object = combined_property_vals < threshold
 
                 # if object should be removed, set state to 0 and properties to NaN
+
                 if remove_object:
                     object_state_to_remove = object_states[int(object_pos),
                                                            sim_id, param_id]
+
                     nb_objects_all_states[object_state_to_remove-1,
                                           sim_id, param_id] -= 1
                     object_states[int(object_pos),
@@ -887,8 +1000,10 @@ def _save_values_with_temporal_resolution(timepoint_array,
         else:
             timepoint_idx = int(current_timepoint) - 1
 
-        timepoint_array[timepoint_idx,
-                        sim_id, param_id] = current_timepoint
+        # make sure that timepoint_idx is not higher than timepoint_array shape
+        timepoint_idx = min(timepoint_idx, timepoint_array.shape[0]-1)
+        timepoint_array[timepoint_idx, sim_id, param_id] = current_timepoint
+
         # copy all current data into time-resolved data
         object_pos = 0
         while object_pos < object_states.shape[0]:
