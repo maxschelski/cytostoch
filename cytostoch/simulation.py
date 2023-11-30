@@ -10,6 +10,8 @@ import sys
 import gc
 import os
 import psutil
+import pickle
+import dill
 
 # NUMBA_DEBUG=1
 # NUMBA_DEVELOPER_MODE = 1
@@ -96,7 +98,7 @@ class tRSSA():
 class SSA():
 
     def __init__(self, states, transitions, properties, actions,
-                 object_removal=None, name="", device="GPU",
+                 object_removal=None, script_path=None, name="", device="GPU",
                  use_free_gpu=False):
         """
 
@@ -123,6 +125,7 @@ class SSA():
         self.properties = properties
         self.actions = actions
         self.object_removal = object_removal
+        self.script_path = script_path
         self.name = name
 
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
@@ -372,6 +375,69 @@ class SSA():
 
         return all_transition_tranferred_vals
 
+    def get_changed_start_values_for_creation(self):
+        # get changed start values for transitions
+        max_nb_changed_start_values = 0
+        for transition_nb, transition in enumerate(self.transitions):
+            if not hasattr(transition, "changed_start_values"):
+                continue
+            if transition.changed_start_values is None:
+                continue
+            nb_changed_start_values = len(transition.changed_start_values)
+            max_nb_changed_start_values = max(max_nb_changed_start_values,
+                                              nb_changed_start_values)
+
+        # changed start values array has one row for each transition
+        # and as many columns as max_nb_changed_start_values * 3
+        # since each changed start value needs the property nb and up to
+        # two columns for the new start value
+        max_nb_changed_start_values = max(1,max_nb_changed_start_values)
+        changed_start_values_array_shape = (len(self.transitions),
+                                            len(self.properties),
+                                            max_nb_changed_start_values*2)
+        changed_start_values_array = np.full(changed_start_values_array_shape,
+                                             math.nan)
+
+        for transition_nb, transition in enumerate(self.transitions):
+            if not hasattr(transition, "changed_start_values"):
+                continue
+            if transition.changed_start_values is None:
+                continue
+            if type(transition.changed_start_values) not in (list, tuple):
+                changed_start_values = [transition.changed_start_values]
+            else:
+                changed_start_values = transition.changed_start_values
+
+            for (start_val_nb,
+                 changed_start_value) in enumerate(changed_start_values):
+                property_nb = changed_start_value.object_property.number
+
+                new_start_values = changed_start_value.new_start_values
+                if type(new_start_values) in (tuple, list):
+                    first_start_val = new_start_values[0]
+                    changed_start_values_array[transition_nb,
+                                               property_nb,
+                                               0] = first_start_val
+                    second_start_val = new_start_values[1]
+                    changed_start_values_array[transition_nb,
+                                               property_nb,
+                                               1] = second_start_val
+                else:
+                    changed_start_values_array[transition_nb,
+                                               property_nb,
+                                               0] = new_start_values
+        return changed_start_values_array
+
+    def get_creation_on_objects_array(self):
+
+        creation_on_objects = np.full(len(self.transitions), math.nan)
+        for transition_nb, transition in enumerate(self.transitions):
+            if not hasattr(transition, "creation_on_objects"):
+                continue
+            if transition.creation_on_objects:
+                creation_on_objects[transition_nb] = 1
+        return creation_on_objects
+
     def _get_transition_set_to_zero_properties(self):
         nb_transitions = len(self.transitions)
         max_nb_properties_set_to_zero = 0
@@ -538,6 +604,8 @@ class SSA():
         self.max_iters_no_data_extraction = max_iters_no_data_extraction
         self.remove_finished_sims = remove_finished_sims
 
+        self._save_all_metadata(nb_simulations, max_number_objects)
+
         self.all_data = []
         self.all_times = []
         self.all_states = []
@@ -682,63 +750,9 @@ class SSA():
         get_transfer_vals_array = self._get_transition_transferred_vals_array()
         all_transition_tranferred_vals = get_transfer_vals_array
 
-        # get changed start values for transitions
-        max_nb_changed_start_values = 0
-        for transition_nb, transition in enumerate(self.transitions):
-            if not hasattr(transition, "changed_start_values"):
-                continue
-            if transition.changed_start_values is None:
-                continue
-            nb_changed_start_values = len(transition.changed_start_values)
-            max_nb_changed_start_values = max(max_nb_changed_start_values,
-                                              nb_changed_start_values)
-
-        # changed start values array has one row for each transition
-        # and as many columns as max_nb_changed_start_values * 3
-        # since each changed start value needs the property nb and up to
-        # two columns for the new start value
-        max_nb_changed_start_values = max(1,max_nb_changed_start_values)
-        changed_start_values_array_shape = (len(self.transitions),
-                                            len(self.properties),
-                                            max_nb_changed_start_values*2)
-        changed_start_values_array = np.full(changed_start_values_array_shape,
-                                             math.nan)
-
-        for transition_nb, transition in enumerate(self.transitions):
-            if not hasattr(transition, "changed_start_values"):
-                continue
-            if transition.changed_start_values is None:
-                continue
-            if type(transition.changed_start_values) not in (list, tuple):
-                changed_start_values = [transition.changed_start_values]
-            else:
-                changed_start_values = transition.changed_start_values
-
-            for (start_val_nb,
-                 changed_start_value) in enumerate(changed_start_values):
-                property_nb = changed_start_value.object_property.number
-
-                new_start_values = changed_start_value.new_start_values
-                if type(new_start_values) in (tuple, list):
-                    first_start_val = new_start_values[0]
-                    changed_start_values_array[transition_nb,
-                                               property_nb,
-                                               0] = first_start_val
-                    second_start_val = new_start_values[1]
-                    changed_start_values_array[transition_nb,
-                                               property_nb,
-                                               1] = second_start_val
-                else:
-                    changed_start_values_array[transition_nb,
-                                               property_nb,
-                                               0] = new_start_values
-
-        creation_on_objects = np.full(len(self.transitions), math.nan)
-        for transition_nb, transition in enumerate(self.transitions):
-            if not hasattr(transition, "creation_on_objects"):
-                continue
-            if transition.creation_on_objects:
-                creation_on_objects[transition_nb] = 1
+        get_changed_start_values = self.get_changed_start_values_for_creation
+        changed_start_values_array = get_changed_start_values()
+        creation_on_objects = self.get_creation_on_objects_array()
 
         action_parameters = self._get_action_parameter_array()
         all_action_properties = self._get_action_properties_array()
@@ -1078,7 +1092,6 @@ class SSA():
 
                          seed
                         )
-            print(time.time() - start)
 
             self.object_states = torch.Tensor(np.copy(object_state_time_array))
 
@@ -1119,6 +1132,49 @@ class SSA():
                     print(sub_name, mean)
         self._save_times_and_object_states(0)
         self._save_data(all_data, 0)
+
+    def _save_all_metadata(self, nb_simulations, max_number_objects):
+        # save metadata of simulations
+        metadata = pd.DataFrame()
+        metadata["nb_simulations"] = nb_simulations
+        metadata["max_number_objects"] = max_number_objects
+        metadata["nb_of_states"] = len(self.states)
+        metadata["states"] = str([state.name for state in self.states])
+        metadata["nb_of_transitions"] = len(self.transitions)
+        metadata["transitions"] = str([transition.name
+                                   for transition in self.transitions])
+        metadata["nb_of_properties"] = len(self.properties)
+        metadata["properties"] = str([property.name
+                                  for property in self.properties])
+        metadata["nb_of_actions"] = len(self.actions)
+        metadata["actions"] = str([action.name for action in self.actions])
+        for property in self.properties:
+            metadata[property.name+"_max"] = property.max_value
+            metadata[property.name+"_min"] = property.min_value
+        for name, data_extractor in self.data_extractions.items():
+            metadata["data_"+name+"_resolution"] = data_extractor.resolution
+            metadata["data_"+name+"_operation"] = data_extractor.operation
+            metadata["data_"+name+"_state_groups"] = data_extractor.state_groups
+
+        file_path = os.path.join(self.data_folder, "metadata.csv")
+        metadata.to_csv(file_path)
+
+        # pickle the entire simulation object
+        file_path = os.path.join(self.data_folder, "SSA.pkl")
+        with open(file_path, "wb") as file:
+            dill.dump(self, file, fix_imports=False)
+
+        if self.script_path is not None:
+            if not os.path.exists(self.script_path):
+                raise ValueError(f"The provided script path {self.script_path}"
+                                 f" does not exist. The easiest way to supply "
+                                 f"the correct path to the simulation script "
+                                 f"is to use the __file__ variable.")
+            script_file_name = os.path.basename(self.script_path)
+            experiment = os.path.basename(self.data_folder)
+            script_file_name = script_file_name.replace(".py", "_"+experiment)
+            new_script_path = os.path.join(self.data_folder, script_file_name)
+            shutil.copy(self.script_path, new_script_path)
 
     def _get_number_of_cuda_cores(self):
         cc_cores_per_SM_dict = {
