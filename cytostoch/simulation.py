@@ -98,7 +98,9 @@ class tRSSA():
 class SSA():
 
     def __init__(self, states, transitions, properties, actions,
-                 object_removal=None, script_path=None, name="", device="GPU",
+                 object_removal=None, script_path=None,
+                 simulations_summary_path = None,
+                 name="", device="GPU",
                  use_free_gpu=False):
         """
 
@@ -127,6 +129,7 @@ class SSA():
         self.object_removal = object_removal
         self.script_path = script_path
         self.name = name
+        self.simulations_summary_path = simulations_summary_path
 
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
@@ -184,6 +187,7 @@ class SSA():
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
               time_resolution, save_initial_state=False,
               max_number_objects=None,
+              all_parameter_combinations=False,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
               max_iters_no_data_extraction=2000,
@@ -211,7 +215,8 @@ class SSA():
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
                         time_resolution, save_initial_state,
-                        max_number_objects, ignore_errors,
+                        max_number_objects, all_parameter_combinations,
+                        ignore_errors,
                         print_update_time_step,
                         nb_objects_added_per_step,
                         max_iters_no_data_extraction,
@@ -447,7 +452,7 @@ class SSA():
                 continue
             max_nb_properties_set_to_zero = max(max_nb_properties_set_to_zero,
                                                 len(properties_set_to_zero))
-
+        max_nb_properties_set_to_zero = max(max_nb_properties_set_to_zero, 1)
         all_transition_set_to_zero_properties = np.full((nb_transitions,
                                                          max_nb_properties_set_to_zero),
                                                         math.nan)
@@ -568,7 +573,8 @@ class SSA():
 
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, save_initial_state=False,
-               max_number_objects=None, ignore_errors=False,
+               max_number_objects=None, all_parameter_combinations=False,
+               ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                 max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=False,
@@ -585,12 +591,17 @@ class SSA():
             min_time (float): minimum time
             max_number_objects (int): maximum number of objects allowed to be
                 simulated. Determines array size
+            all_parameter_combinations (Boolean): Whether the combination of all
+                parameter values should be analyzed.
         Returns:
         """
         if reset_folder:
             if os.path.exists(data_folder):
                 shutil.rmtree(data_folder)
                 time.sleep(0.1)
+            os.mkdir(data_folder)
+
+        if not os.path.exists:
             os.mkdir(data_folder)
 
         self.min_time = min_time
@@ -603,8 +614,8 @@ class SSA():
         self.use_assertion_checks = use_assertion_checks
         self.max_iters_no_data_extraction = max_iters_no_data_extraction
         self.remove_finished_sims = remove_finished_sims
+        self.all_parameter_combinations = all_parameter_combinations
 
-        self._save_all_metadata(nb_simulations, max_number_objects)
 
         self.all_data = []
         self.all_times = []
@@ -640,7 +651,6 @@ class SSA():
         simulation_parameter_lengths = [len(parameters.values)
                                         for parameters
                                         in self._all_simulation_parameters]
-        all_parameter_combinations = False
         # if not all parameter combinations should be used
         # use the first parameter value as the standard and the other as single
         # changes that should be done (while leaving the other parameters
@@ -801,9 +811,8 @@ class SSA():
         if save_initial_state:
             timepoint_array[0] = 0
 
-        object_state_time_array = np.full((nb_timepoints,
-                                           *self.object_states.shape),
-                                          math.nan)
+        object_state_time_array = np.zeros((nb_timepoints,
+                                            *self.object_states.shape))
         if save_initial_state:
             object_state_time_array[0] = self.object_states
 
@@ -826,6 +835,15 @@ class SSA():
         object_state_time_array = convert_array(object_state_time_array)
         properties_time_array = convert_array(properties_time_array)
         time_resolution = convert_array(time_resolution)
+
+        # get an array to save the highest index with an object
+        idx_array = np.expand_dims(np.arange(self.object_states.shape[0]),
+                                   axis=[nb+1 for nb
+                                         in
+                                         range(len(self.object_states.shape[1:])
+                                               )])
+        object_state_mask = self.object_states > 0
+        highest_idx_with_object = (object_state_mask * idx_array).max(axis=0)
 
         seed = 42
 
@@ -897,7 +915,6 @@ class SSA():
             # rates will be slower.
             # If each batch would contain higher and lower rates, all batches
             # would take longer.
-
 
             # if total size is larger than free memory on GPU
             # split array by number of parameters into smaller pieces
@@ -983,6 +1000,7 @@ class SSA():
                             to_cuda(convert_array(reaction_times_batch)),
                             to_cuda(convert_array(current_transitions_batch)),
                             to_cuda(convert_array(all_trans_pos_batch)),
+                            to_cuda(convert_array(highest_idx_with_object)),
 
                            current_timepoint_array_batch,
                            timepoint_array_batch,
@@ -1031,15 +1049,14 @@ class SSA():
                     local_density_batches = torch.concat((local_density_batches,
                                                           local_density_batch),
                                                          axis=-1)
-
                 del current_timepoint_array_batch
                 del timepoint_array_batch
                 del object_state_time_array_batch
                 del properties_time_array_batch
                 cuda.current_context().memory_manager.deallocations.clear()
 
-            plt.figure()
-            plt.plot(local_density_batches.mean(axis=1))
+            # plt.figure()
+            # plt.plot(local_density_batches.mean(axis=1))
 
             self.times = (times_batches * time_resolution.copy_to_host())
             self.times = self.times.unsqueeze(1).to(self.device)
@@ -1048,6 +1065,13 @@ class SSA():
                 property.array = properties_batches_array[:, property_nb]
                 property.array = property.array.to(self.device)
             self.object_states = object_states_batches.to(self.device)
+            
+            for object_state in range(1,6):
+                object_state_mask = self.object_states == object_state
+                for property in self.properties:
+                    print(object_state, property.name,
+                          len(property.array[object_state_mask &
+                                             (property.array > 0)]))
 
         else:
             simulation_numba._decorate_all_functions_for_cpu()
@@ -1083,15 +1107,16 @@ class SSA():
                         convert_array(reaction_times),
                         convert_array(current_transitions),
                         convert_array(all_transition_positions),
+                         convert_array(highest_idx_with_object),
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
                         time_resolution, self.min_time, save_initial_state,
 
                          local_density, local_resolution,
-
                          seed
                         )
+
 
             self.object_states = torch.Tensor(np.copy(object_state_time_array))
 
@@ -1102,18 +1127,28 @@ class SSA():
             self.times = (torch.Tensor(np.copy(timepoint_array)).unsqueeze(1)
                           * time_resolution)
 
+        if len(self.times.cpu()[0][np.isnan(self.times.cpu()[0])]) > 0:
+            raise ValueError(f"The defined max number of objects "
+                             f"{self.max_number_objects} was too low. "
+                             "Simulations where creating a new object was not "
+                             "possible due to too little objects were "
+                             "interrupted and no results for any simulation "
+                             "were saved. To fix this problem increase the "
+                             "value for the 'max_number_objects' parameter "
+                             "in the 'start' function.")
+
         all_data = {}
         for data_name, data_extraction in self.data_extractions.items():
             start = time.time()
             all_data[data_name] = data_extraction.extract(self)
             print(data_name, "extraction time: ", time.time() - start)
-            if data_name.startswith("local_density"):
+            if data_name.startswith("local_"):
                 for sub_name, sub_data in all_data[data_name].items():
                     if sub_data.sum() == 0:
                         continue
                     plt.figure()
                     plt.plot(torch.mean(sub_data[-1].cpu(),dim=(1)))
-                    plt.title(sub_name)
+                    plt.title(data_name + "-" + sub_name)
                     plt.ylim(0,plt.ylim()[1])
                     # plt.figure()
                     # plt.plot(torch.mean(sub_data[-1],dim=(1)))
@@ -1130,34 +1165,87 @@ class SSA():
                     if np.isnan(mean):
                         continue
                     print(sub_name, mean)
+
         self._save_times_and_object_states(0)
         self._save_data(all_data, 0)
+        self._save_all_metadata(nb_simulations, max_number_objects)
 
     def _save_all_metadata(self, nb_simulations, max_number_objects):
+        if self.simulations_summary_path is not None:
+            summary_script_name = "simulations_summary.csv"
+            simulations_summary_path = os.path.join(self.simulations_summary_path,
+                                                    summary_script_name)
+            if os.path.exists(simulations_summary_path):
+                simulations_summary = pd.read_csv(simulations_summary_path,
+                                                  index_col=0)
+            else:
+                simulations_summary = pd.DataFrame()
+
         # save metadata of simulations
         metadata = pd.DataFrame()
-        metadata["nb_simulations"] = nb_simulations
-        metadata["max_number_objects"] = max_number_objects
-        metadata["nb_of_states"] = len(self.states)
-        metadata["states"] = str([state.name for state in self.states])
-        metadata["nb_of_transitions"] = len(self.transitions)
-        metadata["transitions"] = str([transition.name
-                                   for transition in self.transitions])
-        metadata["nb_of_properties"] = len(self.properties)
-        metadata["properties"] = str([property.name
-                                  for property in self.properties])
-        metadata["nb_of_actions"] = len(self.actions)
-        metadata["actions"] = str([action.name for action in self.actions])
+        folder_link = ('=HYPERLINK("file://' + self.data_folder +
+                              '","'+os.path.basename(self.data_folder)+'")')
+        metadata["folder"] = [folder_link]
+        for parameter in self.parameters:
+            metadata[parameter.name] = str(list(np.unique(parameter.values)))
+        metadata["all_param_combinations"] = str(self.all_parameter_combinations)
+        metadata["nb_of_states"] = [len(self.states)]
+        metadata["states"] = [str([state.name for state in self.states])]
+        metadata["nb_of_transitions"] = [len(self.transitions)]
+        metadata["transitions"] = [str([transition.name
+                                   for transition in self.transitions])]
+        metadata["nb_of_properties"] = [len(self.properties)]
+        metadata["properties"] = [str([property.name
+                                  for property in self.properties])]
+        metadata["nb_of_actions"] = [len(self.actions)]
+        metadata["actions"] = [str([action.name for action in self.actions])]
         for property in self.properties:
-            metadata[property.name+"_max"] = property.max_value
-            metadata[property.name+"_min"] = property.min_value
+            if hasattr(property.max_value, "cpu"):
+               property.max_value = property.max_value.cpu()
+            if hasattr(property.min_value, "cpu"):
+               property.max_value = property.min_value.cpu()
+            metadata[property.name+"_max"] = [property.max_value]
+            metadata[property.name+"_min"] = [property.min_value]
         for name, data_extractor in self.data_extractions.items():
-            metadata["data_"+name+"_resolution"] = data_extractor.resolution
-            metadata["data_"+name+"_operation"] = data_extractor.operation
-            metadata["data_"+name+"_state_groups"] = data_extractor.state_groups
-
+            metadata["data_"+name+"_resolution"] = [data_extractor.resolution]
+            metadata["data_"+name+"_operation"] = [data_extractor.operation_name]
+            metadata["data_"+name+"_state_groups"] = [data_extractor.state_groups]
+        metadata["nb_simulations"] = [nb_simulations]
+        metadata["max_number_objects"] = [max_number_objects]
         file_path = os.path.join(self.data_folder, "metadata.csv")
         metadata.to_csv(file_path)
+        metadata = pd.read_csv(file_path)
+        if self.simulations_summary_path is not None:
+            for column in metadata.columns:
+                if column.startswith("Unnamed"):
+                    metadata = metadata.drop(column, axis=1)
+                    continue
+
+                if column not in simulations_summary.columns:
+                    simulations_summary[column] = ""
+
+            for column in simulations_summary.columns:
+                if column not in metadata.columns:
+                    metadata[column] = ""
+
+            folder_in_summary = simulations_summary["folder"] == folder_link
+            # prevent creating multiple entries for the same folder
+            if len(simulations_summary.loc[folder_in_summary]) > 0:
+                for column in metadata.columns:
+                    val = metadata.iloc[0][column]
+                    simulations_summary.loc[folder_in_summary, column] = [val]
+                # print(len(metadata.iloc[0].values))
+                # print(simulations_summary.loc[simulations_summary["folder"] ==
+                #                         folder_link].values)
+                # print(len(simulations_summary.loc[simulations_summary["folder"] ==
+                #                         folder_link].values[0]))
+                # simulations_summary.loc[simulations_summary["folder"] ==
+                #                         folder_link] = metadata.iloc[0].values
+            else:
+                # if the folder is not present already, add it
+                simulations_summary = pd.concat([simulations_summary, metadata])
+
+            simulations_summary.to_csv(simulations_summary_path)
 
         # pickle the entire simulation object
         file_path = os.path.join(self.data_folder, "SSA.pkl")
@@ -1172,7 +1260,7 @@ class SSA():
                                  f"is to use the __file__ variable.")
             script_file_name = os.path.basename(self.script_path)
             experiment = os.path.basename(self.data_folder)
-            script_file_name = script_file_name.replace(".py", "_"+experiment)
+            script_file_name = script_file_name.replace(".py", "_"+experiment+".py")
             new_script_path = os.path.join(self.data_folder, script_file_name)
             shutil.copy(self.script_path, new_script_path)
 
@@ -1328,6 +1416,7 @@ class SSA():
             # reshape to have all different parameter values in one axis
             model_parameters.value_array = np.array(array.reshape((array.shape[1],
                                                                   -1)))
+
         return None
 
     def _initialize_object_states(self):
