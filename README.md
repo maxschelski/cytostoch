@@ -2,6 +2,8 @@
 Stochastic simulation (SSA) of microtubules in neurites, implemented using jit from numba (numba.njit, numba.cuda.jit) for fast parallel processing on GPU or CPUs. 
 Programmed in a generalized fashion, to be used for stochastically simulating any model with different species, with optional properties for each species member, in an arbitrary spatial domain. 
 
+Example under scripts not compatible with current cytostoch version and therefore not running.
+
 Note, time-dependent variables are not implemented yet.
 
 # Installation
@@ -20,5 +22,5 @@ The package was developed and tested in Windows.
 > conda activate cytostoch
 6. Install cytostoch locally using pip:
 > pip install -e .
-7. You can now import cytotorch to build and simulate your model (see example under scripts\stochastic_microtubule_model.py)
+7. You can now import cytotorch to build and simulate your model:
 > import cytostoch
