@@ -269,16 +269,19 @@ class PropertyGeometry():
 
 class Dimension():
 
-    def __init__(self, position, lengths=None, direction=None):
+    def __init__(self, positions, lengths=None, direction=None):
         """
 
         Args:
-            position (ObjectProperty):
+            positions (list of ObjectProperty objects): First value in list is
+                the starting position that also contains possible
+                min and max values. Further values in list correspond to
+                values added to position for quantifications.
             length (list): list of ObjectProperty objects that together define
                 the object length
             direction (ObjectProperty):
         """
-        self.position = position
+        self.positions = positions
         self.lengths = lengths
         self.direction = direction
 
@@ -318,6 +321,9 @@ class DataExtraction():
         self.kwargs = kwargs
         self.state_groups = state_groups
         self.print_regularly = print_regularly
+        self.operation_name = operation
+
+        self.resolution = kwargs.get("resolution", None)
 
         implemented_operations = {}
         new_operation = self._operation_2D_to_1D_density
@@ -477,7 +483,7 @@ class DataExtraction():
             mean_values = values.nanmean(dim=1).unsqueeze(1)
             data_dict["mean_"+name] = mean_values.cpu()
             # get mean data for objects completely inside (position >= 0)
-            values[dimensions[0].position.array < 0] = math.nan
+            values[dimensions[0].positions[0].array < 0] = math.nan
             inside_mean_values = values.nanmean(dim=1).unsqueeze(1)
             data_dict["mean_inside_"+name] = inside_mean_values.cpu()
             data_dict["mass_"+name] = (mean_values * object_number).cpu()
@@ -489,7 +495,7 @@ class DataExtraction():
 
     def _operation_raw(self, dimensions, **kwargs):
         data_dict = {}
-        data_dict["position"] = dimensions[0].position.array.cpu()
+        data_dict["position"] = dimensions[0].positions[0].array.cpu()
         data_dict["length"] = dimensions[0].length.array.cpu()
         return data_dict
 
@@ -704,7 +710,11 @@ class DataExtraction():
             return ValueError(f"The operation '2D_to_1D_density' is only "
                               f"implemented for 1 dimension. DataExtraction "
                               f"received {len(dimensions)} dimensions instead.")
-        position_array = dimensions[0].position.array.clone()
+
+        position_array = 0
+        for position in dimensions[0].positions:
+            position_array = position_array + position.array
+
         # if regular_print:
         #     position_array = dimensions[0].position.array
         # else:
@@ -756,10 +766,10 @@ class DataExtraction():
         # create boolean data array later by expanding each microtubule in space
         # size of array will be:
         # (max_position of neurite / resolution) x nb of microtubules
-        min_position = dimensions[0].position.min_value
+        min_position = dimensions[0].positions[0].min_value
         if min_position is None:
             min_position = 0
-        max_position = dimensions[0].position.max_value
+        max_position = dimensions[0].positions[0].max_value
 
         device = simulation_object.device
 
@@ -869,10 +879,14 @@ class DataExtraction():
                                               *position_start.shape[3:])
                             <= position_end[:,:, start_nb_object:end_nb_object]))
 
+                # remove data from objects that have no length
+                # (e.g. objects that should only have one property will have 0
+                #  in the other property and therefore should have a density
+                #  of 0)
+                data_array[:,:,length_array[0,
+                               start_nb_object:end_nb_object] == 0] = 0
                 # then sum across microtubules to get number of MTs at each position
                 data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
-
-
                 all_data = all_data + data_array_sum
                 # val_tmp = all_data[:2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
                 del data_array

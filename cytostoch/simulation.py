@@ -187,12 +187,14 @@ class SSA():
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
               time_resolution, save_initial_state=False,
               max_number_objects=None,
+               combine_parameters=True,
               all_parameter_combinations=False,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
               max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=False,
               remove_finished_sims=False, save_states=False,
+              save_results=True,
               use_assertion_checks=True, reset_folder=True):
         """
 
@@ -207,6 +209,15 @@ class SSA():
             data_folder (string): Folder in which data should be saved
             max_number_objects (int): maximum number of objects allowed to be
                 simulated. Determines array size
+            all_parameter_combinations (Boolean): Whether the combination of all
+                parameter values should be analyzed.
+            combine_parameters (Boolean): Whether parameters should be
+                used exactly as supplied or combined.
+                If False, the only manipulation that will be done is that
+                parameters with single values will be expanded
+                to the total length of parameters.
+                This allows e.g. definition of pairs of parameter values to use
+                (changing two parameters for a simulation).
         Returns:
 
         """
@@ -222,6 +233,7 @@ class SSA():
                         max_iters_no_data_extraction,
                         dynamically_increase_nb_objects,
                         remove_finished_sims, save_states,
+                        save_results,
                         use_assertion_checks, reset_folder)
 
     def save(self, time_resolution, max_time):
@@ -574,11 +586,13 @@ class SSA():
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, save_initial_state=False,
                max_number_objects=None, all_parameter_combinations=False,
+               combine_parameters=True,
                ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                 max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=False,
                remove_finished_sims=False, save_states=False,
+               save_results=True,
                use_assertion_checks=True, reset_folder=True):
         """
 
@@ -593,6 +607,13 @@ class SSA():
                 simulated. Determines array size
             all_parameter_combinations (Boolean): Whether the combination of all
                 parameter values should be analyzed.
+            combine_parameters (Boolean): Whether parameters should be
+                used exactly as supplied or combined.
+                If False, the only manipulation that will be done is that
+                parameters with single values will be expanded
+                to the total length of parameters.
+                This allows e.g. definition of pairs of parameter values to use
+                (changing two parameters for a simulation).
         Returns:
         """
         if reset_folder:
@@ -611,10 +632,17 @@ class SSA():
         self.nb_objects_added_per_step = nb_objects_added_per_step
         self.dynamically_increase_nb_objects = dynamically_increase_nb_objects
         self.save_states = save_states
+        self.save_results = save_results
         self.use_assertion_checks = use_assertion_checks
         self.max_iters_no_data_extraction = max_iters_no_data_extraction
         self.remove_finished_sims = remove_finished_sims
         self.all_parameter_combinations = all_parameter_combinations
+        self.combine_parameters = combine_parameters
+
+        if (not combine_parameters) & self.all_parameter_combinations:
+            print("If the parameters combine_parameters is False, "
+                  "no parameters will be combined, also if "
+                  "all_parameter_combinations is True.")
 
 
         self.all_data = []
@@ -647,16 +675,46 @@ class SSA():
         # create list with all transitions and then with all actions
         self._all_simulation_parameters = [*self.states, *self.parameters]
 
+
+
         # create list of length of all model parameters
         simulation_parameter_lengths = [len(parameters.values)
                                         for parameters
                                         in self._all_simulation_parameters]
-        # if not all parameter combinations should be used
-        # use the first parameter value as the standard and the other as single
-        # changes that should be done (while leaving the other parameters
-        # undchanged) - therefore for each simulation only one parameter is
-        # changed from the standard set of parameter values
-        if not all_parameter_combinations:
+
+
+        # check whether each parameter either only has a single value
+        # or has a length that is similar between all parameters with more than
+        # one value
+        if not combine_parameters:
+            unique_param_lengths = set(simulation_parameter_lengths)
+            param_lengths = unique_param_lengths - set([1])
+            if len(param_lengths) > 1:
+                raise ValueError("If combine_parameters is False, then each "
+                                 "parameter can either have one value defined "
+                                 "or as many values defined as all other "
+                                 "parameters that have more than one value "
+                                 "defined. However, at least one parameter "
+                                 "has a different number of values defined.")
+
+        if not combine_parameters:
+            simulation_parameter_lengths = [nb
+                                          for nb
+                                          in simulation_parameter_lengths
+                                          if nb > 1]
+            if len(simulation_parameter_lengths) == 0:
+                simulation_parameter_lengths = [1]
+            else:
+                simulation_parameter_lengths = [simulation_parameter_lengths[0]]
+
+
+        elif not all_parameter_combinations:
+            # if not all parameter combinations should be used
+            # use the first parameter value as the standard and the other as single
+            # changes that should be done (while leaving the other parameters
+            # undchanged) - therefore for each simulation only one parameter is
+            # changed from the standard set of parameter values
+
             # the number of simulations is 1 (for all standard parameter values)
             # plus the number of parameters beyond the standard parameter values
             # (which is the number of parameter values minus 1 for each
@@ -684,6 +742,7 @@ class SSA():
 
         self._initialize_parameter_arrays(self._all_simulation_parameters,
                                           simulation_parameter_lengths,
+                                          combine_parameters,
                                           all_parameter_combinations)
 
         self.times = torch.zeros((1,*self._simulation_array_size[1:]))
@@ -845,6 +904,9 @@ class SSA():
         object_state_mask = self.object_states > 0
         highest_idx_with_object = (object_state_mask * idx_array).max(axis=0)
 
+        object_state_mask = self.object_states == 0
+        lowest_idx_no_object = (object_state_mask * idx_array).min(axis=0)
+
         seed = 42
 
         device = "gpu"
@@ -967,7 +1029,6 @@ class SSA():
                 current_transitions_batch = current_transitions[:,param_slice]
                 all_trans_pos_batch = all_transition_positions[:,param_slice]
 
-
                 sim[nb_SM,
                  nb_cc](to_cuda(object_states_batch),
                             to_cuda(convert_array(property_array_batch)),
@@ -1001,6 +1062,7 @@ class SSA():
                             to_cuda(convert_array(current_transitions_batch)),
                             to_cuda(convert_array(all_trans_pos_batch)),
                             to_cuda(convert_array(highest_idx_with_object)),
+                            to_cuda(convert_array(lowest_idx_no_object)),
 
                            current_timepoint_array_batch,
                            timepoint_array_batch,
@@ -1065,13 +1127,6 @@ class SSA():
                 property.array = properties_batches_array[:, property_nb]
                 property.array = property.array.to(self.device)
             self.object_states = object_states_batches.to(self.device)
-            
-            for object_state in range(1,6):
-                object_state_mask = self.object_states == object_state
-                for property in self.properties:
-                    print(object_state, property.name,
-                          len(property.array[object_state_mask &
-                                             (property.array > 0)]))
 
         else:
             simulation_numba._decorate_all_functions_for_cpu()
@@ -1108,6 +1163,7 @@ class SSA():
                         convert_array(current_transitions),
                         convert_array(all_transition_positions),
                          convert_array(highest_idx_with_object),
+                         convert_array(lowest_idx_no_object),
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
@@ -1166,9 +1222,24 @@ class SSA():
                         continue
                     print(sub_name, mean)
 
-        self._save_times_and_object_states(0)
-        self._save_data(all_data, 0)
+        print("Save all data ...")
+        if self.save_results:
+            self._save_times_and_object_states(0)
+            self._save_data(all_data, 0)
+        print("Saving metadata...")
+        property_names = [property.name for property in self.properties]
+        times = self.times
+        del self.times
+        del self.object_states
+        del self.all_times
+        del self.data_buffer
+        for property in self.properties:
+            property.array = []
+
         self._save_all_metadata(nb_simulations, max_number_objects)
+        print("Finished saving all data.")
+        self.all_data = all_data
+        self.times = times
 
     def _save_all_metadata(self, nb_simulations, max_number_objects):
         if self.simulations_summary_path is not None:
@@ -1196,16 +1267,16 @@ class SSA():
                                    for transition in self.transitions])]
         metadata["nb_of_properties"] = [len(self.properties)]
         metadata["properties"] = [str([property.name
-                                  for property in self.properties])]
+                                       for property in self.properties])]
         metadata["nb_of_actions"] = [len(self.actions)]
         metadata["actions"] = [str([action.name for action in self.actions])]
         for property in self.properties:
-            if hasattr(property.max_value, "cpu"):
-               property.max_value = property.max_value.cpu()
-            if hasattr(property.min_value, "cpu"):
-               property.max_value = property.min_value.cpu()
-            metadata[property.name+"_max"] = [property.max_value]
-            metadata[property.name+"_min"] = [property.min_value]
+            if hasattr(property._max_value, "cpu"):
+               property._max_value = property._max_value.cpu()
+            if hasattr(property._min_value, "cpu"):
+               property._max_value = property._min_value.cpu()
+            metadata[property.name+"_max"] = [str(property._max_value)]
+            metadata[property.name+"_min"] = [str(property._min_value)]
         for name, data_extractor in self.data_extractions.items():
             metadata["data_"+name+"_resolution"] = [data_extractor.resolution]
             metadata["data_"+name+"_operation"] = [data_extractor.operation_name]
@@ -1247,10 +1318,12 @@ class SSA():
 
             simulations_summary.to_csv(simulations_summary_path)
 
+        print("Save simulation object...")
         # pickle the entire simulation object
         file_path = os.path.join(self.data_folder, "SSA.pkl")
         with open(file_path, "wb") as file:
             dill.dump(self, file, fix_imports=False)
+        print("Simulation object saved.")
 
         if self.script_path is not None:
             if not os.path.exists(self.script_path):
@@ -1374,6 +1447,7 @@ class SSA():
 
     def _initialize_parameter_arrays(self, all_simulation_parameters,
                                      simulation_parameter_lengths,
+                                     combine_parameters,
                                      all_parameter_combinations):
         # go through all model parameters and expand array to simulation
         # specific size
@@ -1383,7 +1457,17 @@ class SSA():
         nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
 
-            if all_parameter_combinations:
+            if not combine_parameters:
+                param_vals = model_parameters.values
+                if len(param_vals) == 1:
+                    array = param_vals.repeat((simulation_parameter_lengths))
+                else:
+                    array = model_parameters.values
+                array = torch.Tensor(array)
+                array = array.expand(1, *self._simulation_array_size[1:])
+                model_parameters.value_array = array
+
+            elif all_parameter_combinations:
                 array_dimension = dimension + 2
                 expand_dimensions = copy.copy(all_dimensions)
                 expand_dimensions.remove(array_dimension)
@@ -1392,7 +1476,7 @@ class SSA():
                                        expand_dimensions)
                 # save array in object, therefore also change objects saved in
                 # self.transitions and self.actions
-                array = torch.HalfTensor(array)
+                array = torch.Tensor(array)
             else:
                 standard_value = model_parameters.values[0]
                 standard_value = torch.Tensor([standard_value])

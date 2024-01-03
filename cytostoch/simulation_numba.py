@@ -30,7 +30,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                         total_rates, reaction_times,
                         current_transitions,
                         all_transition_positions,
-                            highest_idx_with_object,
+                            highest_idx_with_object,lowest_idx_no_object,
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
@@ -75,7 +75,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                            total_rates, reaction_times,
                            current_transitions,
                            all_transition_positions,
-                            highest_idx_with_object,
+                            highest_idx_with_object,lowest_idx_no_object,
 
                            current_timepoint_array, timepoint_array,
                            object_state_time_array, properties_time_array,
@@ -87,6 +87,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                            )
             if (current_timepoint_array[sim_id, param_id] >=
                     math.floor(min_time/time_resolution[0])):
+                # print(iteration_nb)
                 break
             if success == 0:
                 break
@@ -126,7 +127,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                         total_rates, reaction_times,
                         current_transitions,
                         all_transition_positions,
-                            highest_idx_with_object,
+                            highest_idx_with_object,lowest_idx_no_object,
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
@@ -167,7 +168,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                            total_rates, reaction_times,
                            current_transitions,
                            all_transition_positions,
-                            highest_idx_with_object,
+                            highest_idx_with_object,lowest_idx_no_object,
 
                            current_timepoint_array, timepoint_array,
                            object_state_time_array, properties_time_array,
@@ -184,7 +185,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                 break
 
             if assertion_checks:
-                # print("\n", current_transitions)
+                print("\n")
                 # print(nb_objects_all_states[:,0,0])
                 for state in range(1,np.max(object_states)+1):
                     state_mask = object_states == state
@@ -199,11 +200,11 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                         property_vals_state = property_vals[state_mask]
                         nb_nan = len(property_vals_state[
                                          np.isnan(property_vals_state)])
-                        # if (property_nb == 2) | (property_nb == 1):
-                        #     if (state == 3) | (state == 5):
-                        #         print(state, property_nb,
-                        #               len(property_vals_state))
-                        #         print(property_vals_state)
+                        if (property_nb >= 1):# | (property_nb == 0):
+                            if (state >= 1):#| (state == 5):
+                                if len(property_vals_state) > 0:
+                                    print(iteration_nb, state, property_nb)
+                                    print(property_vals_state)
                         # # make sure that there are no stable MTs
                         # # with length 0
                         # if (state == 3) & (property_nb == 2):
@@ -249,7 +250,7 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                    total_rates, reaction_times,
                    current_transitions,
                    all_transition_positions,
-                   highest_idx_with_object,
+                   highest_idx_with_object, lowest_idx_no_object,
 
                    current_timepoint_array, timepoint_array,
                    object_state_time_array, properties_time_array,
@@ -277,7 +278,7 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
             x_pos += 1
 
         object_pos = 0
-        while object_pos < highest_idx_with_object[sim_id, param_id]:
+        while object_pos <= highest_idx_with_object[sim_id, param_id]:
             if object_states[object_pos, sim_id, param_id] > 0:
 
                 start = properties_array[0,object_pos,sim_id, param_id]
@@ -316,10 +317,53 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
     get_reaction_times(total_rates, reaction_times, sim_id, param_id,
                        rng_states, simulation_factor, parameter_factor)
 
+    # check if a new timepoint should be saved
+    # before updating object states and executing actions
+    current_timepoint = current_timepoint_array[sim_id, param_id]
+    next_timepoint = (current_timepoint * time_resolution[0] +
+                      time_resolution[0])
+    if ((times[0, sim_id, param_id] +
+        reaction_times[sim_id, param_id]) >= next_timepoint):
+        # if a new timepoint should be saved, the current transition went beyond
+        # that timepoint, which is particularly a problem for simulations with
+        # a low number of object in which the time from one to the next simulation
+        # can be quite high. In that case the time passed beyond the timepoint for
+        # saving can also be high.
+        # Therefore once a new timepoint should be saved, don't execute transition
+        # instead execute the actions until the timepoint for saving. Then change
+        # reaction times to the time from the saved timepoint until the transition
+        # timepoint and execute actions and transitions normally.
+        reaction_time_tmp = next_timepoint - times[0, sim_id, param_id]
+
+        _execute_actions_on_objects(parameter_value_array, action_parameters,
+                                    action_state_array,
+                                    properties_array,
+                                    property_min_values,
+                                    property_max_values,
+                                    all_action_properties,
+                                    action_operation_array,
+                                    object_states,
+                                    reaction_time_tmp,
+                                    highest_idx_with_object, sim_id, param_id)
+
+        times[0, sim_id, param_id] = (times[0, sim_id, param_id] +
+                                      reaction_time_tmp)
+
+        _save_values_with_temporal_resolution(timepoint_array,
+                                              object_state_time_array,
+                                              properties_time_array,
+                                              current_timepoint_array, times,
+                                              object_states, properties_array,
+                                              time_resolution, save_initial_state,
+                                              highest_idx_with_object,
+                                              sim_id, param_id)
+
+        reaction_times[sim_id, param_id] = (reaction_times[sim_id, param_id] -
+                                            reaction_time_tmp)
+
     _determine_next_transition(total_rates, current_transition_rates,
                                current_transitions, sim_id, param_id,
                                rng_states, simulation_factor, parameter_factor)
-
 
     # speed up searching for xth object with correct state
     # by keeping track of the position of each object in each state
@@ -330,6 +374,7 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                                         object_states,
                                         sim_id, param_id, rng_states,
                                         highest_idx_with_object,
+                                        lowest_idx_no_object,
                                         simulation_factor, parameter_factor)
 
     if math.isnan(all_transition_positions[sim_id, param_id]):
@@ -343,7 +388,7 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                                 all_action_properties,
                                 action_operation_array,
                                 object_states,
-                                reaction_times,
+                                reaction_times[sim_id, param_id],
                                 highest_idx_with_object, sim_id, param_id)
 
     _update_object_states(current_transitions, all_transition_states,
@@ -355,7 +400,7 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
                           property_start_values,
                             changed_start_values_array,
                             creation_on_objects,
-                          highest_idx_with_object,
+                          highest_idx_with_object,lowest_idx_no_object,
 
                           local_density, total_density,
                           local_resolution,
@@ -364,19 +409,11 @@ def _run_iteration(sim_id, param_id, object_states, properties_array, times,
 
     _remove_objects(all_object_removal_properties, object_removal_operations,
                     nb_objects_all_states, object_states, properties_array,
-                    highest_idx_with_object, sim_id, param_id)
+                    highest_idx_with_object, lowest_idx_no_object,
+                    sim_id, param_id)
 
     times[0, sim_id, param_id] = (times[0, sim_id, param_id] +
                                   reaction_times[sim_id, param_id])
-
-    _save_values_with_temporal_resolution(timepoint_array,
-                                          object_state_time_array,
-                                          properties_time_array,
-                                          current_timepoint_array, times,
-                                          object_states, properties_array,
-                                          time_resolution, save_initial_state,
-                                          highest_idx_with_object,
-                                          sim_id, param_id)
 
     return 1
 
@@ -394,59 +431,64 @@ def _decorate_all_functions_for_cpu():
     #                   numba.core.registry.CPUDispatcher):
     #     _execute_simulation_cpu = numba.njit(_execute_simulation_cpu)
 
-    # global _run_iteration
-    # if not isinstance(_run_iteration,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _run_iteration = numba.njit(_run_iteration)
-    #
-    # global _get_total_and_single_rates_for_state_transitions
-    # if not isinstance(_get_total_and_single_rates_for_state_transitions,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _get_total_and_single_rates_for_state_transitions = numba.njit(
-    #         _get_total_and_single_rates_for_state_transitions)
-    #
-    # global _get_times_of_next_transition
-    # if not isinstance(_get_times_of_next_transition,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _get_times_of_next_transition = numba.njit(
-    #         _get_times_of_next_transition)
-    #
-    # global _determine_next_transition
-    # if not isinstance(_determine_next_transition,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _determine_next_transition = numba.njit(_determine_next_transition)
-    #
-    # global _determine_positions_of_transitions
-    # if not isinstance(_determine_positions_of_transitions,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _determine_positions_of_transitions = numba.njit(
-    #         _determine_positions_of_transitions)
-    #
-    # global _execute_actions_on_objects
-    # if not isinstance(_execute_actions_on_objects,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _execute_actions_on_objects = numba.njit(_execute_actions_on_objects)
-    #
-    # global _reduce_highest_object_idx
-    # if not isinstance(_reduce_highest_object_idx,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _reduce_highest_object_idx = numba.njit(_reduce_highest_object_idx)
-    #
-    # global _update_object_states
-    # if not isinstance(_update_object_states,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _update_object_states = numba.njit(_update_object_states)
-    #
-    # global _save_values_with_temporal_resolution
-    # if not isinstance(_save_values_with_temporal_resolution,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _save_values_with_temporal_resolution = numba.njit(
-    #         _save_values_with_temporal_resolution)
-    #
-    # global _remove_objects
-    # if not isinstance(_remove_objects,
-    #                   numba.core.registry.CPUDispatcher):
-    #     _remove_objects = numba.njit(_remove_objects)
+    global _run_iteration
+    if not isinstance(_run_iteration,
+                      numba.core.registry.CPUDispatcher):
+        _run_iteration = numba.njit(_run_iteration)
+
+    global _get_total_and_single_rates_for_state_transitions
+    if not isinstance(_get_total_and_single_rates_for_state_transitions,
+                      numba.core.registry.CPUDispatcher):
+        _get_total_and_single_rates_for_state_transitions = numba.njit(
+            _get_total_and_single_rates_for_state_transitions)
+
+    global _get_times_of_next_transition
+    if not isinstance(_get_times_of_next_transition,
+                      numba.core.registry.CPUDispatcher):
+        _get_times_of_next_transition = numba.njit(
+            _get_times_of_next_transition)
+
+    global _determine_next_transition
+    if not isinstance(_determine_next_transition,
+                      numba.core.registry.CPUDispatcher):
+        _determine_next_transition = numba.njit(_determine_next_transition)
+
+    global _determine_positions_of_transitions
+    if not isinstance(_determine_positions_of_transitions,
+                      numba.core.registry.CPUDispatcher):
+        _determine_positions_of_transitions = numba.njit(
+            _determine_positions_of_transitions)
+
+    global _execute_actions_on_objects
+    if not isinstance(_execute_actions_on_objects,
+                      numba.core.registry.CPUDispatcher):
+        _execute_actions_on_objects = numba.njit(_execute_actions_on_objects)
+
+    global _increase_lowest_no_object_idx
+    if not isinstance(_increase_lowest_no_object_idx,
+                      numba.core.registry.CPUDispatcher):
+        _increase_lowest_no_object_idx = numba.njit(_increase_lowest_no_object_idx)
+
+    global _reduce_highest_object_idx
+    if not isinstance(_reduce_highest_object_idx,
+                      numba.core.registry.CPUDispatcher):
+        _reduce_highest_object_idx = numba.njit(_reduce_highest_object_idx)
+
+    global _update_object_states
+    if not isinstance(_update_object_states,
+                      numba.core.registry.CPUDispatcher):
+        _update_object_states = numba.njit(_update_object_states)
+
+    global _save_values_with_temporal_resolution
+    if not isinstance(_save_values_with_temporal_resolution,
+                      numba.core.registry.CPUDispatcher):
+        _save_values_with_temporal_resolution = numba.njit(
+            _save_values_with_temporal_resolution)
+
+    global _remove_objects
+    if not isinstance(_remove_objects,
+                      numba.core.registry.CPUDispatcher):
+        _remove_objects = numba.njit(_remove_objects)
 
 
 def _decorate_all_functions_for_gpu(debug=False):
@@ -497,6 +539,12 @@ def _decorate_all_functions_for_gpu(debug=False):
                       numba.cuda.dispatcher.CUDADispatcher):
         _execute_actions_on_objects = numba.cuda.jit(
             _execute_actions_on_objects, debug=debug, opt=opt)
+
+    global _increase_lowest_no_object_idx
+    if not isinstance(_increase_lowest_no_object_idx,
+                      numba.cuda.dispatcher.CUDADispatcher):
+        _increase_lowest_no_object_idx = numba.cuda.jit(_increase_lowest_no_object_idx,
+                                                        debug=debug, opt=opt)
 
     global _reduce_highest_object_idx
     if not isinstance(_reduce_highest_object_idx,
@@ -623,6 +671,7 @@ def _determine_positions_of_transitions(current_transitions,
                                         object_states,
                                         sim_id, param_id, rng_states,
                                         highest_idx_with_object,
+                                        lowest_idx_no_object,
                                         simulation_factor, parameter_factor):
 
     # the transitions masks only tell which reaction happens in each
@@ -638,13 +687,17 @@ def _determine_positions_of_transitions(current_transitions,
     start_state = all_transition_states[int(transition_nb), 0]
     # if start state is 0, choose the first object with state 0
     if start_state == 0:
-        object_pos = 0
-        while object_pos < object_states.shape[0]:
-            object_state = object_states[object_pos, sim_id, param_id]
-            if object_state == 0:
-                all_transition_positions[sim_id, param_id] = object_pos
-                return
-            object_pos += 1
+        # if the possible lowest idx with no object actually has an object now
+        # increase index until an index without object is found and save this
+        # position
+        if object_states[lowest_idx_no_object[sim_id, param_id],
+                         sim_id, param_id] != 0:
+            _increase_lowest_no_object_idx(lowest_idx_no_object,
+                                           object_states, sim_id, param_id)
+        all_transition_positions[sim_id,
+                                 param_id] = lowest_idx_no_object[sim_id,
+                                                                  param_id]
+        return
     else:
         # for all other states, choose a random position with that state
         nb_objects = nb_objects_all_states[int(start_state-1), sim_id, param_id]
@@ -658,10 +711,17 @@ def _determine_positions_of_transitions(current_transitions,
         object_pos = 0
         current_nb_state_objects = 0
 
+        # if the highest idx with object vanished
+        # search for the new highest object idx
+        if object_states[highest_idx_with_object[sim_id, param_id],
+                         sim_id, param_id] == 0:
+            _reduce_highest_object_idx(highest_idx_with_object,
+                                       object_states, sim_id, param_id)
+
         # go through all objects, check which one is in the start_state
         # and then choose the nth (n=random_object_pos) object that is in
         # the start_state
-        while object_pos < object_states.shape[0]:#= highest_idx_with_object[sim_id, param_id]:
+        while object_pos <= highest_idx_with_object[sim_id, param_id]:# object_states.shape[0]:#
             object_state = object_states[object_pos, sim_id, param_id]
             # if object_state > 4:
             #     print(555, object_state, object_pos)
@@ -682,7 +742,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 all_action_properties,
                                 action_operation_array,
                                 object_states,
-                                reaction_times,
+                                reaction_time,
                                 highest_idx_with_object, sim_id, param_id):
     # execute actions on objects depending on state, before changing state
     action_nb = 0
@@ -690,7 +750,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
         action_parameter = int(action_parameters[action_nb])
         # get the current action value, dependent on reaction time
         action_value = parameter_value_array[action_parameter, sim_id, param_id]
-        current_action_value = action_value * reaction_times[sim_id, param_id]
+        current_action_value = action_value * reaction_time
         action_states = action_state_array[action_nb]
         action_properties = all_action_properties[action_nb]
         # action operation is -1 for subtracting and 1 for adding
@@ -822,7 +882,7 @@ def _update_object_states(current_transitions, all_transition_states,
                           property_start_vals,
                             changed_start_values_array,
                             creation_on_objects,
-                          highest_idx_with_object,
+                          highest_idx_with_object,lowest_idx_no_object,
 
                           local_density, total_density, local_resolution,
                           sim_id, param_id,
@@ -914,8 +974,9 @@ def _update_object_states(current_transitions, all_transition_states,
         # check if the idx for removing a position is the currently highest
         # position
         # if so, go backward from that position until the next object is found
-        _reduce_highest_object_idx(transition_position, highest_idx_with_object,
-                                   object_states, sim_id, param_id)
+
+        if transition_position < lowest_idx_no_object[sim_id, param_id]:
+            lowest_idx_no_object[sim_id, param_id] = transition_position
 
         # if an object was removed, set property values to NaN
         property_nb = 0
@@ -967,22 +1028,30 @@ def _update_object_states(current_transitions, all_transition_states,
 
     return None
 
-def _reduce_highest_object_idx(position, highest_idx_with_object,
+def _increase_lowest_no_object_idx(lowest_idx_no_object,
+                                   object_states, sim_id, param_id):
+    # if so, go forward from that position until the next empty idx is found
+    object_pos = int(lowest_idx_no_object[sim_id, param_id])
+    while object_pos < object_states.shape[0]:
+        if object_states[object_pos, sim_id, param_id] == 0:
+            break
+        object_pos = object_pos + 1
+    lowest_idx_no_object[sim_id, param_id] = object_pos
+
+def _reduce_highest_object_idx(highest_idx_with_object,
                                object_states, sim_id, param_id):
-    # check if the idx for removing a position is the currently highest
-    # position
     # if so, go backward from that position until the next object is found
-    if position == highest_idx_with_object[sim_id, param_id]:
-        object_pos = int(position)
-        while object_pos > 0:
-            if object_states[object_pos, sim_id, param_id] > 0:
-                break
-            object_pos = object_pos - 1
-        highest_idx_with_object[sim_id, param_id] = object_pos
+    object_pos = int(highest_idx_with_object[sim_id, param_id])
+    while object_pos > 0:
+        if object_states[object_pos, sim_id, param_id] > 0:
+            break
+        object_pos = object_pos - 1
+    highest_idx_with_object[sim_id, param_id] = object_pos
 
 def _remove_objects(all_object_removal_properties, object_removal_operations,
                     nb_objects_all_states, object_states, properties_array,
-                    highest_idx_with_object, sim_id, param_id):
+                    highest_idx_with_object, lowest_idx_no_object,
+                    sim_id, param_id):
     removal_nb = 0
     while removal_nb < len(all_object_removal_properties):
         # for object removal, there are two array with
@@ -1033,9 +1102,10 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
 
                 if remove_object:
 
-                    _reduce_highest_object_idx(object_pos,
-                                               highest_idx_with_object,
-                                               object_states, sim_id, param_id)
+                    if object_pos < lowest_idx_no_object[sim_id, param_id]:
+                        lowest_idx_no_object[sim_id,
+                                             param_id] = object_pos
+
                     object_state_to_remove = object_states[int(object_pos),
                                                            sim_id, param_id]
 
@@ -1061,45 +1131,44 @@ def _save_values_with_temporal_resolution(timepoint_array,
                                          time_resolution, save_initial_state,
                                           highest_idx_with_object,
                                           sim_id, param_id):
+
+    current_timepoint = current_timepoint_array[sim_id, param_id]
     # check .if the next timepoint was reached, then save all values
     # at correct position
-    current_timepoint = current_timepoint_array[sim_id, param_id]
-    if times[0, sim_id, param_id] >= (current_timepoint * time_resolution[0] +
-                               time_resolution[0]):
-        time_jump = math.floor((times[0,sim_id, param_id] -
-                                     (current_timepoint * time_resolution[0]))
-                                    / time_resolution[0])
-        current_timepoint += time_jump
+    time_jump = math.floor((times[0,sim_id, param_id] -
+                                 (current_timepoint * time_resolution[0]))
+                                / time_resolution[0])
+    current_timepoint += time_jump
 
-        current_timepoint_array[sim_id, param_id] = current_timepoint
-        # if the initial state was not saved then the index is actually the
-        # timepoint minus 1
-        if save_initial_state:
-            timepoint_idx = int(current_timepoint)
-        else:
-            timepoint_idx = int(current_timepoint) - 1
+    current_timepoint_array[sim_id, param_id] = current_timepoint
+    # if the initial state was not saved then the index is actually the
+    # timepoint minus 1
+    if save_initial_state:
+        timepoint_idx = int(current_timepoint)
+    else:
+        timepoint_idx = int(current_timepoint) - 1
 
-        # make sure that timepoint_idx is not higher than timepoint_array shape
-        timepoint_idx = min(timepoint_idx, timepoint_array.shape[0]-1)
-        timepoint_array[timepoint_idx, sim_id, param_id] = current_timepoint
+    # make sure that timepoint_idx is not higher than timepoint_array shape
+    timepoint_idx = min(timepoint_idx, timepoint_array.shape[0]-1)
+    timepoint_array[timepoint_idx, sim_id, param_id] = current_timepoint
 
-        # copy all current data into time-resolved data
-        object_pos = 0
-        while object_pos <= highest_idx_with_object[sim_id, param_id]:
-            if object_pos > 0:
-                object_state = object_states[object_pos, sim_id, param_id]
+    # copy all current data into time-resolved data
+    object_pos = 0
+    while object_pos <= highest_idx_with_object[sim_id, param_id]:
+        if object_pos > 0:
+            object_state = object_states[object_pos, sim_id, param_id]
 
-                object_state_time_array[timepoint_idx,
-                                        object_pos,
-                                        sim_id, param_id] = object_state
+            object_state_time_array[timepoint_idx,
+                                    object_pos,
+                                    sim_id, param_id] = object_state
 
-                property_nb = 0
-                while property_nb < properties_array.shape[0]:
-                    property_val = properties_array[property_nb,
-                                                    object_pos, sim_id, param_id]
-                    properties_time_array[timepoint_idx,
-                                          property_nb,
-                                          object_pos,
-                                          sim_id, param_id] = property_val
-                    property_nb += 1
-            object_pos += 1
+            property_nb = 0
+            while property_nb < properties_array.shape[0]:
+                property_val = properties_array[property_nb,
+                                                object_pos, sim_id, param_id]
+                properties_time_array[timepoint_idx,
+                                      property_nb,
+                                      object_pos,
+                                      sim_id, param_id] = property_val
+                property_nb += 1
+        object_pos += 1
