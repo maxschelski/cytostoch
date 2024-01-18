@@ -5,6 +5,8 @@ import math
 import numba
 import functools
 
+from matplotlib import pyplot as plt
+
 
 def _run_operation_2D_to_1D_density_numba(sim_id, param_id, object_states, properties_array, times,
                                            transition_rates_array, all_transition_states,
@@ -862,20 +864,25 @@ class DataExtraction():
                 step_size = nb_objects
 
             nb_steps = math.ceil(nb_objects/step_size)
-            start_nb_objects = torch.linspace(0, nb_objects-step_size, nb_steps)
+            start_nb_objects = torch.arange(start=0, end=nb_objects,
+                                            step=step_size)
+
             # print(2, time.time() - start)
             start = time.time()
             nb_timepoints = position_start.shape[0]
             for start_nb_object in start_nb_objects:
                 end_nb_object = int((start_nb_object + step_size).item())
+                end_nb_object = min(end_nb_object, nb_objects)
                 start_nb_object = int(start_nb_object.item())
+                actual_step_size = end_nb_object - start_nb_object
                 # create boolean data array later by expanding each microtubule in space
                 # use index array to set all positions in boolean data array to True
                 # that are between start point and end point
-                data_array = ((indices.expand(nb_timepoints, -1, step_size,
+                data_array = ((indices.expand(nb_timepoints, -1,
+                                              actual_step_size,
                                               *position_start.shape[3:])
                             >= position_start[:,:, start_nb_object:end_nb_object]) &
-                            (indices.expand(nb_timepoints, -1, step_size,
+                            (indices.expand(nb_timepoints, -1, actual_step_size,
                                               *position_start.shape[3:])
                             <= position_end[:,:, start_nb_object:end_nb_object]))
 
@@ -901,6 +908,11 @@ class DataExtraction():
         positions = positions.view(*dimensions)[:-1]
         positions = positions.unsqueeze(0).expand([data_array.shape[0],
                                                    *positions.shape])
+
+        if 3 in state_numbers:
+            plt.figure()
+            plt.plot(data_array.mean(dim=2)[0,:,0].cpu())
+            plt.title(state_numbers)
 
         data_dict = {}
         data_dict["1D_density_position"] = positions.cpu()
