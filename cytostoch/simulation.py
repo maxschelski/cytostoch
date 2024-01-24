@@ -187,7 +187,7 @@ class SSA():
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
               time_resolution, save_initial_state=False,
               max_number_objects=None,
-               combine_parameters=True,
+               combine_parameters=True, nb_parallel_cores=1,
               all_parameter_combinations=False,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
@@ -227,6 +227,7 @@ class SSA():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
                         time_resolution, save_initial_state,
                         max_number_objects, all_parameter_combinations,
+                        combine_parameters, nb_parallel_cores,
                         ignore_errors,
                         print_update_time_step,
                         nb_objects_added_per_step,
@@ -286,6 +287,7 @@ class SSA():
         # and the second value, which is the operation
         # (-1 for subtracting property values,
         #  +1 for adding property values)
+        # the same is true for the max_value
         max_nb_min_value_properties = 0
         max_nb_max_value_properties = 0
         for property in self.properties:
@@ -586,7 +588,7 @@ class SSA():
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, save_initial_state=False,
                max_number_objects=None, all_parameter_combinations=False,
-               combine_parameters=True,
+               combine_parameters=True, nb_parallel_cores=1,
                ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                 max_iters_no_data_extraction=2000,
@@ -831,6 +833,34 @@ class SSA():
         all_object_removal_properties = self.get_object_removal_property_array()
         object_removal_operations = self._get_object_removal_property_array()
 
+        parameter_shape = self.object_states.shape[1:]
+
+        # all parameters for nucleation on objects
+        nb_properties = len(self.properties)
+        end_position_tmax_array = np.zeros((nb_parallel_cores,
+                                            nb_properties-1, *parameter_shape)) #x
+        properties_tmax_array = np.zeros((nb_parallel_cores,
+                                          nb_properties-1, nb_properties,
+                                          *parameter_shape)) #x
+        properties_tmax = np.full((nb_parallel_cores,
+                                   nb_properties-1, *parameter_shape),
+                                  math.nan) #x
+        properties_tmax_sorted = np.full((nb_parallel_cores,
+                                          nb_properties-1, *parameter_shape),
+                                         math.nan) # x
+        current_sum_tmax = np.zeros((nb_parallel_cores,
+                                     nb_properties, *parameter_shape)) #x
+        property_changes_tmax_array = np.zeros((max_number_objects,
+                                                nb_properties,
+                                                *parameter_shape))
+        property_changes_tmin_array = np.zeros((max_number_objects,
+                                                nb_properties,
+                                                *parameter_shape))
+        property_changes_per_state = np.zeros((len(self.states), nb_properties,
+                                              *parameter_shape)) #x
+        nucleation_changes_per_state = np.copy(property_changes_per_state)
+        total_property_changes = np.zeros((len(self.states), *parameter_shape)) #x
+
         # -  current rates of all transitions (empty)
         nb_transitions = len(self.transitions)
         current_transition_rates = np.zeros((nb_transitions,
@@ -914,10 +944,19 @@ class SSA():
         nb_simulations = self.object_states.shape[1]
         nb_parameter_combinations = self.object_states.shape[2]
 
-        local_resolution = 0.05
-        local_density_size = int(20 / 0.05) + 1
+        local_resolution = 0.02
+        local_density_size = int(20 / local_resolution) + 1
         local_density = np.zeros((local_density_size, nb_simulations,
                                   nb_parameter_combinations))
+
+        total_density = np.zeros((nb_simulations, nb_parameter_combinations))
+
+        # first idx of first dimension is for base part, second idx is for
+        # variable part
+        constant = np.zeros((2, nb_simulations, nb_parameter_combinations))
+        second_order = np.zeros((2, nb_simulations, nb_parameter_combinations))
+
+        thread_masks = np.zeros(parameter_shape, dtype=np.int64)
 
         if np.nansum(creation_on_objects) > 0:
             some_creation_on_objects = True
@@ -1061,6 +1100,22 @@ class SSA():
                             to_cuda(convert_array(reaction_times_batch)),
                             to_cuda(convert_array(current_transitions_batch)),
                             to_cuda(convert_array(all_trans_pos_batch)),
+
+                            # all parameters for nucleation on objects
+                            to_cuda(convert_array(end_position_tmax_array)),
+                            to_cuda(convert_array(properties_tmax_array)),
+                            to_cuda(convert_array(properties_tmax)),
+                            to_cuda(convert_array(properties_tmax_sorted)),
+                            to_cuda(convert_array(current_sum_tmax)),
+                            to_cuda(convert_array(property_changes_tmax_array)),
+                            to_cuda(convert_array(property_changes_tmin_array)),
+                            to_cuda(convert_array(property_changes_per_state)),
+                            to_cuda(convert_array(nucleation_changes_per_state)),
+                            to_cuda(convert_array(total_property_changes)),
+
+                        to_cuda(convert_array(constant)),
+                            to_cuda(convert_array(second_order)),
+
                             to_cuda(convert_array(highest_idx_with_object)),
                             to_cuda(convert_array(lowest_idx_no_object)),
 
@@ -1070,7 +1125,11 @@ class SSA():
                            properties_time_array_batch,
                            time_resolution, self.min_time, save_initial_state,
 
+                        nb_parallel_cores,
+                            to_cuda(convert_array(thread_masks)),
+
                             local_density_batch, local_resolution,
+                        to_cuda(convert_array(total_density)),
 
                            seed, rng_states, simulation_factor, parameter_factor
                              )
@@ -1162,6 +1221,22 @@ class SSA():
                         convert_array(reaction_times),
                         convert_array(current_transitions),
                         convert_array(all_transition_positions),
+
+                         # all parameters for nucleation on objects
+                         convert_array(end_position_tmax_array),
+                         convert_array(properties_tmax_array),
+                         convert_array(properties_tmax),
+                        convert_array(properties_tmax_sorted),
+                         convert_array(current_sum_tmax),
+                         convert_array(property_changes_tmax_array),
+                         convert_array(property_changes_tmin_array),
+                         convert_array(property_changes_per_state),
+                            convert_array(nucleation_changes_per_state),
+                         convert_array(total_property_changes),
+
+                         convert_array(constant),
+                         convert_array(second_order),
+
                          convert_array(highest_idx_with_object),
                          convert_array(lowest_idx_no_object),
 
@@ -1169,10 +1244,15 @@ class SSA():
                         object_state_time_array, properties_time_array,
                         time_resolution, self.min_time, save_initial_state,
 
+                         nb_parallel_cores,
+                         convert_array(thread_masks),
+
                          local_density, local_resolution,
+                         convert_array(total_density),
                          seed
                         )
 
+            print("Simulation time: ", time.time() - start)
 
             self.object_states = torch.Tensor(np.copy(object_state_time_array))
 
