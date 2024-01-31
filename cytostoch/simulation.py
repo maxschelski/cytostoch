@@ -195,7 +195,8 @@ class SSA():
                dynamically_increase_nb_objects=False,
               remove_finished_sims=False, save_states=False,
               save_results=True,
-              use_assertion_checks=True, reset_folder=True):
+              use_assertion_checks=True, reset_folder=True,
+              choose_gpu=False):
         """
 
         Args:
@@ -223,6 +224,47 @@ class SSA():
         """
         # turn off autograd function to reduce memory overhead of pytorch
         # and reduce backend processes
+
+        # select GPU
+        if choose_gpu & (len(cuda.gpus) > 1):
+            gpu_list = ("Choose one of all available GPUs by entering the "
+                       "corresponding number and pressing ENTER:\n")
+            gpu_names = []
+            for number, gpu in enumerate(cuda.gpus):
+                gpu_name = str(gpu._device.name.decode(encoding='utf-8',
+                                                       errors='strict'))
+                gpu_names.append(gpu_name)
+                gpu_list += str(number)+": "+ gpu_name+"\n"
+
+            enter_number = f"Enter an integer number from 0 and {number}: "
+            gpu_list += enter_number
+            print(gpu_list)
+            valid_input = False
+            while not valid_input:
+                gpu_nb = input()
+                try:
+                    gpu_nb = int(gpu_nb)
+
+                except:
+                    print("You have to enter an integer number.\n"
+                          + enter_number)
+                    continue
+
+                if (gpu_nb < 0):
+                    print("You have to enter a non negative number.\n"
+                          + enter_number)
+                    continue
+
+                if gpu_nb >= len(gpu_names):
+                    print(f"You can't enter a number larger than {number}.\n"
+                          + enter_number)
+                    continue
+
+                print(f"GPU {str(gpu_nb)} selected - "
+                      f"{gpu_names[gpu_nb]}")
+                valid_input = True
+            cuda.select_device(gpu_nb)
+
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
                         time_resolution, save_initial_state,
@@ -277,7 +319,7 @@ class SSA():
             properties_array[property_nb] = property.array
         return properties_array
 
-    def _get_property_min_max_val_arrays(self):
+    def _get_property_extreme_val_arrays(self):
         nb_properties = len(self.properties)
         # if there is just one non-nan value in min_value
         # then this is the min_value
@@ -310,43 +352,45 @@ class SSA():
         if max_nb_min_value_properties > 0:
             max_nb_min_value_properties += 2
 
-        property_min_values = np.full((nb_properties,
-                                       max(1, max_nb_min_value_properties)),
-                                      math.nan)
-        property_max_values = np.full((nb_properties,
-                                       max(1, max_nb_max_value_properties)),
+        max_nb_extreme_properties = max(max_nb_min_value_properties,
+                                        max_nb_max_value_properties)
+        max_nb_extreme_properties = max(1, max_nb_extreme_properties)
+
+
+        property_extreme_values = np.full((2, nb_properties,
+                                       max(1, max_nb_extreme_properties)),
                                       math.nan)
 
         for property_nb, property in enumerate(self.properties):
             min_value = property._min_value
             if type(min_value) in [float, int]:
-                property_min_values[property_nb, 0] = min_value
+                property_extreme_values[0, property_nb, 0] = min_value
             elif min_value is not None:
-                property_min_values[property_nb, 0] = min_value.properties[
+                property_extreme_values[0, property_nb, 0] = min_value.properties[
                     0].min_value
                 operation = min_value._operation
                 if operation == "same_dimension_forward":
-                    property_min_values[property_nb, 1] = 1
+                    property_extreme_values[0, property_nb, 1] = 1
                 for (min_val_nb,
                      min_val_property) in enumerate(min_value.properties):
-                    property_min_values[property_nb,
-                                        min_val_nb + 2] = min_val_property.number
+                    property_extreme_values[0, property_nb,
+                                            min_val_nb + 2] = min_val_property.number
 
             max_value = property._max_value
             if type(max_value) in [float, int]:
-                property_max_values[property_nb, 0] = max_value
+                property_extreme_values[1, property_nb, 0] = max_value
             elif max_value is not None:
-                property_max_values[property_nb, 0] = \
+                property_extreme_values[1, property_nb, 0] = \
                     max_value.properties[0].max_value
                 operation = max_value._operation
                 if operation == "same_dimension_forward":
-                    property_max_values[property_nb, 1] = 1
+                    property_extreme_values[1, property_nb, 1] = 1
                 for (min_val_nb,
                      min_val_property) in enumerate(max_value.properties):
-                    property_max_values[property_nb,
+                    property_extreme_values[1, property_nb,
                                         min_val_nb + 2] = min_val_property.number
 
-        return property_min_values, property_max_values
+        return property_extreme_values
 
     def _get_parameter_value_array(self):
         nb_parameters = len(self.parameters)
@@ -620,7 +664,15 @@ class SSA():
         """
         if reset_folder:
             if os.path.exists(data_folder):
-                shutil.rmtree(data_folder)
+                # delete all files except scripts
+                # thereby prevent the executing script from being deleted
+                # if the script inside the folder is executed
+                for file_to_remove in os.listdir(data_folder):
+                    if file_to_remove.find(".py") == -1:
+                        path_to_remove = os.path.join(data_folder,
+                                                      file_to_remove)
+                        shutil.rmtree(path_to_remove)
+
                 time.sleep(0.1)
             os.mkdir(data_folder)
 
@@ -640,6 +692,7 @@ class SSA():
         self.remove_finished_sims = remove_finished_sims
         self.all_parameter_combinations = all_parameter_combinations
         self.combine_parameters = combine_parameters
+        self.time_resolution = time_resolution
 
         if (not combine_parameters) & self.all_parameter_combinations:
             print("If the parameters combine_parameters is False, "
@@ -803,14 +856,13 @@ class SSA():
 
         # create arrays with the parameter size to be explored in one round
 
-        self.object_states = np.array(self.object_states)
+        object_states = np.array(self.object_states)
 
         property_start_values = self._get_property_start_val_arrays()
 
         properties_array = self._get_property_vals_array()
 
-        (property_min_values,
-         property_max_values) = self._get_property_min_max_val_arrays()
+        property_extreme_values = self._get_property_extreme_val_arrays()
 
         parameter_value_array = self._get_parameter_value_array()
 
@@ -835,25 +887,24 @@ class SSA():
 
         parameter_shape = self.object_states.shape[1:]
 
+        start_nb_parallel_cores = nb_parallel_cores
+
         # all parameters for nucleation on objects
         nb_properties = len(self.properties)
-        end_position_tmax_array = np.zeros((nb_parallel_cores,
+        end_position_tmax_array = np.zeros((32,
                                             nb_properties-1, *parameter_shape)) #x
-        properties_tmax_array = np.zeros((nb_parallel_cores,
+        properties_tmax_array = np.zeros((32,
                                           nb_properties-1, nb_properties,
                                           *parameter_shape)) #x
-        properties_tmax = np.full((nb_parallel_cores,
+        properties_tmax = np.full((32,
                                    nb_properties-1, *parameter_shape),
                                   math.nan) #x
-        properties_tmax_sorted = np.full((nb_parallel_cores,
+        properties_tmax_sorted = np.full((32,
                                           nb_properties-1, *parameter_shape),
                                          math.nan) # x
-        current_sum_tmax = np.zeros((nb_parallel_cores,
+        current_sum_tmax = np.zeros((32,
                                      nb_properties, *parameter_shape)) #x
-        property_changes_tmax_array = np.zeros((max_number_objects,
-                                                nb_properties,
-                                                *parameter_shape))
-        property_changes_tmin_array = np.zeros((max_number_objects,
+        property_changes_tminmax_array = np.zeros((2, max_number_objects,
                                                 nb_properties,
                                                 *parameter_shape))
         property_changes_per_state = np.zeros((len(self.states), nb_properties,
@@ -883,7 +934,7 @@ class SSA():
         nb_objects_all_states = np.zeros((len(self.states),
                                           *self.object_states.shape[1:]))
         for state_nb, state in enumerate(self.states):
-            nb_objects_all_states[state_nb] = np.sum(self.object_states ==
+            nb_objects_all_states[state_nb] = np.sum(object_states ==
                                                      state.number, axis=0)
 
         # get number of timepoints
@@ -931,10 +982,10 @@ class SSA():
                                          in
                                          range(len(self.object_states.shape[1:])
                                                )])
-        object_state_mask = self.object_states > 0
+        object_state_mask = object_states > 0
         highest_idx_with_object = (object_state_mask * idx_array).max(axis=0)
 
-        object_state_mask = self.object_states == 0
+        object_state_mask = object_states == 0
         lowest_idx_no_object = (object_state_mask * idx_array).min(axis=0)
 
         seed = 42
@@ -944,7 +995,7 @@ class SSA():
         nb_simulations = self.object_states.shape[1]
         nb_parameter_combinations = self.object_states.shape[2]
 
-        local_resolution = 0.02
+        local_resolution = 0.005
         local_density_size = int(20 / local_resolution) + 1
         local_density = np.zeros((local_density_size, nb_simulations,
                                   nb_parameter_combinations))
@@ -953,10 +1004,10 @@ class SSA():
 
         # first idx of first dimension is for base part, second idx is for
         # variable part
-        constant = np.zeros((2, nb_simulations, nb_parameter_combinations))
-        second_order = np.zeros((2, nb_simulations, nb_parameter_combinations))
+        tau_square_eq_constant = np.zeros((2, nb_simulations, nb_parameter_combinations))
+        tau_square_eq_second_order = np.zeros((2, nb_simulations, nb_parameter_combinations))
 
-        thread_masks = np.zeros(parameter_shape, dtype=np.int64)
+        thread_masks = np.zeros((3, *parameter_shape), dtype=np.int64)
 
         if np.nansum(creation_on_objects) > 0:
             some_creation_on_objects = True
@@ -964,7 +1015,9 @@ class SSA():
             some_creation_on_objects = False
 
         if self.device.find("cuda") != -1:
-            simulation_numba._decorate_all_functions_for_gpu()
+
+            nb_parallel_cores = np.zeros(parameter_shape)
+            nb_parallel_cores[:,:] = start_nb_parallel_cores
 
             start = time.time()
 
@@ -998,8 +1051,8 @@ class SSA():
             # the size depends on
 
             # get size of object states
-            size_states = (self.object_states.size *
-                           self.object_states.itemsize)
+            size_states = (object_states.size *
+                           object_states.itemsize)
 
             # get size of properties times the number of properties+
             size_properties = (len(self.properties) *
@@ -1022,20 +1075,48 @@ class SSA():
             nb_memory_batches = int(math.ceil(total_size/free_memory))
             # also check how many parameter combinations can be processed
             # with the number of cuda cores available
-            total_nb_simulations = (self.object_states.shape[1] *
-                                    self.object_states.shape[2])
-            nb_core_batches = int(math.ceil(total_nb_simulations / (nb_SM *
-                                                                    nb_cc)))
+            # total_nb_simulations = (self.object_states.shape[1] *
+            #                         self.object_states.shape[2])
+            # nb_core_batches = int(math.ceil(self.total_nb_simulations / (nb_SM *
+            #                                                         nb_cc)))
 
             nb_batches = max(nb_memory_batches, 1)
 
             parameter_combinations_per_batch = int(math.floor(
                 (nb_parameter_combinations / nb_batches)))
 
+            size = min(nb_simulations*start_nb_parallel_cores,
+                       int((nb_SM*nb_cc)))
+
+            thread_to_sim_id = np.zeros((size, 3))
+
+            # all_sims = np.array(range(nb_simulations))
+            # randomize_sim_order = False
+            #
+            # if randomize_sim_order:
+            #     np.random.seed(seed)
+            #     sim_nb_order = np.random.choice(all_sims,
+            #                                     size=nb_simulations,
+            #                                     replace=False)
+            # else:
+            #     sim_nb_order = all_sims
+            #
+            # thread_to_sim_id[:,0] = np.repeat(sim_nb_order,
+            #                                   start_nb_parallel_cores)
+            # base_cores = []
+            # for core_nb in range(start_nb_parallel_cores):
+            #     base_cores.append(core_nb)
+            # cores = np.array(base_cores*nb_simulations)
+            # thread_to_sim_id[:, 2] = cores
+            # thread_to_sim_id[:, 1] = 0
+
+            simulation_numba._decorate_all_functions_for_gpu(self)
             object_states_batches = None
             properties_batches_array = None
             times_batches = None
             local_density_batches = None
+
+            nb_parallel_cores = to_cuda(convert_array(nb_parallel_cores))
 
             for batch_nb in range(nb_batches):
                 start_parameter_comb = (batch_nb *
@@ -1044,7 +1125,8 @@ class SSA():
                                       parameter_combinations_per_batch)
                 param_slice = slice(start_parameter_comb, end_parameter_comb)
 
-                local_density_batch = cuda.to_device(convert_array(local_density[:,:,param_slice]))
+                local_density_batch = cuda.to_device(
+                    convert_array(local_density[:,:,param_slice]))
                 current_timepoint_array_batch = cuda.to_device(
                     convert_array(current_timepoint_array[:,param_slice]))
                 timepoint_array_batch = cuda.to_device(
@@ -1057,7 +1139,7 @@ class SSA():
 
                 print("Starting simulation batch...")
                 sim = simulation_numba._execute_simulation_gpu
-                object_states_batch = convert_array(self.object_states[:,:,param_slice])
+                object_states_batch = convert_array(object_states[:,:,param_slice])
                 property_array_batch = properties_array[:,:,:,param_slice]
                 times_batch = self.times[:,:,param_slice]
                 param_val_array_batch = parameter_value_array[:,:,param_slice]
@@ -1068,26 +1150,27 @@ class SSA():
                 current_transitions_batch = current_transitions[:,param_slice]
                 all_trans_pos_batch = all_transition_positions[:,param_slice]
 
+
                 sim[nb_SM,
-                 nb_cc](to_cuda(object_states_batch),
-                            to_cuda(convert_array(property_array_batch)),
-                            to_cuda(convert_array(times_batch)),
-                            nb_simulations, parameter_combinations_per_batch,
-                            to_cuda(convert_array(param_val_array_batch)),
-                            to_cuda(convert_array(transition_parameters)),
-                            to_cuda(convert_array(all_transition_states)),
-                            to_cuda(convert_array(action_parameters)),
-                            to_cuda(convert_array(action_state_array)),
-                            to_cuda(convert_array(all_action_properties)),
-                            to_cuda(convert_array(action_operation_array)),
-                            to_cuda(convert_array(current_trans_rates)),
-                            to_cuda(convert_array(property_start_values)),
-                            to_cuda(convert_array(property_min_values)),
-                            to_cuda(convert_array(property_max_values)),
+                 nb_cc](to_cuda(object_states_batch), #int32[:,:,:]
+                            to_cuda(convert_array(property_array_batch)), #float32[:,:,:,:]
+                            to_cuda(convert_array(times_batch)), #float32[:,:,:]
+                            nb_simulations, #int32
+                        parameter_combinations_per_batch, #int32
+                            to_cuda(convert_array(param_val_array_batch)), #float32[:,:,:]
+                            to_cuda(convert_array(transition_parameters)), #int32[:]
+                            to_cuda(convert_array(all_transition_states)), #int32[:,:]
+                            to_cuda(convert_array(action_parameters)), #int32[:]
+                            to_cuda(convert_array(action_state_array)), #float32[:,:]
+                            to_cuda(convert_array(all_action_properties)), #float32[:,:]
+                            to_cuda(convert_array(action_operation_array)), #float32[:,:]
+                            to_cuda(convert_array(current_trans_rates)), #float32[:,:,:,:]
+                            to_cuda(convert_array(property_start_values)), #float32[:,:]
+                            to_cuda(convert_array(property_extreme_values)), #float32[:,:,:]
                             to_cuda(convert_array(
-                                all_transition_tranferred_vals)),
+                                all_transition_tranferred_vals)), #float32[:,:]
                             to_cuda(convert_array(
-                                all_transition_set_to_zero_properties)),
+                                all_transition_set_to_zero_properties)), #float32[
                             to_cuda(convert_array(changed_start_values_array)),
                             to_cuda(convert_array(creation_on_objects)),
                         some_creation_on_objects,
@@ -1107,14 +1190,13 @@ class SSA():
                             to_cuda(convert_array(properties_tmax)),
                             to_cuda(convert_array(properties_tmax_sorted)),
                             to_cuda(convert_array(current_sum_tmax)),
-                            to_cuda(convert_array(property_changes_tmax_array)),
-                            to_cuda(convert_array(property_changes_tmin_array)),
+                            to_cuda(convert_array(property_changes_tminmax_array)),
                             to_cuda(convert_array(property_changes_per_state)),
                             to_cuda(convert_array(nucleation_changes_per_state)),
                             to_cuda(convert_array(total_property_changes)),
 
-                        to_cuda(convert_array(constant)),
-                            to_cuda(convert_array(second_order)),
+                        to_cuda(convert_array(tau_square_eq_constant)),
+                            to_cuda(convert_array(tau_square_eq_second_order)),
 
                             to_cuda(convert_array(highest_idx_with_object)),
                             to_cuda(convert_array(lowest_idx_no_object)),
@@ -1123,18 +1205,21 @@ class SSA():
                            timepoint_array_batch,
                            object_state_time_array_batch,
                            properties_time_array_batch,
-                           time_resolution, self.min_time, save_initial_state,
+                           time_resolution, min_time, save_initial_state,
 
+                        start_nb_parallel_cores,
                         nb_parallel_cores,
                             to_cuda(convert_array(thread_masks)),
+                            to_cuda(convert_array(thread_to_sim_id)),
 
                             local_density_batch, local_resolution,
                         to_cuda(convert_array(total_density)),
 
-                           seed, rng_states, simulation_factor, parameter_factor
+                           rng_states, simulation_factor, parameter_factor
                              )
 
                 print(time.time() - start)
+                nb_parallel_cores = nb_parallel_cores.copy_to_host()
 
                 numba.cuda.synchronize()
                 object_state_batch = torch.Tensor(
@@ -1179,6 +1264,7 @@ class SSA():
             # plt.figure()
             # plt.plot(local_density_batches.mean(axis=1))
 
+
             self.times = (times_batches * time_resolution.copy_to_host())
             self.times = self.times.unsqueeze(1).to(self.device)
 
@@ -1206,8 +1292,7 @@ class SSA():
                         convert_array(action_operation_array),
                         convert_array(current_transition_rates),
                         convert_array(property_start_values),
-                        convert_array(property_min_values),
-                        convert_array(property_max_values),
+                        convert_array(property_extreme_values),
                         convert_array(all_transition_tranferred_vals),
                         convert_array(all_transition_set_to_zero_properties),
                         convert_array(changed_start_values_array),
@@ -1228,21 +1313,20 @@ class SSA():
                          convert_array(properties_tmax),
                         convert_array(properties_tmax_sorted),
                          convert_array(current_sum_tmax),
-                         convert_array(property_changes_tmax_array),
-                         convert_array(property_changes_tmin_array),
+                         convert_array(property_changes_tminmax_array),
                          convert_array(property_changes_per_state),
                             convert_array(nucleation_changes_per_state),
                          convert_array(total_property_changes),
 
-                         convert_array(constant),
-                         convert_array(second_order),
+                         convert_array(tau_square_eq_constant),
+                         convert_array(tau_square_eq_second_order),
 
                          convert_array(highest_idx_with_object),
                          convert_array(lowest_idx_no_object),
 
                         current_timepoint_array, timepoint_array,
                         object_state_time_array, properties_time_array,
-                        time_resolution, self.min_time, save_initial_state,
+                        time_resolution, min_time, save_initial_state,
 
                          nb_parallel_cores,
                          convert_array(thread_masks),
@@ -1258,18 +1342,17 @@ class SSA():
 
             for property_nb, property in enumerate(self.properties):
                 property.array = torch.Tensor(np.copy(
-                    properties_time_array[:, property_nb]))
+                    self.properties_time_array[:, property_nb]))
 
             self.times = (torch.Tensor(np.copy(timepoint_array)).unsqueeze(1)
                           * time_resolution)
 
         if len(self.times.cpu()[0][np.isnan(self.times.cpu()[0])]) > 0:
-            raise ValueError(f"The defined max number of objects "
+            print(f"WARNING: The defined max number of objects "
                              f"{self.max_number_objects} was too low. "
                              "Simulations where creating a new object was not "
                              "possible due to too little objects were "
-                             "interrupted and no results for any simulation "
-                             "were saved. To fix this problem increase the "
+                             "interrupted. To fix this problem increase the "
                              "value for the 'max_number_objects' parameter "
                              "in the 'start' function.")
 
