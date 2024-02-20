@@ -265,6 +265,8 @@ class PropertyGeometry():
                 max_values -= property.array
 
         return max_values
+        # else:
+        #     return None
 
     def get_limit(self):
         return self.operation(self.properties)
@@ -501,202 +503,10 @@ class DataExtraction():
         data_dict["length"] = dimensions[0].length.array.cpu()
         return data_dict
 
-    def _operation_2D_to_1D_density_numba(self, dimensions, simulation_object,
-                                    state_numbers=None, regular_print=False,
-                                    resolution=0.2, **kwargs):
-        """
-        Create 1D density array from start and length information without
-        direction.
-        Args:
-            dimensions (list of Dimension objects):
-            resolution (float): resolution in dimension for data export
-            state_numbers (list of ints): State numbers to analyze
-
-        Returns:
-
-        """
-        if len(dimensions) > 1:
-            return ValueError(f"The operation '2D_to_1D_density' is only "
-                              f"implemented for 1 dimension. DataExtraction "
-                              f"received {len(dimensions)} dimensions instead.")
-        position_array = dimensions[0].position.array.clone()
-        # if regular_print:
-        #     position_array = dimensions[0].position.array
-        # else:
-        #     position_array = torch.concat(dimensions[0].position.array_buffer)
-
-        length_array = 0
-        for length in dimensions[0].lengths:
-            new_length_array = length.array
-            # if regular_print:
-            #     new_length_array = length.array
-            # else:
-            #     new_length_array = torch.concat(length.array_buffer)
-            length_array = length_array + new_length_array
-
-        if state_numbers is not None:
-            # get mask for all objects in defined state
-            object_states = simulation_object.object_states
-            # if regular_print:
-            #     object_states = simulation_object.object_states
-            # else:
-            #     object_states = torch.concat(simulation_object.object_states_buffer)
-            mask = torch.zeros_like(object_states).to(torch.bool)
-            for state in state_numbers:
-                mask = (mask | (object_states == state))
-            # get the maximum number of objects that should be analyzed
-            # (from all simulations)
-            # first sort mask so that first in the matrix there are all True
-            # elements
-            mask_sorted, idx = torch.sort(mask.to(torch.int), dim=1,
-                                          stable=True, descending=True)
-            # the first position that is not True is the sum of all True
-            # elements across the first dim
-            first_false_position = torch.count_nonzero(mask_sorted, dim=1)
-            # then get the maximum of all simulations
-            max_nb_objects = first_false_position.max()
-
-            # set all properties of objects outside of mask to NaN
-            # also use the maximum number of objects of interest for all
-            # simulations, to discard all parts of the sorted array that only
-            # contains objects which are not of interest
-            position_array[~mask] = float("nan")
-            position_array = torch.gather(position_array, dim=1, index=idx)
-            position_array = position_array[:, :max_nb_objects]
-
-            length_array[~mask] = float("nan")
-            length_array = torch.gather(length_array, dim=1, index=idx)
-            length_array = length_array[:, :max_nb_objects]
-
-        # create boolean data array later by expanding each microtubule in space
-        # size of array will be:
-        # (max_position of neurite / resolution) x nb of microtubules
-        min_position = dimensions[0].position.min_value
-        if min_position is None:
-            min_position = 0
-        max_position = dimensions[0].position.max_value
-
-        device = simulation_object.device
-
-        positions = torch.arange(min_position, max_position+resolution*0.9,
-                                 resolution).to(device)
-
-        # print(position_array.shape, positions.shape)
-        all_data = torch.zeros((position_array.shape[0], positions.shape[0],
-                                *position_array.shape[2:])).to(device)
-
-        # only if at least one element is True, analyze the data
-        if mask.sum() > 0:
-
-            position_dimension = int(round((max_position - min_position)
-                                           / resolution,5))
-            # print(1, time.time() - start)
-            start = time.time()
-            # create tensors on correct device
-            tensors = simulation_object.tensors
-
-            # data type depends on dimension 0 - since that is the number of
-            # different int values needed (int8 for <=256; int16 for >=256)
-            # (dimension 0 is determined by max_x of neurite / resolution)
-            if (position_dimension+1) < 256:
-                indices_tensor = torch.ByteTensor
-                indices_dtype = torch.uint8
-            else:
-                indices_tensor = torch.ShortTensor
-                indices_dtype = torch.short
-
-            # extract positions of the array that actually contains objects
-            # crop data so that positions that don't contain objects
-            # are excluded
-            #objects_array = ~torch.isnan(position_array)
-            #positions_object = torch.nonzero(objects_array)
-            #min_pos_with_object = positions_object[:,0].min()
-
-            position_start = position_array
-            #max_nb_objects = position_start.shape[0]
-            #position_start = position_start[min_pos_with_object:max_nb_objects]
-
-            # transform object properties into multiples of resolution
-            # then transform length into end position
-            position_start = torch.div(position_start, resolution,
-                                       rounding_mode="floor")#.to(torch.short)
-            position_start = torch.unsqueeze(position_start, 1)
-
-            position_end = length_array.unsqueeze(1)
-
-            #position_end = position_end[min_pos_with_object:max_nb_objects]
-            position_end = torch.div(position_end + position_array.unsqueeze(1),
-                                     resolution,
-                                     rounding_mode="floor")#.to(indices_dtype)
-
-            # # remove negative numbers to only look at inside the neurite
-            # position_start[position_start < 0] = 0
-            # position_start = position_start#.to(indices_dtype)
-
-            # create indices array which each number
-            # corresponding to one position in space (in dimension 0)
-            indices = np.linspace(0,position_dimension, position_dimension+1)
-            indices = np.expand_dims(indices,
-                                     tuple(range(1,len(position_start.shape)-1)))
-            indices = indices_tensor(indices).unsqueeze(0).to(device=device)
-
-            # split by simulations to reduce memory usage, if needed
-            # otherwise high memory usage leads to
-            # massively increased processing time
-            # with this split, processing time increases linearly with
-            # array size (up to a certain max array size beyond which
-            # the for loop leads to a supralinear increase in processing time)
-
-            nb_objects = position_start.shape[2]
-            # find way to dynamically determine ideal step size!
-            step_size = nb_objects#5
-            nb_steps = int(nb_objects/step_size)
-            start_nb_objects = torch.linspace(0, nb_objects-step_size, nb_steps)
-
-            # print(2, time.time() - start)
-            start = time.time()
-            for start_nb_object in start_nb_objects:
-                end_nb_object = int((start_nb_object + step_size).item())
-                start_nb_object = int(start_nb_object.item())
-                # create boolean data array later by expanding each microtubule in space
-                # use index array to set all positions in boolean data array to True
-                # that are between start point and end point
-                nb_timepoints = position_start.shape[0]
-                data_array = ((indices.expand(nb_timepoints, -1, step_size,
-                                              *position_start.shape[3:])
-                            >= position_start[:,:, start_nb_object:end_nb_object]) &
-                            (indices.expand(nb_timepoints,-1, step_size,
-                                            *position_start.shape[3:])
-                            <= position_end[:,:, start_nb_object:end_nb_object]))
-
-                # then sum across microtubules to get number of MTs at each position
-                data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
-
-                all_data = all_data + data_array_sum
-                # val_tmp = all_data[:2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-
-        # print(3, time.time() - start)
-        start = time.time()
-        data_array = all_data[:,:-1]
-
-        dimensions = [-1] + [1] * (len(data_array.shape) - 2)
-        positions = positions.view(*dimensions)[:-1]
-        positions = positions.unsqueeze(0).expand([data_array.shape[0],
-                                                   *positions.shape])
-
-        data_dict = {}
-        data_dict["1D_density_position"] = positions.cpu()
-        data_dict["1D_density"] = data_array.cpu()
-
-        del data_array
-        del positions
-        torch.cuda.empty_cache()
-
-        return data_dict, ["1D_density"]
-
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,
                                     state_numbers=None, regular_print=False,
-                                    resolution=0.2, **kwargs):
+                                    resolution=0.2, end_density=False,
+                                    **kwargs):
         """
         Create 1D density array from start and length information without
         direction.
@@ -723,13 +533,17 @@ class DataExtraction():
         #     position_array = torch.concat(dimensions[0].position.array_buffer)
 
         length_array = 0
-        for length in dimensions[0].lengths:
-            new_length_array = length.array
-            # if regular_print:
-            #     new_length_array = length.array
-            # else:
-            #     new_length_array = torch.concat(length.array_buffer)
-            length_array = length_array + new_length_array
+        if not end_density:
+            for length in dimensions[0].lengths:
+                new_length_array = length.array
+                # if regular_print:
+                #     new_length_array = length.array
+                # else:
+                #     new_length_array = torch.concat(length.array_buffer)
+                length_array = length_array + new_length_array
+        else:
+            length_array = position_array.clone()
+            length_array[:] = 0
 
         if state_numbers is not None:
             # get mask for all objects in defined state
@@ -890,8 +704,9 @@ class DataExtraction():
                 # (e.g. objects that should only have one property will have 0
                 #  in the other property and therefore should have a density
                 #  of 0)
-                data_array[:,:,length_array[0,
-                               start_nb_object:end_nb_object] == 0] = 0
+                if not end_density:
+                    data_array[:,:,length_array[0,
+                                   start_nb_object:end_nb_object] == 0] = 0
                 # then sum across microtubules to get number of MTs at each position
                 data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
                 all_data = all_data + data_array_sum
@@ -909,11 +724,6 @@ class DataExtraction():
         positions = positions.unsqueeze(0).expand([data_array.shape[0],
                                                    *positions.shape])
 
-        if 3 in state_numbers:
-            plt.figure()
-            plt.plot(data_array.mean(dim=2)[0,:,0].cpu())
-            plt.title(state_numbers)
-
         data_dict = {}
         data_dict["1D_density_position"] = positions.cpu()
         data_dict["1D_density"] = data_array.cpu()
@@ -923,16 +733,19 @@ class DataExtraction():
 
         return data_dict, ["1D_density"]
 
+
+
 class ObjectProperty():
 
-    def __init__(self, min_value=None, max_value=None, start_value=[0,1],
+    def __init__(self, min_value=None, max_value=None,
+                 start_value=[0,1],
                  initial_condition=None, name=""):
         """
         Args:
             min_value (float or PropertyGeometry): lower limit on property
-                value, objects can't go below this value (flooring)
+                value. Defines geometry of physical space.
             max_value (float or PropertyGeometry): upper limit on property
-                value, objects can't go above this value (ceiling)
+                value. Deinfes geometry of physical space.
             start_value (float or PropertyGeometry or list of two values/
                 PropertyGeometry):
                 Value at which new objects will be initialized, if list, will
@@ -954,6 +767,8 @@ class ObjectProperty():
         self._min_value = min_value
         self._max_value = max_value
         self._start_value = start_value
+        self.closed_min = True
+        self.closed_max = True
         self._initial_condition = initial_condition
         self.name = "prop"
         if (name != "") & (name is not None):
@@ -1021,6 +836,45 @@ class ObjectProperty():
         else:
             current_initial_condition = self._initial_condition
         return current_initial_condition
+
+class ObjectPosition(ObjectProperty):
+    def __init__(self, min_value=None, closed_min=True, max_value=None,
+                 closed_max=True, start_value=[0,1],
+                 initial_condition=None, name=""):
+        """
+
+        Args:
+            min_value (float or PropertyGeometry): lower limit on property
+                value. Defines geometry of physical space.
+            closed_min (Bool): Whether objects can't go below the min_value
+                (flooring)
+            max_value (float or PropertyGeometry): upper limit on property
+                value. Deinfes geometry of physical space.
+            closed_max (Bool): Whether objects can't go above the max_value
+                (ceiling)
+            start_value (float or PropertyGeometry or list of two values/
+                PropertyGeometry):
+                Value at which new objects will be initialized, if list, will
+                be initialized randomly between first (min_value) and second
+                (max_value) element.
+            initial_condition (float or PropertyGeometry, or list with
+                2 floats/PropertyGeometry or func):
+                Define the values used at the  beginning of each
+                simulation. If list, will be initialized randomly between first
+                (min_value) and second (max_value) element.
+                Can't be None when start_value is None. If None, will be
+                assigned according to start_value.
+                If function, should take the number of events and output
+                1D array with corresponding values. So far object property
+                initial conditions are independent of the object state.
+            name (String): Name of property, used for data export
+                and readability.
+        """
+        super().__init__(min_value, max_value, start_value, initial_condition,
+                         name)
+        self.closed_min = closed_min
+        self.closed_max = closed_max
+
 
 class Action():
 

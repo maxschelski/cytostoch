@@ -187,7 +187,7 @@ class SSA():
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
               time_resolution, save_initial_state=False,
               max_number_objects=None,
-               combine_parameters=True, nb_parallel_cores=1,
+               single_parameter_changes=True, nb_parallel_cores=1,
               all_parameter_combinations=False,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
@@ -195,7 +195,7 @@ class SSA():
                dynamically_increase_nb_objects=False,
               remove_finished_sims=False, save_states=False,
               save_results=True,
-              use_assertion_checks=True, reset_folder=True,
+              use_assertion_checks=True, reset_folder=True, bug_fixing=False,
               choose_gpu=False):
         """
 
@@ -211,14 +211,22 @@ class SSA():
             max_number_objects (int): maximum number of objects allowed to be
                 simulated. Determines array size
             all_parameter_combinations (Boolean): Whether the combination of all
-                parameter values should be analyzed.
-            combine_parameters (Boolean): Whether parameters should be
-                used exactly as supplied or combined.
-                If False, the only manipulation that will be done is that
-                parameters with single values will be expanded
-                to the total length of parameters.
+                supplied parameter values from all parameters should be
+                analyzed. This means that every value of every parameter is
+                combined with every value of every other parameter and thereby
+                simulations of all parameter combinations are executed.
+            single_parameter_changes (Boolean): Whether parameter values should
+                be used as changing one parameter value at a time from the
+                standard value (first value). This way looking at changes of
+                single parameters can be executed easily.
+                If False, then each simulation will use parameter values from
+                one index for all supplied parameters. Therefore, lists
+                of values for all parameters have to have the same length -
+                or the can have only one value, in which case this single value
+                will be expanded to the total length of parameter values.
                 This allows e.g. definition of pairs of parameter values to use
-                (changing two parameters for a simulation).
+                (changing two parameters for a simulation) but also any other
+                combination of parameter value changes.
         Returns:
 
         """
@@ -269,15 +277,19 @@ class SSA():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
                         time_resolution, save_initial_state,
                         max_number_objects, all_parameter_combinations,
-                        combine_parameters, nb_parallel_cores,
-                        ignore_errors,
-                        print_update_time_step,
-                        nb_objects_added_per_step,
-                        max_iters_no_data_extraction,
+                        single_parameter_changes, nb_parallel_cores,
+                        ignore_errors=ignore_errors,
+                        print_update_time_step=print_update_time_step,
+                        nb_objects_added_per_step=nb_objects_added_per_step,
+                        max_iters_no_data_extraction=max_iters_no_data_extraction,
+                        dynamically_increase_nb_objects=
                         dynamically_increase_nb_objects,
-                        remove_finished_sims, save_states,
-                        save_results,
-                        use_assertion_checks, reset_folder)
+                        remove_finished_sims=remove_finished_sims,
+                        save_states=save_states,
+                        save_results=save_results,
+                        use_assertion_checks=use_assertion_checks,
+                        reset_folder=reset_folder,
+                        bug_fixing = bug_fixing)
 
     def save(self, time_resolution, max_time):
         analysis = analyzer.Analyzer(simulation=self)
@@ -348,21 +360,24 @@ class SSA():
         # add two to the maximum size since two more entries are added for
         # the additional options (threshold and operation)
         if max_nb_max_value_properties > 0:
-            max_nb_max_value_properties += 2
+            max_nb_max_value_properties += 3
         if max_nb_min_value_properties > 0:
-            max_nb_min_value_properties += 2
+            max_nb_min_value_properties += 3
 
         max_nb_extreme_properties = max(max_nb_min_value_properties,
                                         max_nb_max_value_properties)
-        max_nb_extreme_properties = max(1, max_nb_extreme_properties)
-
+        max_nb_extreme_properties = max(2, max_nb_extreme_properties)
 
         property_extreme_values = np.full((2, nb_properties,
-                                       max(1, max_nb_extreme_properties)),
+                                       max_nb_extreme_properties),
                                       math.nan)
 
         for property_nb, property in enumerate(self.properties):
             min_value = property._min_value
+            if property.closed_min:
+                property_extreme_values[0, property_nb, 1] = 1
+            else:
+                property_extreme_values[0, property_nb, 1] = 0
             if type(min_value) in [float, int]:
                 property_extreme_values[0, property_nb, 0] = min_value
             elif min_value is not None:
@@ -370,13 +385,20 @@ class SSA():
                     0].min_value
                 operation = min_value._operation
                 if operation == "same_dimension_forward":
-                    property_extreme_values[0, property_nb, 1] = 1
+                    property_extreme_values[0, property_nb, 2] = 1
                 for (min_val_nb,
                      min_val_property) in enumerate(min_value.properties):
                     property_extreme_values[0, property_nb,
-                                            min_val_nb + 2] = min_val_property.number
+                                            min_val_nb + 3] = min_val_property.number
 
             max_value = property._max_value
+            # if closed, then use value 1, indicating that max should be
+            # enforced, otherwise it just defines the geometry, which is
+            # only available for position properties
+            if property.closed_max:
+                property_extreme_values[1, property_nb, 1] = 1
+            else:
+                property_extreme_values[1, property_nb, 1] = 0
             if type(max_value) in [float, int]:
                 property_extreme_values[1, property_nb, 0] = max_value
             elif max_value is not None:
@@ -384,11 +406,11 @@ class SSA():
                     max_value.properties[0].max_value
                 operation = max_value._operation
                 if operation == "same_dimension_forward":
-                    property_extreme_values[1, property_nb, 1] = 1
-                for (min_val_nb,
-                     min_val_property) in enumerate(max_value.properties):
+                    property_extreme_values[1, property_nb, 2] = 1
+                for (max_val_nb,
+                     max_val_property) in enumerate(max_value.properties):
                     property_extreme_values[1, property_nb,
-                                        min_val_nb + 2] = min_val_property.number
+                                        max_val_nb + 3] = max_val_property.number
 
         return property_extreme_values
 
@@ -615,8 +637,9 @@ class SSA():
     def _get_object_removal_property_array(self):
         # for the second array, object_removal_operations
         # the first value is the operation, which can be 1 for the combined
-        # property value being larger then a threshold
+        # property value being larger then a threshold to be removed
         # and -1 for the combined property value being smaller then a threshold
+        # to be removed
         # the second value is the threshold
         object_removal_operations = np.zeros((len(self.object_removal),
                                               2))
@@ -632,14 +655,15 @@ class SSA():
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, save_initial_state=False,
                max_number_objects=None, all_parameter_combinations=False,
-               combine_parameters=True, nb_parallel_cores=1,
+               single_parameter_changes=True, nb_parallel_cores=1,
                ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                 max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=False,
                remove_finished_sims=False, save_states=False,
                save_results=True,
-               use_assertion_checks=True, reset_folder=True):
+               use_assertion_checks=True, reset_folder=True,
+               bug_fixing=False):
         """
 
         Args:
@@ -652,14 +676,22 @@ class SSA():
             max_number_objects (int): maximum number of objects allowed to be
                 simulated. Determines array size
             all_parameter_combinations (Boolean): Whether the combination of all
-                parameter values should be analyzed.
-            combine_parameters (Boolean): Whether parameters should be
-                used exactly as supplied or combined.
-                If False, the only manipulation that will be done is that
-                parameters with single values will be expanded
-                to the total length of parameters.
+                supplied parameter values from all parameters should be
+                analyzed. This means that every value of every parameter is
+                combined with every value of every other parameter and thereby
+                simulations of all parameter combinations are executed.
+            single_parameter_changes (Boolean): Whether parameter values should
+                be used as changing one parameter value at a time from the
+                standard value (first value). This way looking at changes of
+                single parameters can be executed easily.
+                If False, then each simulation will use parameter values from
+                one index for all supplied parameters. Therefore, lists
+                of values for all parameters have to have the same length -
+                or the can have only one value, in which case this single value
+                will be expanded to the total length of parameter values.
                 This allows e.g. definition of pairs of parameter values to use
-                (changing two parameters for a simulation).
+                (changing two parameters for a simulation) but also any other
+                combination of parameter value changes.
         Returns:
         """
         if reset_folder:
@@ -671,12 +703,15 @@ class SSA():
                     if file_to_remove.find(".py") == -1:
                         path_to_remove = os.path.join(data_folder,
                                                       file_to_remove)
-                        shutil.rmtree(path_to_remove)
+                        if os.path.isdir(path_to_remove):
+                            shutil.rmtree(path_to_remove)
+                        else:
+                            os.remove(path_to_remove)
 
                 time.sleep(0.1)
-            os.mkdir(data_folder)
+            # os.mkdir(data_folder)
 
-        if not os.path.exists:
+        if not os.path.exists(data_folder):
             os.mkdir(data_folder)
 
         self.min_time = min_time
@@ -691,11 +726,11 @@ class SSA():
         self.max_iters_no_data_extraction = max_iters_no_data_extraction
         self.remove_finished_sims = remove_finished_sims
         self.all_parameter_combinations = all_parameter_combinations
-        self.combine_parameters = combine_parameters
+        self.single_parameter_changes = single_parameter_changes
         self.time_resolution = time_resolution
 
-        if (not combine_parameters) & self.all_parameter_combinations:
-            print("If the parameters combine_parameters is False, "
+        if (not single_parameter_changes) & self.all_parameter_combinations:
+            print("If the parameters single_parameter_changes is False, "
                   "no parameters will be combined, also if "
                   "all_parameter_combinations is True.")
 
@@ -741,18 +776,18 @@ class SSA():
         # check whether each parameter either only has a single value
         # or has a length that is similar between all parameters with more than
         # one value
-        if not combine_parameters:
+        if not single_parameter_changes:
             unique_param_lengths = set(simulation_parameter_lengths)
             param_lengths = unique_param_lengths - set([1])
             if len(param_lengths) > 1:
-                raise ValueError("If combine_parameters is False, then each "
+                raise ValueError("If single_parameter_changes is False, then each "
                                  "parameter can either have one value defined "
                                  "or as many values defined as all other "
                                  "parameters that have more than one value "
                                  "defined. However, at least one parameter "
                                  "has a different number of values defined.")
 
-        if not combine_parameters:
+        if not single_parameter_changes:
             simulation_parameter_lengths = [nb
                                           for nb
                                           in simulation_parameter_lengths
@@ -797,7 +832,7 @@ class SSA():
 
         self._initialize_parameter_arrays(self._all_simulation_parameters,
                                           simulation_parameter_lengths,
-                                          combine_parameters,
+                                          single_parameter_changes,
                                           all_parameter_combinations)
 
         self.times = torch.zeros((1,*self._simulation_array_size[1:]))
@@ -819,7 +854,8 @@ class SSA():
 
         # self.get_tensor_memory()
 
-        self._add_objects_to_full_tensor()
+        if dynamically_increase_nb_objects:
+            self._add_objects_to_full_tensor()
 
         # data = self.data_extraction.extract(self)
         #
@@ -892,25 +928,29 @@ class SSA():
         # all parameters for nucleation on objects
         nb_properties = len(self.properties)
         end_position_tmax_array = np.zeros((32,
-                                            nb_properties-1, *parameter_shape)) #x
+                                            nb_properties-1, *parameter_shape))
         properties_tmax_array = np.zeros((32,
                                           nb_properties-1, nb_properties,
-                                          *parameter_shape)) #x
-        properties_tmax = np.full((32,
+                                          *parameter_shape))
+        # first dimensions is unsorted and sorted
+        properties_tmax = np.full((2, 32,
                                    nb_properties-1, *parameter_shape),
-                                  math.nan) #x
-        properties_tmax_sorted = np.full((32,
-                                          nb_properties-1, *parameter_shape),
-                                         math.nan) # x
+                                  math.nan)
+        # properties_tmax_sorted = np.full((32,
+        #                                   nb_properties-1, *parameter_shape),
+        #                                  math.nan)
         current_sum_tmax = np.zeros((32,
-                                     nb_properties, *parameter_shape)) #x
+                                     nb_properties, *parameter_shape))
         property_changes_tminmax_array = np.zeros((2, max_number_objects,
                                                 nb_properties,
-                                                *parameter_shape))
+                                                *parameter_shape),
+                                                  dtype=np.float32)
         property_changes_per_state = np.zeros((len(self.states), nb_properties,
-                                              *parameter_shape)) #x
+                                              *parameter_shape))
         nucleation_changes_per_state = np.copy(property_changes_per_state)
-        total_property_changes = np.zeros((len(self.states), *parameter_shape)) #x
+        total_property_changes = np.zeros((len(self.states), *parameter_shape))
+
+        density_threshold_boundaries = np.zeros((3, *parameter_shape))
 
         # -  current rates of all transitions (empty)
         nb_transitions = len(self.transitions)
@@ -931,10 +971,11 @@ class SSA():
         all_transition_positions = np.zeros(self.object_states.shape[1:])
 
         # calculate number of objects for all states
-        nb_objects_all_states = np.zeros((len(self.states),
+        nb_objects_all_states = np.zeros((len(self.states)+1,
                                           *self.object_states.shape[1:]))
+        nb_objects_all_states[0] = self.object_states.shape[0]
         for state_nb, state in enumerate(self.states):
-            nb_objects_all_states[state_nb] = np.sum(object_states ==
+            nb_objects_all_states[state_nb+1] = np.sum(object_states ==
                                                      state.number, axis=0)
 
         # get number of timepoints
@@ -943,7 +984,10 @@ class SSA():
             nb_timepoints += 1
 
         # set arrays for values over time
-        current_timepoint_array = np.zeros((self.object_states.shape[1:]))
+        # the first index is the current timepoint with respect to
+        # time_resolution
+        # the second index with respect to the timestep for reassigning threads
+        current_timepoint_array = np.zeros((2, *self.object_states.shape[1:]))
 
         timepoint_array = np.full((nb_timepoints,
                                    *self.object_states.shape[1:]),
@@ -995,9 +1039,9 @@ class SSA():
         nb_simulations = self.object_states.shape[1]
         nb_parameter_combinations = self.object_states.shape[2]
 
-        local_resolution = 0.005
+        local_resolution = 0.02
         local_density_size = int(20 / local_resolution) + 1
-        local_density = np.zeros((local_density_size, nb_simulations,
+        local_density = np.zeros((3, local_density_size, nb_simulations,
                                   nb_parameter_combinations))
 
         total_density = np.zeros((nb_simulations, nb_parameter_combinations))
@@ -1007,17 +1051,17 @@ class SSA():
         tau_square_eq_constant = np.zeros((2, nb_simulations, nb_parameter_combinations))
         tau_square_eq_second_order = np.zeros((2, nb_simulations, nb_parameter_combinations))
 
-        thread_masks = np.zeros((3, *parameter_shape), dtype=np.int64)
+        thread_masks = np.zeros((4, *parameter_shape), dtype=np.int64)
 
         if np.nansum(creation_on_objects) > 0:
             some_creation_on_objects = True
         else:
             some_creation_on_objects = False
 
-        if self.device.find("cuda") != -1:
+        nb_parallel_cores = np.zeros(parameter_shape)
+        nb_parallel_cores[:,:] = start_nb_parallel_cores
 
-            nb_parallel_cores = np.zeros(parameter_shape)
-            nb_parallel_cores[:,:] = start_nb_parallel_cores
+        if self.device.find("cuda") != -1:
 
             start = time.time()
 
@@ -1059,7 +1103,15 @@ class SSA():
                                self.properties[0].array.size *
                                self.properties[0].array.itemsize)
 
-            total_size = (nb_timepoints+1) * (size_states + size_properties)
+            size_density = (np.product(local_density.shape) *
+                            local_density.itemsize)
+
+            size_tminmax = (property_changes_tminmax_array.size *
+                            property_changes_tminmax_array.itemsize)
+
+            total_size = ((nb_timepoints+1) * (size_states + size_properties)
+                          + size_density + size_tminmax)
+
 
             # think about sorting parameter values in the array by
             # their magnitude - higher transition rates should be separate from
@@ -1119,6 +1171,7 @@ class SSA():
             nb_parallel_cores = to_cuda(convert_array(nb_parallel_cores))
 
             for batch_nb in range(nb_batches):
+
                 start_parameter_comb = (batch_nb *
                                         parameter_combinations_per_batch)
                 end_parameter_comb = (start_parameter_comb +
@@ -1126,9 +1179,9 @@ class SSA():
                 param_slice = slice(start_parameter_comb, end_parameter_comb)
 
                 local_density_batch = cuda.to_device(
-                    convert_array(local_density[:,:,param_slice]))
+                    convert_array(local_density[:,: ,:,param_slice]))
                 current_timepoint_array_batch = cuda.to_device(
-                    convert_array(current_timepoint_array[:,param_slice]))
+                    convert_array(current_timepoint_array[:,:,param_slice]))
                 timepoint_array_batch = cuda.to_device(
                     convert_array(timepoint_array[:,:,param_slice]))
                 object_state_time_array_batch = cuda.to_device(
@@ -1150,6 +1203,7 @@ class SSA():
                 current_transitions_batch = current_transitions[:,param_slice]
                 all_trans_pos_batch = all_transition_positions[:,param_slice]
 
+                numba.cuda.profile_start()
 
                 sim[nb_SM,
                  nb_cc](to_cuda(object_states_batch), #int32[:,:,:]
@@ -1188,12 +1242,13 @@ class SSA():
                             to_cuda(convert_array(end_position_tmax_array)),
                             to_cuda(convert_array(properties_tmax_array)),
                             to_cuda(convert_array(properties_tmax)),
-                            to_cuda(convert_array(properties_tmax_sorted)),
                             to_cuda(convert_array(current_sum_tmax)),
+
                             to_cuda(convert_array(property_changes_tminmax_array)),
                             to_cuda(convert_array(property_changes_per_state)),
                             to_cuda(convert_array(nucleation_changes_per_state)),
                             to_cuda(convert_array(total_property_changes)),
+                            to_cuda(convert_array(density_threshold_boundaries)),
 
                         to_cuda(convert_array(tau_square_eq_constant)),
                             to_cuda(convert_array(tau_square_eq_second_order)),
@@ -1222,6 +1277,8 @@ class SSA():
                 nb_parallel_cores = nb_parallel_cores.copy_to_host()
 
                 numba.cuda.synchronize()
+                numba.cuda.profile_stop()
+
                 object_state_batch = torch.Tensor(
                     object_state_time_array_batch.copy_to_host())
                 property_array_batch = torch.Tensor(
@@ -1247,7 +1304,7 @@ class SSA():
                                                  axis=-1)
 
                 local_density_batch = torch.Tensor(
-                    local_density_batch.copy_to_host())
+                    local_density_batch[0].copy_to_host())
 
                 if local_density_batches is None:
                     local_density_batches = local_density_batch
@@ -1274,7 +1331,11 @@ class SSA():
             self.object_states = object_states_batches.to(self.device)
 
         else:
-            simulation_numba._decorate_all_functions_for_cpu()
+            if not bug_fixing:
+                simulation_numba._decorate_all_functions_for_cpu()
+            else:
+                simulation_numba._reassign_random_number_func_cpu()
+
             print("Starting simulation...")
             start = time.time()
 
@@ -1311,12 +1372,12 @@ class SSA():
                          convert_array(end_position_tmax_array),
                          convert_array(properties_tmax_array),
                          convert_array(properties_tmax),
-                        convert_array(properties_tmax_sorted),
                          convert_array(current_sum_tmax),
                          convert_array(property_changes_tminmax_array),
                          convert_array(property_changes_per_state),
                             convert_array(nucleation_changes_per_state),
                          convert_array(total_property_changes),
+                         convert_array(density_threshold_boundaries),
 
                          convert_array(tau_square_eq_constant),
                          convert_array(tau_square_eq_second_order),
@@ -1328,7 +1389,7 @@ class SSA():
                         object_state_time_array, properties_time_array,
                         time_resolution, min_time, save_initial_state,
 
-                         nb_parallel_cores,
+                         convert_array(nb_parallel_cores),
                          convert_array(thread_masks),
 
                          local_density, local_resolution,
@@ -1347,14 +1408,37 @@ class SSA():
             self.times = (torch.Tensor(np.copy(timepoint_array)).unsqueeze(1)
                           * time_resolution)
 
-        if len(self.times.cpu()[0][np.isnan(self.times.cpu()[0])]) > 0:
-            print(f"WARNING: The defined max number of objects "
-                             f"{self.max_number_objects} was too low. "
-                             "Simulations where creating a new object was not "
-                             "possible due to too little objects were "
-                             "interrupted. To fix this problem increase the "
-                             "value for the 'max_number_objects' parameter "
-                             "in the 'start' function.")
+        nb_objects_single = torch.count_nonzero(self.object_states, dim=1).to(torch.float)
+        nb_objects = nb_objects_single.mean(dim=-2)
+        for parameter_nb in range(nb_objects.shape[-1]):
+            print("nb_objects: ", nb_objects[0, parameter_nb])
+            print("Parameters: ")
+            for parameter in self.parameters:
+                standard_param_val = parameter.value_array[0, 0].item()
+                param_val = parameter.value_array[0, parameter_nb].item()
+                param_val_string = ""
+                if standard_param_val != param_val:
+                    param_val_string += "!! "
+                param_val_string += parameter.name
+                param_val_string += ": "
+                param_val_string += str(param_val)
+                param_val_string += "; "
+                print(param_val_string)
+            print("\n")
+        print("All mean numbers of objects: ", nb_objects)
+        print("Parameter nb with max nb of objects: ", torch.where(nb_objects == nb_objects.max().item()))
+        print("Mean number of Objects: ", nb_objects.mean().item(), "\n")
+        print("Max number of Objects in single simulation: ", nb_objects_single.max().item(), "\n")
+        # print(nb_objects[0,:,0])
+
+        # if len(self.times.cpu()[0][np.isnan(self.times.cpu()[0])]) > 0:
+        #     print(f"WARNING: The defined max number of objects "
+        #                      f"{self.max_number_objects} was too low. "
+        #                      "Simulations where creating a new object was not "
+        #                      "possible due to too little objects were "
+        #                      "interrupted. To fix this problem increase the "
+        #                      "value for the 'max_number_objects' parameter "
+        #                      "in the 'start' function.")
 
         all_data = {}
         for data_name, data_extraction in self.data_extractions.items():
@@ -1610,7 +1694,7 @@ class SSA():
 
     def _initialize_parameter_arrays(self, all_simulation_parameters,
                                      simulation_parameter_lengths,
-                                     combine_parameters,
+                                     single_parameter_changes,
                                      all_parameter_combinations):
         # go through all model parameters and expand array to simulation
         # specific size
@@ -1620,7 +1704,7 @@ class SSA():
         nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
 
-            if not combine_parameters:
+            if not single_parameter_changes:
                 param_vals = model_parameters.values
                 if len(param_vals) == 1:
                     array = param_vals.repeat((simulation_parameter_lengths))
@@ -1735,7 +1819,7 @@ class SSA():
         for object_property in self.properties:
             random_property_vals = False
             object_property.array = torch.zeros(self._simulation_array_size,
-                                                dtype=torch.float)
+                                                dtype=torch.float32)
             object_property.array[:] = math.nan
             initial_cond = object_property.initial_condition
 
@@ -1778,12 +1862,13 @@ class SSA():
                 get_property_vals = self._get_random_poperty_values
                 property_values = get_property_vals(min_value, max_value,
                                                     nb_objects_with_states)
-
+                property_values = property_values.to(torch.float32)
                 # if there is just one property value (its not a tensor)
                 # use another way of assinging values
                 # masked_scatter has advantage of much smaller memory footprint
                 # but when just assigning one value, memory footprint using
                 # mask directly is small
+
             if type(property_values) != type(object_property.array):
                 object_property.array[object_state_mask] = property_values
             else:
