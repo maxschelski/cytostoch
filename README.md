@@ -1,8 +1,10 @@
 # CytoStoch
-Stochastic simulation (SSA) of microtubules in neurites, implemented using jit from numba (numba.njit, numba.cuda.jit) for fast parallel processing on a GPU or CPUs. 
+Stochastic simulation (SSA) of microtubules in neurites, implemented using jit from numba (numba.njit, numba.cuda.jit) for fast parallel processing on a GPU. 
 Programmed in a generalized fashion, to be used for stochastically simulating any model with different species, with optional properties for each species member, in an arbitrary spatial domain. 
 
 Example under scripts not compatible with current cytostoch version and therefore not running.
+
+Note: Execution on CPUs currently not supported. Will be added again in the future.
 
 # Installation
 
