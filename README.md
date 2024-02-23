@@ -4,8 +4,6 @@ Programmed in a generalized fashion, to be used for stochastically simulating an
 
 Example under scripts not compatible with current cytostoch version and therefore not running.
 
-Note, time-dependent variables are not implemented yet.
-
 # Installation
 
 The package was developed and tested in Windows.
