@@ -12,7 +12,7 @@ The package was developed and tested in Windows.
 <br/>
 1. If you don't already have Anaconda installed: Download and install Anaconda from https://www.anaconda.com/.
 2. If you don't already have git installed: Download and install git from https://git-scm.com/downloads
-3. Open a terminal, navigate to the folder where you want to put cytotorch and clone the cytostoch repository:
+3. Open an Anaconda terminal, navigate to the folder where you want to put cytotorch and clone the cytostoch repository:
 > git clone https://github.com/maxschelski/cytostoch.git
 4. Navigate into the folder of the repository (cytostoch):
 > cd cytostoch
