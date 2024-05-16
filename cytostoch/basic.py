@@ -256,13 +256,16 @@ class PropertyGeometry():
                              f"max_value defined as float or int is allowed. "
                              f"Instead the max_value is "
                              f"{properties[0].max_value}.")
-        max_values = properties[0].max_value - properties[0].array
+        if properties[0].closed_max:
+            max_values = properties[0].max_value - properties[0].array
 
-        # subtract values of each property in the same dimension from max value
-        # to get
-        if len(properties) > 1:
-            for property in properties[1:]:
-                max_values -= property.array
+            # subtract values of each property in the same dimension from max value
+            # to get
+            if len(properties) > 1:
+                for property in properties[1:]:
+                    max_values -= property.array
+        else:
+            max_values = math.nan
 
         return max_values
         # else:
@@ -298,7 +301,7 @@ class DataExtraction():
     """
 
     def __init__(self, dimensions, operation, state_groups=None,
-                 print_regularly=False, **kwargs):
+                 print_regularly=False, show_data=True, **kwargs):
         """
         Define how many dimensions in the system
 
@@ -326,6 +329,7 @@ class DataExtraction():
         self.state_groups = state_groups
         self.print_regularly = print_regularly
         self.operation_name = operation
+        self.show_data = show_data
 
         self.resolution = kwargs.get("resolution", None)
 
@@ -334,6 +338,7 @@ class DataExtraction():
         implemented_operations["2D_to_1D_density"] = new_operation
         implemented_operations["raw"] = self._operation_raw
         implemented_operations["global"] = self._operation_global
+        implemented_operations["length_distribution"] = self._length_distribution
 
         if type(operation) == str:
             if operation not in implemented_operations:
@@ -410,6 +415,63 @@ class DataExtraction():
                             all_data[name] = data_vals
 
         return all_data
+
+    def _length_distribution(self, dimensions, simulation_object, state_numbers,
+                                bin_size=None, nb_bins=None, **kwargs):
+
+        object_states = simulation_object.object_states
+
+        mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
+        for state in state_numbers:
+            mask = (mask | (object_states == state))
+
+        # convert list or tuple of properties to dict by using property names
+        # as key
+        property_dict = {}
+        for property in dimensions[0].lengths:
+            property_dict[property.name] = property
+
+        # get data of properties from buffer (which contains data from multiple
+        # iterations/timepoints). Also sum up multiple properties, if defined.
+        analysis_properties = {}
+        for name, property in property_dict.items():
+            if type(property) in [list, tuple]:
+                property_array = 0
+                for sub_property in property:
+                    sub_property_array = sub_property.array
+                    # if regular_print:
+                    #     sub_property_array = sub_property.array.unsqueeze(0)
+                    # else:
+                    #     sub_property_array = torch.concat(sub_property.array_buffer)
+                    property_array = property_array + sub_property_array
+            else:
+                property_array = property.array
+                # if regular_print:
+                #     property_array = property.array.unsqueeze(0)
+                # else:
+                #     property_array = torch.concat(property.array_buffer)
+
+            property_array[~mask] = float("nan")
+            analysis_properties[name] = property_array
+
+        # create histogram of distributions for
+
+        data_dict = {}
+        all_data_columns = {}
+
+        all_data_columns = ["number"]
+        for name, values in analysis_properties.items():
+            all_state_values = values[mask]
+            range = all_state_values.max() - all_state_values.min()
+            if nb_bins is None:
+                nb_bins = np.ceil(range / bin_size)
+            value_hist = np.histogram(all_state_values, bins=nb_bins)
+            data_dict["length_hist_bins" + name] = value_hist[1]
+            data_dict["length_hist_numbers" + name] = value_hist[0]
+            all_data_columns.append("length_hist_bins" + name)
+            all_data_columns.append("length_hist_numbers" + name)
+
+        return data_dict, all_data_columns
 
     def _operation_global(self, dimensions, simulation_object, properties,
                                      state_numbers, regular_print, **kwargs):
@@ -1045,6 +1107,7 @@ class ObjectRemovalCondition():
 class Parameter():
 
     def __init__(self, values, type="rates", convert_half_lifes=True,
+                 dependence=None,
                  name=""):
         """
 
@@ -1055,18 +1118,72 @@ class Parameter():
             type (String): Type of values supplied, can be "rates", "half-lifes"
                 or "other". For half-lifes, values will be converted to rates
                 if convert_half_lifes is True.
+            convert_half_lifes: Whether to convert half lifes to rates
+            dependence: Dependence object to make parameter value
+                depend on something else,
+                e.g. position with LinearPositionDependence
             name (string): Name of parameter
         """
         if (type == "half-lifes") & (convert_half_lifes):
             lifetime_to_rates_factor = np.log(np.array([2]))
-            self.values = torch.HalfTensor(lifetime_to_rates_factor / values)
+            self.values = torch.DoubleTensor(lifetime_to_rates_factor / values)
         else:
-            self.values = torch.HalfTensor(values)
+            self.values = torch.DoubleTensor(values)
 
         self.name = name
         self.number = None
-        self.value_array = torch.HalfTensor([])
+        self.value_array = torch.DoubleTensor([])
+        self.dependence = dependence
 
+class LinearPositionDependence():
+
+    """
+    Define a dependence of a parameter on the position of the object.
+    """
+
+    def __init__(self, start_val = None, end_val = None,
+                 param_change = None,
+                 param_change_is_abs = False,
+                 pos_change_is_abs = False,
+                 name=None):
+        """
+
+        Params:
+            start_val: Parameter object for absolute start value of parameter
+            end_val: Parameter object for absolute end_val of parameter
+            param_change: Parameter object for
+                change of parameter per position change
+            param_change_is_abs: Boolean of whether
+                change of parameter is absolute
+                (in parameter units) or relative (in fraction of difference
+                between end_val and start_val)
+            pos_change_is_abs: Boolean of whether
+                change of position in param_change
+                is absolute (in um) or relative (fraction of length)
+
+        """
+        if (start_val is None) & (end_val is None):
+            error_msg = ("When defining a dependence, the start "
+                         "and/or the end value have to be defined. "
+                         "Instead, both were None.")
+            if name is not None:
+                error_msg += f" For the dependence {name}."
+            raise ValueError(error_msg)
+        self.start_val = start_val
+
+        self.end_val = end_val
+
+        if ((start_val is not None) & (end_val is not None) &
+                (param_change is not None)):
+            raise ValueError("When defining a dependence, not all of "
+                             "start_val, end_val and param_change "
+                             "can be defined. One of them has to be None.")
+
+        self.param_change = param_change
+        self.param_change_is_abs = param_change_is_abs
+        self.pos_change_is_abs = pos_change_is_abs
+        self.name = name
+        self.number = None
 
 
 class StateTransition():
