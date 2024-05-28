@@ -114,6 +114,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
     # new_assignment = 0
     # re_assigned = False
     while current_sim_nb < total_nb_simulations:
+
         # For each parameter combination the defined number of simulations
         # are done on a defined number of cores
         if not new_simulation:
@@ -126,15 +127,11 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                           param_id * nb_simulations * start_nb_parallel_cores -
                           sim_id * start_nb_parallel_cores)
 
-            # sim_id = int(thread_to_sim_id[thread_id, 0])
-            # param_id = int(thread_to_sim_id[thread_id, 1])
-            # core_id = int(thread_to_sim_id[thread_id, 2])
-
             thread_to_sim_id[thread_id, 0] = sim_id
             thread_to_sim_id[thread_id, 1] = param_id
             thread_to_sim_id[thread_id, 2] = core_id
 
-            warp_nb = thread_id // cuda.warpsize
+            # warp_nb = thread_id // cuda.warpsize
 
             warp_thread_idx = cuda.laneid
             cuda.atomic.add(thread_masks, (0, sim_id, param_id),
@@ -145,16 +142,6 @@ def _execute_simulation_gpu(object_states, properties_array, times,
 
             cuda.atomic.add(thread_masks, (2, sim_id, param_id),
                             (1 << warp_thread_idx))
-
-            # print(thread_id,
-            #       sim_id, param_id, core_id,
-            #       thread_masks[0, sim_id, param_id],
-            #       thread_masks[1, sim_id, param_id],
-            #       thread_masks[2, sim_id, param_id])
-
-            # warp_mask = thread_masks[0,sim_id, param_id]
-            # warp_mask |= (1<<warp_thread_idx)
-            # thread_masks[0,sim_id, param_id] = warp_mask
 
             if some_creation_on_objects & (core_id == 0):
                 nucleation_on_objects_rate = _get_nucleation_on_objects_rate(creation_on_objects,
@@ -246,19 +233,19 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                 # if thread_masks[0, sim_id, param_id] == 0:
                 #     print(666, thread_id, thread_masks[0, sim_id, param_id])
 
-                # if new_simulation:
-                #     # print(thread_masks[1, sim_id, param_id], thread_id, core_id,
-                #     #       nb_parallel_cores[sim_id, param_id])
-                #     # new_simulation = False
-                #     success = 0
-                #     break
+                if new_simulation:
+                    # print(thread_masks[1, sim_id, param_id], thread_id, core_id,
+                    #       nb_parallel_cores[sim_id, param_id])
+                    # new_simulation = False
+                    success = 0
+                    break
 
                 success = _run_iteration(object_states,
                                          properties_array,
                                        times, parameter_value_array,
                                          params_pos_dependence,
                                          position_dependence,
-                            object_dependent_rates,
+                                        object_dependent_rates,
                                        transition_parameters, all_transition_states,
                                        action_parameters, action_state_array,
                                        all_action_properties, action_operation_array,
@@ -292,175 +279,21 @@ def _execute_simulation_gpu(object_states, properties_array, times,
 
                                          tau_square_eq_terms,
 
-                                first_last_idx_with_object,
+                                        first_last_idx_with_object,
 
-                               timepoint_array,
-                               time_resolution, save_initial_state,
+                                       timepoint_array,
+                                       time_resolution, save_initial_state,
 
                                          nb_parallel_cores, thread_masks,
 
-                                local_density, local_resolution,total_density,
+                                        local_density, local_resolution,total_density,
 
-                               rng_states, core_id, sim_id, param_id,
+                                       rng_states, core_id, sim_id, param_id,
                                          simulation_factor, parameter_factor,
                                )
 
             # while the following code seems to work, it does not speed
             # up simulations - instead for some reason it slows it down?!
-
-            # check if a new timepoint for re-evaluating core distribution is
-            # reached
-            # reassign_timepoint = math.floor(times[0, sim_id, param_id] /
-            #                                 (reassign_threads_time_step_size *
-            #                                  min_time))
-            # current_timepoint = timepoint_array[1, sim_id, param_id]
-            # # by squaring and step size of 0.1 the reassignment will be
-            # # triggered at the following steps: 0.1, 0.2 and 0.5
-            # if ((reassign_timepoint > (math.pow(current_timepoint,2)) &
-            #         (timepoint_array[0, sim_id, param_id] <
-            #          math.floor(min_time / time_resolution[0]))):
-            #
-            #     cuda.syncwarp(thread_masks[2, sim_id, param_id])
-            #     timepoint_array[1, sim_id,
-            #                             param_id] = reassign_timepoint
-            #     # only reassign threads if the current simulation is run on
-            #     # more than one thread
-            #     if nb_parallel_cores[sim_id, param_id] > 1:
-            #
-            #         # if so, assign the last x threads to that simulation (target)
-            #         # reduce the nb parallel cores for the current simulation by x
-            #         # get the first core_id of the current simulation
-            #         # to reassign
-            #         first_core_id_to_reassign = (nb_parallel_cores[sim_id,
-            #                                                        param_id]
-            #                                      - nb_reassigned_threads)
-            #
-            #         cuda.syncwarp(thread_masks[2, sim_id, param_id])
-            #         # check the simulated time of all other simulations on the warp
-            #         (slowest_sim_id,
-            #          slowest_param_id,
-            #          lowest_sim_time,
-            #          last_thread) = get_slowest_simulation_in_warp(thread_id,
-            #                                                        warp_nb,
-            #                                                        total_nb_simulations,
-            #                                                        thread_to_sim_id,
-            #                                                        sim_id,
-            #                                                        param_id,
-            #                                                        thread_masks,
-            #                                                        timepoint_array,
-            #                                                        min_time,
-            #                                                        time_resolution,
-            #                                                        times)
-            #
-            #         # check whether the smallest time of the simulated warp
-            #         # is smaller than 90% the current simulation time
-            #         time_threshold = (times[0, sim_id, param_id] *
-            #                           (1 - min_time_diff_for_reassigning))
-            #         if ((slowest_sim_id != -1) & (lowest_sim_time <
-            #                                       time_threshold)):
-            #
-            #             warp_thread_idx = cuda.laneid
-            #             warp_thread_id_bin = int((1 << warp_thread_idx))
-            #
-            #             # set the thread mask for all threads currently added
-            #             # to 0
-            #             thread_masks[3, slowest_sim_id, slowest_param_id] = 0
-            #
-            #             cuda.syncwarp(thread_masks[2, sim_id, param_id])
-            #             if core_id >= first_core_id_to_reassign:
-            #
-            #                 # change the thread_masks of the target simulation
-            #                 # by setting the bits of the reassigned threads to 1
-            #                 cuda.atomic.add(thread_masks,
-            #                                 (1, slowest_sim_id,
-            #                                  slowest_param_id),
-            #                                 warp_thread_id_bin)
-            #
-            #                 # reduce the number of parallel cores for the
-            #                 # current simulation
-            #                 cuda.atomic.add(nb_parallel_cores,
-            #                                 (sim_id, param_id),
-            #                                 -1)
-            #
-            #                 # create mask to sync all threads that are currently
-            #                 # added to the slowest simulation
-            #                 cuda.atomic.add(thread_masks, (3,
-            #                                                slowest_sim_id,
-            #                                                slowest_param_id),
-            #                                 warp_thread_id_bin)
-            #
-            #                 new_simulation = True
-            #
-            #             cuda.syncwarp(thread_masks[2, sim_id, param_id])
-            #
-            #             if new_simulation:
-            #                 int_to_set_bit_to_zero = warp_thread_id_bin
-            #             else:
-            #                 int_to_set_bit_to_zero = 0
-            #
-            #             # and change the thread_masks of the current simulation by
-            #             # setting the bits of the reassigned x threads to 0
-            #             # by subtracting the int of setting each bit to 1
-            #             cuda.atomic.add(thread_masks, (1, sim_id, param_id),
-            #                             - int_to_set_bit_to_zero)
-            #
-            #             # first sync all threads of the simulation from which
-            #             # threads are removed, using the previous thread mask
-            #             # to make sure that the changes in thread masks and
-            #             # parallel cores are applied at next while loop
-            #             # iteration
-            #             cuda.syncwarp(thread_masks[2, sim_id, param_id])
-            #
-            #             cuda.atomic.add(thread_masks, (2, sim_id, param_id),
-            #                             - int_to_set_bit_to_zero)
-            #             # increasing the nb parallel cores for
-            #             # the target simulation
-            #             # is done in next while iteration since
-            #             # new_simulation is True and thread_masks idx 1 is
-            #             # changed
-            #
-            #             if new_simulation:
-            #
-            #                 # with all changes to the previous simulation
-            #                 # applied, the changes to the new simulation can be
-            #                 # applied now, without the need for the threads of
-            #                 # the previous simulation to wait
-            #
-            #                 if nb_reassigned_threads == 1:
-            #                     core_id = int(nb_parallel_cores[slowest_sim_id,
-            #                                                     slowest_param_id])
-            #                 else:
-            #                     # not implemented yet, first check whether
-            #                     # speedup is noticeable
-            #                     core_id = math.nan
-            #
-            #                 thread_to_sim_id[thread_id, 0] = slowest_sim_id
-            #                 thread_to_sim_id[thread_id, 1] = slowest_param_id
-            #
-            #                 _get_core_ids = _get_incrementing_core_ids_for_reassigned_thread
-            #                 thread_mask = thread_masks[3, slowest_sim_id,
-            #                                            slowest_param_id]
-            #                 core_id = _get_core_ids(thread_to_sim_id,
-            #                                         warp_nb,
-            #                                         thread_mask,
-            #                                         nb_parallel_cores,
-            #                                         last_thread,
-            #                                         thread_id, slowest_sim_id,
-            #                                         slowest_param_id)
-            #
-            #                 thread_to_sim_id[thread_id, 2] = core_id
-            #
-            #                 current_sim_nb = (slowest_param_id * nb_simulations *
-            #                                   start_nb_parallel_cores +
-            #                                   slowest_sim_id * start_nb_parallel_cores)
-            #
-            #                 # change the sim_id, param_id, core_id and current_sim_nb
-            #                 # of these threads accordingly
-            #                 sim_id = slowest_sim_id
-            #                 param_id = slowest_param_id
-            #
-            #                 cuda.syncwarp(thread_masks[3, slowest_sim_id,
-            #                                            slowest_param_id])
 
             if (timepoint_array[0, sim_id, param_id] >=
                     math.floor(min_time/time_resolution[0])):
@@ -497,10 +330,6 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                     # if core_id == 0:
                     #     print(iteration_nb, sim_id)
                     break
-                # print(sim_id, param_id, core_id, current_sim_nb)
-                # current_sim_nb += nb_processes
-                # break
-                # re_assigned = True
 
             if success == 0:
                 if core_id == 0:
@@ -510,7 +339,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
             #     if iteration_nb == 0:
             #         timepoint_array[0, sim_id, param_id] = math.floor(min_time / time_resolution[0])
 
-            # if iteration_nb == 1:
+            # if iteration_nb == 0:
             #     current_sim_nb += nb_processes
             #     if core_id == 0:
             #         print(3333, sim_id, times[0, sim_id, param_id])
@@ -2905,10 +2734,10 @@ def _determine_positions_of_transitions(current_transitions,
                         return
                 object_pos += 1
 
-            print(object_pos, current_sum, random_thresh,
-                  transition_rate,
-                  baseline_rate, start_state,
-                  nb_objects_all_states[int(start_state), sim_id, param_id])
+            # print(object_pos, current_sum, random_thresh,
+            #       transition_rate,
+            #       baseline_rate, start_state,
+            #       nb_objects_all_states[int(start_state), sim_id, param_id])
 
     return
 

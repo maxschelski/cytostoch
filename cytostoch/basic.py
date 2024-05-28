@@ -4,8 +4,80 @@ import time
 import math
 import numba
 import functools
+from . import simulation
 
 from matplotlib import pyplot as plt
+
+# @numba.cuda.jit
+# def _get_first_and_last_object_pos(nb_objects, nb_parallel_cores, core_id):
+#     objects_per_core = math.ceil(nb_objects / nb_parallel_cores)
+#     if core_id < 0:
+#         core_id_use = int(- (core_id + 1))
+#     else:
+#         core_id_use = int(core_id)
+#
+#     object_pos = objects_per_core * core_id_use
+#     last_object_pos = objects_per_core * (core_id_use + 1)
+#     last_object_pos = min(last_object_pos, nb_objects)
+#     # if core_id is negative, then it should be started from the back
+#     # (negative object positions)
+#     if core_id < 0:
+#         last_object_pos = int(- last_object_pos)
+#         if object_pos == 0:
+#             first_object_pos = -2
+#         else:
+#             first_object_pos = - object_pos
+#     else:
+#         first_object_pos = object_pos
+#     return int(first_object_pos), int(last_object_pos)
+
+@numba.cuda.jit
+def get_hist_data(input_data, bins, bin_size, output, nb_operations,
+                  first_last_idx_with_object):
+    nb_parallel_cores = 1
+    nb_processes = numba.cuda.gridsize(1)
+    current_operation = numba.cuda.grid(1)
+    nb_bins = bins.shape[0]
+    while current_operation < nb_operations:
+        param_nb = int(math.floor(current_operation /
+                                  (input_data.shape[2] * nb_parallel_cores)))
+        sim_nb = int(math.floor((current_operation -
+                                  param_nb * input_data.shape[2] * nb_parallel_cores)
+                                / nb_parallel_cores))
+        # core_id = int(current_operation -
+        #               param_nb * input_data.shape[2] * nb_parallel_cores -
+        #               sim_nb * nb_parallel_cores)
+
+        # (object_nb,
+        #  last_object_nb) = _get_first_and_last_object_pos(first_last_idx_with_object[1,sim_nb, param_nb] + 1,
+        #                                                   nb_parallel_cores,
+        #                                                   core_id)
+        object_nb = 0
+        while object_nb < first_last_idx_with_object[1,sim_nb, param_nb] + 1:
+            if not math.isnan(input_data[0, object_nb, sim_nb, param_nb]):
+                # go through each bin, with each bin being defined by the boundary
+                # of the current bin_nb and the next bin_nb
+                bin_nb = int(math.floor(input_data[0, object_nb,
+                                                   sim_nb, param_nb] / bin_size))
+                bin_nb = min(bin_nb, nb_bins-1)
+                # print(index, sim_nb, param_nb, bin_nb,
+                #       input_data[0, index,
+                #                  sim_nb, param_nb],
+                #       bin_size, input_data.shape[0],
+                #       input_data.shape[1], input_data.shape[2], input_data.shape[3])
+                # numba.cuda.atomic.add(output, (0, bin_nb, sim_nb, param_nb), 1)
+                # output[0, input_data[0, object_nb,
+                #                      sim_nb, param_nb], sim_nb, param_nb] += 1
+                output[0, bin_nb, sim_nb, param_nb] += 1
+                # bin_nb = 0
+                # while bin_nb < (nb_bins - 1):
+                #     if (bin_nb == (nb_bins - 2)) | (input_data[0, index, sim_nb, param_nb] < bins[bin_nb + 1]):
+                #         # numba.cuda.atomic.add(output, (0, bin_nb, sim_nb, param_nb),
+                #         #                       1)
+                #         break
+                #     bin_nb += 1
+            object_nb += 1
+        current_operation += nb_processes
 
 
 def _run_operation_2D_to_1D_density_numba(sim_id, param_id, object_states, properties_array, times,
@@ -353,12 +425,14 @@ class DataExtraction():
         else:
             self.operation = operation
 
-    def extract(self, simulation_object, regular_print=False):
+    def extract(self, simulation_object, regular_print=False, **kwargs):
+
+        all_kwargs = {**self.kwargs, **kwargs}
 
         if self.state_groups is None:
             data, _ = self.operation(self.dimensions, simulation_object,
                                      regular_print=regular_print,
-                                **self.kwargs)
+                                **all_kwargs)
             all_data = data
         elif type(self.state_groups) == str:
             if self.state_groups.lower() != "all":
@@ -373,8 +447,7 @@ class DataExtraction():
                                                   [state.number],
                                                       regular_print=
                                                       regular_print,
-                                                  **self.kwargs)
-
+                                                  **all_kwargs)
                 # extract the actual data and not auxiliary information
                 # which would be the same between different state groups
                 # due to same underlying space structure
@@ -387,7 +460,6 @@ class DataExtraction():
                         # add auxiliary information once
                         if name not in all_data.keys():
                             all_data[name] = data_vals
-
         else:
             all_data = {}
             for group_name, state_group in self.state_groups.items():
@@ -400,7 +472,7 @@ class DataExtraction():
                                                   state_numbers,
                                                       regular_print=
                                                       regular_print,
-                                                 **self.kwargs)
+                                                 **all_kwargs)
                 # extract the actual data and not auxiliary information
                 # which would be the same between different state groups
                 # due to same underlying space structure
@@ -408,7 +480,7 @@ class DataExtraction():
                     # data_col_names contains all names of the actual data
                     # which is different between state groups
                     if name in data_col_names:
-                        all_data[name+"_"+group_name] = data_vals
+                        all_data[name+ "_" + group_name] = data_vals
                     else:
                         # add auxiliary information once
                         if name not in all_data.keys():
@@ -416,27 +488,32 @@ class DataExtraction():
 
         return all_data
 
-    def _length_distribution(self, dimensions, simulation_object, state_numbers,
-                                bin_size=None, nb_bins=None, **kwargs):
 
+    def _length_distribution(self, dimensions, simulation_object, properties, state_numbers, max_length,
+                             first_last_idx_with_object,
+                             bin_size=None, nb_bins=None,
+                             **kwargs):
+
+        start = time.time()
         object_states = simulation_object.object_states
 
+        # get mask of each position not being in any of the state_numbers
         mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
         for state in state_numbers:
-            mask = (mask | (object_states == state))
+            mask = (mask & (object_states != state))
 
         # convert list or tuple of properties to dict by using property names
         # as key
         property_dict = {}
-        for property in dimensions[0].lengths:
-            property_dict[property.name] = property
+        for property_name, property in properties.items():
+            property_dict[property_name] = property
 
         # get data of properties from buffer (which contains data from multiple
         # iterations/timepoints). Also sum up multiple properties, if defined.
         analysis_properties = {}
         for name, property in property_dict.items():
             if type(property) in [list, tuple]:
-                property_array = 0
+                property_array = torch.zeros_like(property[0].array)
                 for sub_property in property:
                     sub_property_array = sub_property.array
                     # if regular_print:
@@ -444,32 +521,84 @@ class DataExtraction():
                     # else:
                     #     sub_property_array = torch.concat(sub_property.array_buffer)
                     property_array = property_array + sub_property_array
+                    # property_array = torch.nansum(torch.concat([property_array.unsqueeze(0),
+                    #                                             sub_property_array.unsqueeze(0)],
+                    #                                            dim=0),dim=0)
             else:
-                property_array = property.array
+                property_array = property.array.clone()
                 # if regular_print:
                 #     property_array = property.array.unsqueeze(0)
                 # else:
                 #     property_array = torch.concat(property.array_buffer)
 
-            property_array[~mask] = float("nan")
+            property_array[mask] = float("nan")
             analysis_properties[name] = property_array
 
         # create histogram of distributions for
 
         data_dict = {}
-        all_data_columns = {}
+        if nb_bins is None:
+            nb_bins = int(np.ceil(max_length / bin_size)) + 1
+        bins = np.linspace(0, max_length, nb_bins).astype(np.float32)
 
+        bins_torch = torch.linspace(0, max_length, nb_bins).to(torch.float32).to(simulation_object.device)
+
+        bins_cuda = numba.cuda.to_device(np.ascontiguousarray(bins))
         all_data_columns = ["number"]
+        first_last_idx_with_object = numba.cuda.to_device(np.ascontiguousarray(first_last_idx_with_object))
+        nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
+
         for name, values in analysis_properties.items():
-            all_state_values = values[mask]
-            range = all_state_values.max() - all_state_values.min()
-            if nb_bins is None:
-                nb_bins = np.ceil(range / bin_size)
-            value_hist = np.histogram(all_state_values, bins=nb_bins)
-            data_dict["length_hist_bins" + name] = value_hist[1]
-            data_dict["length_hist_numbers" + name] = value_hist[0]
-            all_data_columns.append("length_hist_bins" + name)
-            all_data_columns.append("length_hist_numbers" + name)
+            #all_state_values = values[mask].cpu()
+
+            # value_hist = np.histogram(all_state_values, bins=nb_bins, range=(0, max_length))
+            # bins = torch.linspace(0, max_length, nb_bins)
+            # bins = bins.to(simulation_object.device)
+
+            # get bin number for each value
+            # values_bin = torch.floor(values / bin_size).to(torch.int32)
+            # print(values_bin)
+            # values_bin = torch.bucketize(values, boundaries=bins_torch)
+            # print(values_bin)
+            # print(values)
+
+            hist = np.zeros((values.shape[0], nb_bins-1, *values.shape[2:]))
+            hist = numba.cuda.to_device(np.ascontiguousarray(hist))
+
+            nb_operations = values.shape[-1] * values.shape[-2]
+
+            values_cuda = numba.cuda.to_device(np.ascontiguousarray(np.array(values.cpu())))
+
+            get_hist_data[nb_SM, nb_cc](values_cuda, bins_cuda, bin_size, hist,
+                                        nb_operations,
+                                        first_last_idx_with_object)
+            numba.cuda.synchronize()
+            hist = hist.copy_to_host()
+
+            # test_hist = np.digitize(values.cpu(), bins=bins)
+            # # test_hist = torch.bucketize(values, boundaries=bins)
+            # def get_hist_data_np(data, nb_bins):
+            #     values, count = np.unique(data, return_counts=True)
+            #     # values, count = torch.unique(data, return_counts=True)
+            #     hist = np.zeros(nb_bins)
+            #     # hist = torch.zeros(nb_bins)
+            #     hist[values-1] = count
+            #     return hist
+            #
+            # from functools import partial
+            #
+            # get_hist_data_bins = partial(get_hist_data_np, nb_bins = nb_bins)
+            # hist_np = np.apply_along_axis(get_hist_data_bins, axis=1, arr=test_hist)[:,:-1]
+
+            # use numpy.histogram to compare results to custom implementation
+            # print(np.histogram(values.cpu(), bins=nb_bins, range=(0, max_length))[0]/values.cpu().shape[2])
+
+            bins = bins[:-1]
+
+            data_dict["length_hist_" + name+"_bins"] = torch.Tensor(bins).unsqueeze(0).unsqueeze(2).unsqueeze(3).expand(hist.shape)
+            data_dict["length_hist_" + name+"_numbers"] = torch.Tensor(hist)
+            all_data_columns.append("length_hist_" + name+"_bins")
+            all_data_columns.append("length_hist_" + name+"_numbers")
 
         return data_dict, all_data_columns
 
@@ -499,8 +628,10 @@ class DataExtraction():
         #     object_states = torch.concat(simulation_object.object_states_buffer)
 
         mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
+        mask_inv = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
         for state in state_numbers:
             mask = (mask | (object_states == state))
+            mask_inv = (mask_inv & (object_states != state))
 
         # convert list or tuple of properties to dict by using property names
         # as key
@@ -531,13 +662,13 @@ class DataExtraction():
                     #     sub_property_array = torch.concat(sub_property.array_buffer)
                     property_array = property_array + sub_property_array
             else:
-                property_array = property.array
+                property_array = property.array.clone()
                 # if regular_print:
                 #     property_array = property.array.unsqueeze(0)
                 # else:
                 #     property_array = torch.concat(property.array_buffer)
 
-            property_array[~mask] = float("nan")
+            property_array[mask_inv] = float("nan")
             analysis_properties[name] = property_array
 
         data_dict = {}
@@ -552,7 +683,7 @@ class DataExtraction():
             values[dimensions[0].positions[0].array < 0] = math.nan
             inside_mean_values = values.nanmean(dim=1).unsqueeze(1)
             data_dict["mean_inside_"+name] = inside_mean_values.cpu()
-            data_dict["mass_"+name] = (mean_values * object_number).cpu()
+            data_dict["mass_"+name] = (mean_values.cpu() * object_number.cpu())
             all_data_columns.append("mean_"+name)
             all_data_columns.append("mean_inside_"+name)
             all_data_columns.append("mass_"+name)
@@ -615,8 +746,10 @@ class DataExtraction():
             # else:
             #     object_states = torch.concat(simulation_object.object_states_buffer)
             mask = torch.zeros_like(object_states).to(torch.bool)
+            mask_inv = torch.zeros_like(object_states).to(torch.bool)
             for state in state_numbers:
                 mask = (mask | (object_states == state))
+                mask_inv = (mask_inv & (object_states != state))
             # get the maximum number of objects that should be analyzed
             # (from all simulations)
             # first sort mask so that first in the matrix there are all True
@@ -629,15 +762,18 @@ class DataExtraction():
             # then get the maximum of all simulations
             max_nb_objects = first_false_position.max()
 
+            idx = idx.to("cuda")
+
             # set all properties of objects outside of mask to NaN
             # also use the maximum number of objects of interest for all
             # simulations, to discard all parts of the sorted array that only
             # contains objects which are not of interest
-            position_array[~mask] = float("nan")
-            position_array = torch.gather(position_array, dim=1, index=idx)
+            position_array[mask_inv] = float("nan")
+            position_array = torch.gather(position_array, dim=1,
+                                          index=idx)
             position_array = position_array[:, :max_nb_objects]
 
-            length_array[~mask] = float("nan")
+            length_array[mask_inv] = float("nan")
             length_array = torch.gather(length_array, dim=1, index=idx)
             length_array = length_array[:, :max_nb_objects]
 

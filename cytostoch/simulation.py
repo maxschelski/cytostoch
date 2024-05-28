@@ -26,6 +26,7 @@ import seaborn as sns
 from . import analyzer
 from .basic import PropertyGeometry
 from . import simulation_numba
+import tqdm
 
 """
 This is for single type modeling! (e.g. just MTs or actin) 
@@ -420,13 +421,15 @@ class SSA():
 
         return property_extreme_values
 
-    def _get_parameter_value_array(self):
+    def _get_parameter_value_array(self, param_shape_batch, param_slice):
         nb_parameters = len(self.parameters)
-        parameter_value_shape = self.parameters[0].value_array.shape
-        parameter_value_array = np.zeros((nb_parameters,
-                                          *parameter_value_shape))
+        # parameter_value_shape = self.parameters[0].value_array.shape
+        parameter_value_array = np.zeros((nb_parameters, *param_shape_batch))
         for nb, parameter in enumerate(self.parameters):
-            parameter_value_array[nb] = parameter.value_array
+            array = parameter.value_array[param_slice]
+            array = array.expand((1, *param_shape_batch))
+            array = np.array(array.reshape((array.shape[1], -1)))
+            parameter_value_array[nb] = array
         return parameter_value_array
 
     def _get_transition_parameters(self):
@@ -658,6 +661,117 @@ class SSA():
             object_removal_operations[removal_nb, 1] = object_removal.threshold
         return object_removal_operations
 
+    def get_first_last_idx_with_object(self, object_states):
+        # get an array to save the highest index with an object
+        idx_array = np.expand_dims(np.arange(self.object_states.shape[0]),
+                                   axis=[nb+1 for nb
+                                         in
+                                         range(len(self.object_states.shape[1:])
+                                               )])
+        object_state_mask = object_states[0] > 0
+        highest_idx_with_object = (object_state_mask * idx_array).max(axis=0)
+        highest_idx_with_object = np.expand_dims(highest_idx_with_object,0)
+
+        object_state_mask = object_states[0] == 0
+        lowest_idx_no_object = (object_state_mask * idx_array).min(axis=0)
+        lowest_idx_no_object = np.expand_dims(lowest_idx_no_object,0)
+
+        first_last_idx_with_object = np.concatenate([lowest_idx_no_object,
+                                                     highest_idx_with_object],
+                                                    axis=0)
+        return first_last_idx_with_object
+
+    def _get_param_pos_dependence_array(self):
+        """
+        # implement linearly changing parameters,
+        # as added to normal/baseline parameter value
+        # as two values: value at start and/or end of neurite,
+        # if both are defined, then the change per um is calculated
+        # and definitions of change per um etc are not taken into
+        # account
+        # if one of the values is defined then the change from that
+        # position (start or end of neurite) is defined by:
+        # absolute or relative change per um or per % of length
+        # Thereby, the added linearly changing part might even go to 0
+        # array shape:
+        # (nb_params,
+        #  5 (2 (start+end) + 1 (abs/rel of parameter)
+        #     + 1 (um/% of length) + 1 (change) + 1 (idx in object_rates),
+        #  param_value_shape)
+        # for different simulations all parameters can be defined
+        # separately.
+
+        # For position dependent rates, to choose the correct object
+        # for a state transition, the position of the object has to
+        # be taken into account - not every object has the same chance
+        # of transitioning. Therefore, the position dependent rate of
+        # an object must be saved.
+        # A parameter might be used in more than one transition and
+        # therefore the same position dependence might influence more
+        # than one transition. However, since the position dependence
+        # is exactly the same, the position dependent rate will also be
+        # the same for that object. Only the baseline rate might be
+        # different. Therefore, one object value per dependence is
+        # sufficient.
+        """
+
+        params_pos_dependence = np.full((len(self.parameters),
+                                         6),
+                                        np.nan)
+        position_dependence = False
+        dependence_nb = 0
+        for param_nb, parameter in enumerate(self.parameters):
+            if parameter.dependence is None:
+                continue
+            position_dependence = True
+            # so far only linear dependence on space are allowed
+            dependence = parameter.dependence
+            if type(dependence.start_val) == type(self.parameters[0]):
+                start_val_param_nb = dependence.start_val.number
+                params_pos_dependence[param_nb, 0] = start_val_param_nb
+            if type(dependence.end_val) == type(self.parameters[0]):
+                end_val_param_nb = dependence.end_val.number
+                params_pos_dependence[param_nb, 1] = end_val_param_nb
+            # if the start and end values are defined but no change
+            # calculate the linear change from the start to the end val
+            if ((dependence.start_val is not None) &
+                    (dependence.end_val is not None) &
+                    (dependence.param_change is None)):
+                # use absolute changes of parameter
+                params_pos_dependence[param_nb, 2] = 0
+                # change is per um length
+                params_pos_dependence[param_nb, 3] = 0
+
+                # start_val_param = dependence.start_val
+                # end_val_param = dependence.end_val.number
+                # param_diff = (start_val_param.value_array -
+                #               end_val_param.value_array)
+                # abs_change = param_diff / self.properties[0].max_value
+                params_pos_dependence[param_nb, 4] = math.nan
+                dependence_nb += 1
+                continue
+
+            # if rel_change is 0, then the change is absolute
+            if dependence.param_change_is_abs:
+                rel_param_change = 0
+            else:
+                rel_param_change = 1
+            params_pos_dependence[param_nb, 2] = rel_param_change
+
+            if dependence.pos_change_is_abs:
+                rel_length_change = 0
+            else:
+                rel_length_change = 1
+            params_pos_dependence[param_nb, 3] = rel_length_change
+
+            change_param = dependence.param_change
+            params_pos_dependence[param_nb, 4] = change_param.number
+
+            params_pos_dependence[param_nb, 5] = dependence_nb
+            dependence_nb += 1
+
+        return params_pos_dependence, position_dependence, dependence_nb
+
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, save_initial_state=False,
                max_number_objects=None, all_parameter_combinations=False,
@@ -729,6 +843,7 @@ class SSA():
         self.save_states = save_states
         self.save_results = save_results
         self.print_times = print_times
+        self.max_number_objects = max_number_objects
         self.use_assertion_checks = use_assertion_checks
         self.max_iters_no_data_extraction = max_iters_no_data_extraction
         self.remove_finished_sims = remove_finished_sims
@@ -755,110 +870,12 @@ class SSA():
 
         self.all_removed_positions = pd.DataFrame()
 
-        # get different parameters from all events#, so that no parameter is
-        # used twice (some transitions may have the same parameter)
-        parameters = [event.parameter for event in [*self.transitions,
-                                                    *self.actions]]
-        param_nb = 0
-        self.parameters = []
-        for parameter in parameters:
-            if parameter.number is None:
-                parameter.number = param_nb
-                if parameter.name == "":
-                    parameter.name = str(parameter.number)
-                param_nb += 1
-                self.parameters.append(parameter)
-
-        # first get all unique dependencies
-        self.dependencies = []
-        dependence_nb = 0
-        for parameter in self.parameters:
-            dependence = parameter.dependence
-            if dependence is None:
-                continue
-            dependence.number = dependence_nb
-            if dependence.name == "":
-                dependence.name = str(dependence.number)
-            dependence_nb += 1
-            self.dependencies.append(dependence)
-
-        # then go through each dependency and extract parameters
-        for dependence in self.dependencies:
-            all_potential_params = [dependence.start_val, dependence.end_val,
-                                    dependence.param_change,
-                                    dependence.param_change_is_abs,
-                                    dependence.pos_change_is_abs]
-            for potential_param in all_potential_params:
-                if type(potential_param) == type(self.parameters[0]):
-                    # check whether parameter was already used somewhere else
-                    # and therefor is already in the self.parameters array
-                    # by checking whether the number is defined
-                    # (as done above when getting the first set of parameters)
-                    if potential_param.number is None:
-                        potential_param.number = param_nb
-                        self.parameters.append(potential_param)
-                        param_nb += 1
+        self._get_all_parameters()
 
         # create list with all transitions and then with all actions
         self._all_simulation_parameters = [*self.states, *self.parameters]
 
-        # create list of length of all model parameters
-        simulation_parameter_lengths = [len(parameters.values)
-                                        for parameters
-                                        in self._all_simulation_parameters]
-
-
-        # check whether each parameter either only has a single value
-        # or has a length that is similar between all parameters with more than
-        # one value
-        if (not single_parameter_changes) & (not all_parameter_combinations):
-            unique_param_lengths = set(simulation_parameter_lengths)
-            param_lengths = unique_param_lengths - set([1])
-            if len(param_lengths) > 1:
-                raise ValueError("If single_parameter_changes is False, then each "
-                                 "parameter can either have one value defined "
-                                 "or as many values defined as all other "
-                                 "parameters that have more than one value "
-                                 "defined. However, at least one parameter "
-                                 "has a different number of values defined.")
-
-        if not single_parameter_changes:
-            simulation_parameter_lengths = [nb
-                                              for nb
-                                              in simulation_parameter_lengths
-                                              if nb > 1]
-            if len(simulation_parameter_lengths) == 0:
-                simulation_parameter_lengths = [1]
-            else:
-                simulation_parameter_lengths = [simulation_parameter_lengths[0]]
-
-        elif not all_parameter_combinations:
-            # if not all parameter combinations should be used
-            # use the first parameter value as the standard and the other as single
-            # changes that should be done (while leaving the other parameters
-            # undchanged) - therefore for each simulation only one parameter is
-            # changed from the standard set of parameter values
-
-            # the number of simulations is 1 (for all standard parameter values)
-            # plus the number of parameters beyond the standard parameter values
-            # (which is the number of parameter values minus 1 for each
-            # parameter)
-            simulation_parameter_lengths = (np.sum(simulation_parameter_lengths)
-                                            - len(simulation_parameter_lengths)
-                                            + 1)
-            simulation_parameter_lengths = [simulation_parameter_lengths]
-
-        if dynamically_increase_nb_objects | (max_number_objects is None):
-            # if the number of objects allowed in the simulation should be
-            # dynamically increased, first check the maximum number of objects
-            # that the simulation starts with
-            max_number_objects = self._get_initial_max_nb_objects()
-            # add the nb_objects_added_per_step to the maximum number of objects
-            # to obtain the starting simulation array size
-            self.max_number_objects = (max_number_objects +
-                                       nb_objects_added_per_step)
-        else:
-            self.max_number_objects = max_number_objects
+        simulation_parameter_lengths = self._get_simulation_parameter_lengths()
 
         # array size contains for each combination of parameters to explore
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
@@ -869,7 +886,6 @@ class SSA():
                                           single_parameter_changes,
                                           all_parameter_combinations)
 
-        self.times = torch.zeros((1,*self._simulation_array_size[1:]))
 
         # create index array in which each entry has the value of the index of
         # the microtubule in the simulation, thereby multi-D operations
@@ -881,10 +897,6 @@ class SSA():
         self.index_array = torch.linspace(1, max_number_objects,
                                           max_number_objects,
                                           dtype=torch.int16).view(*view_array)
-
-        self._initialize_object_states()
-
-        self._initialize_object_properties()
 
         # self.get_tensor_memory()
 
@@ -898,20 +910,6 @@ class SSA():
         #
         # self._save_data(data, 0)
 
-        # reshape to have all different parameter values in one axis
-        # with the first axis being the number of objects
-        self.times = np.array(self.times.reshape((self.times.shape[0],
-                                                  self.times.shape[1], -1)))
-
-        self.object_states = self.object_states.reshape((self.object_states.shape[0],
-                                                         self.object_states.shape[1],
-                                                         -1))
-
-        for property in self.properties:
-            property.array = property.array.reshape((property.array.shape[0],
-                                                     property.array.shape[1],
-                                                     -1))
-            property.array = np.array(property.array)
 
         # self._add_data_to_buffer()
         self._save_simulation_parameters()
@@ -926,15 +924,12 @@ class SSA():
 
         # create arrays with the parameter size to be explored in one round
 
-        object_states = np.array(self.object_states)
 
         property_start_values = self._get_property_start_val_arrays()
 
         properties_array = self._get_property_vals_array()
 
         property_extreme_values = self._get_property_extreme_val_arrays()
-
-        parameter_value_array = self._get_parameter_value_array()
 
         transition_parameters = self._get_transition_parameters()
         all_transition_states = self._get_transition_state_arrays()
@@ -955,224 +950,45 @@ class SSA():
         all_object_removal_properties = self.get_object_removal_property_array()
         object_removal_operations = self._get_object_removal_property_array()
 
-        parameter_shape = self.object_states.shape[1:]
+        parameter_shape = simulation_parameter_lengths
+        # nb_simulations = self.object_states.shape[1]
 
         start_nb_parallel_cores = nb_parallel_cores
-
-        # all parameters for nucleation on objects
-        nb_properties = len(self.properties)
-        end_position_tmax_array = np.zeros((32,
-                                            nb_properties-1, *parameter_shape))
-        properties_tmax_array = np.zeros((32,
-                                          nb_properties-1, nb_properties,
-                                          *parameter_shape))
-        # first dimensions is unsorted and sorted
-        properties_tmax = np.full((2, 32,
-                                   nb_properties-1, *parameter_shape),
-                                  math.nan)
-        # properties_tmax_sorted = np.full((32,
-        #                                   nb_properties-1, *parameter_shape),
-        #                                  math.nan)
-        current_sum_tmax = np.zeros((32,
-                                     nb_properties, *parameter_shape))
-        property_changes_tminmax_array = np.zeros((2, max_number_objects,
-                                                nb_properties,
-                                                *parameter_shape),
-                                                  dtype=np.float32)
-        property_changes_per_state = np.zeros((len(self.states), nb_properties,
-                                              *parameter_shape))
-        nucleation_changes_per_state = np.copy(property_changes_per_state)
-        total_property_changes = np.zeros((len(self.states), *parameter_shape))
-
-        density_threshold_boundaries = np.zeros((3, *parameter_shape))
-
-        # -  current rates of all transitions (empty)
-        nb_transitions = len(self.transitions)
-        current_transition_rates = np.zeros((nb_transitions,
-                                             *self.object_states.shape[1:]))
-        # print(action_parameters, transition_parameters,
-        #       current_parameter_values.shape,
-        #       parameter_value_array.shape)
-
-        # - all total transition rates (empty)
-        total_rates = np.zeros(self.object_states.shape[1:])
-
-        # - current reaction times (empty)
-        reaction_times = np.zeros(self.object_states.shape[1:])
-
-        current_transitions = np.zeros(self.object_states.shape[1:])
-
-        all_transition_positions = np.zeros(self.object_states.shape[1:])
-
-        # calculate number of objects for all states
-        nb_objects_all_states = np.zeros((len(self.states)+1,
-                                          *self.object_states.shape[1:]))
-        nb_objects_all_states[0] = self.object_states.shape[0]
-        for state_nb, state in enumerate(self.states):
-            nb_objects_all_states[state_nb+1] = np.sum(object_states ==
-                                                     state.number, axis=0)
-
-        # get number of timepoints
-        nb_timepoints = math.ceil(self.min_time/time_resolution)
-        if save_initial_state:
-            nb_timepoints += 1
-
-        # set arrays for values over time
-        # the first index is the current timepoint with respect to
-        # time_resolution
-        # the second index with respect to the timestep for reassigning threads
-        # from the third idx the actual timepoints at the respective savepoint
-        # are saved
-        timepoint_array = np.full((nb_timepoints + 2,
-                                   *self.object_states.shape[1:]),
-                                  math.nan)
-
-        timepoint_array[:1] = 0
-
-        if save_initial_state:
-            timepoint_array[2] = 0
-
-        # create new object states object that includes data for all timepoints
-        object_states = np.zeros((nb_timepoints+1,
-                                  *self.object_states.shape), dtype=np.int32)
-
-        object_states[0] = self.object_states
-
-        if save_initial_state:
-            object_states[1] = self.object_states
-
-        nb_properties = len(self.properties)
-
-
-        properties_array = np.full((nb_timepoints+1, nb_properties,
-                                         *self.object_states.shape),
-                                        math.nan)
-
-        if save_initial_state:
-            for property_nb, property in enumerate(self.properties):
-                properties_array[1, property_nb] = property.array
 
         # current_min_time = np.min(self.times)
         # if current_min_time >= min_time:
         #     break
         convert_array = lambda x: np.ascontiguousarray(x)
 
-        timepoint_array = convert_array(timepoint_array)
-        properties_array = convert_array(properties_array)
         time_resolution = convert_array(time_resolution)
-
-
-
-        # get an array to save the highest index with an object
-        idx_array = np.expand_dims(np.arange(self.object_states.shape[0]),
-                                   axis=[nb+1 for nb
-                                         in
-                                         range(len(self.object_states.shape[1:])
-                                               )])
-        object_state_mask = object_states[0] > 0
-        highest_idx_with_object = (object_state_mask * idx_array).max(axis=0)
-        highest_idx_with_object = np.expand_dims(highest_idx_with_object,0)
-
-        object_state_mask = object_states[0] == 0
-        lowest_idx_no_object = (object_state_mask * idx_array).min(axis=0)
-        lowest_idx_no_object = np.expand_dims(lowest_idx_no_object,0)
-
-        first_last_idx_with_object = np.concatenate([lowest_idx_no_object,
-                                                     highest_idx_with_object],
-                                                    axis=0)
 
         seed = 42
 
         device = "gpu"
 
-        nb_simulations = self.object_states.shape[1]
-        nb_parameter_combinations = self.object_states.shape[2]
+        nb_parameter_combinations = np.sum(simulation_parameter_lengths)
 
         local_resolution = 0.02
         local_density_size = int(20 / local_resolution) + 1
-        local_density = np.zeros((3, local_density_size, nb_simulations,
-                                  nb_parameter_combinations))
-
-        total_density = np.zeros((nb_simulations, nb_parameter_combinations))
-
-        # first idx of first dimension is for constant term,
-        # second idx of first dimension is for second order term
-        # first idx of second dimension is for base part, second idx is for
-        # variable part
-        tau_square_eq_terms = np.zeros((2, 2, nb_simulations, nb_parameter_combinations))
-
-        thread_masks = np.zeros((4, *parameter_shape), dtype=np.int64)
 
         if np.nansum(creation_on_objects) > 0:
             some_creation_on_objects = True
         else:
             some_creation_on_objects = False
 
-        nb_parallel_cores = np.zeros(parameter_shape)
+        nb_parallel_cores = np.zeros((nb_simulations,
+                                      *simulation_parameter_lengths))
         nb_parallel_cores[:,:] = start_nb_parallel_cores
 
         local_density_batches = None
         total_density_batches = None
 
-        params_pos_dependence = np.full((len(self.parameters),
-                                         6),
-                                        np.nan)
-        position_dependence = False
-        dependence_nb = 0
-        for param_nb, parameter in enumerate(self.parameters):
-            if parameter.dependence is None:
-                continue
-            position_dependence = True
-            # so far only linear dependence on space are allowed
-            dependence = parameter.dependence
-            if type(dependence.start_val) == type(self.parameters[0]):
-                start_val_param_nb = dependence.start_val.number
-                params_pos_dependence[param_nb, 0] = start_val_param_nb
-            if type(dependence.end_val) == type(self.parameters[0]):
-                end_val_param_nb = dependence.end_val.number
-                params_pos_dependence[param_nb, 1] = end_val_param_nb
-            # if the start and end values are defined but no change
-            # calculate the linear change from the start to the end val
-            if ((dependence.start_val is not None) &
-                    (dependence.end_val is not None) &
-                    (dependence.param_change is None)):
-                # use absolute changes of parameter
-                params_pos_dependence[param_nb, 2] = 0
-                # change is per um length
-                params_pos_dependence[param_nb, 3] = 0
+        (params_pos_dependence,
+         position_dependence,
+         nb_dependences) = self._get_param_pos_dependence_array()
 
-                # start_val_param = dependence.start_val
-                # end_val_param = dependence.end_val.number
-                # param_diff = (start_val_param.value_array -
-                #               end_val_param.value_array)
-                # abs_change = param_diff / self.properties[0].max_value
-                params_pos_dependence[param_nb, 4] = math.nan
-                dependence_nb += 1
-                continue
-
-            # if rel_change is 0, then the change is absolute
-            if dependence.param_change_is_abs:
-                rel_param_change = 0
-            else:
-                rel_param_change = 1
-            params_pos_dependence[param_nb, 2] = rel_param_change
-
-            if dependence.pos_change_is_abs:
-                rel_length_change = 0
-            else:
-                rel_length_change = 1
-            params_pos_dependence[param_nb, 3] = rel_length_change
-
-            change_param = dependence.param_change
-            params_pos_dependence[param_nb, 4] = change_param.number
-
-            params_pos_dependence[param_nb, 5] = dependence_nb
-            dependence_nb += 1
-
-        object_dependent_rates = np.zeros((dependence_nb,
-                                           *self.object_states.shape
-                                           ))
-
+        print(0, numba.cuda.current_context().get_memory_info()[
+            0] / 1024 / 1024 / 1024)
         if self.device.find("cuda") != -1:
 
             start = time.time()
@@ -1182,21 +998,11 @@ class SSA():
             # get number of cuda stream managers and cores per stream manager
             nb_SM, nb_cc = self._get_number_of_cuda_cores()
 
-            # get way to get unique number for each combination of simulation
-            # and parameter combination
-            parameters_log10 = math.log10(nb_parameter_combinations)
-            simulations_log10 = math.log10(nb_simulations)
-            if parameters_log10 < simulations_log10:
-                simulation_factor = int(10**(math.floor(parameters_log10) + 1))
-                parameter_factor = 1
-            else:
-                simulation_factor = 1
-                parameter_factor = int(10**(math.floor(simulations_log10) + 1))
-
-            nb_states = ((nb_parameter_combinations+1) * parameter_factor +
-                         (nb_simulations+1) * simulation_factor)
-            random_number_func = numba.cuda.random.create_xoroshiro128p_states
-            rng_states = random_number_func(nb_states, seed=seed)
+            (rng_states,
+             simulation_factor,
+             parameter_factor) = self._get_random_number_func(nb_parameter_combinations,
+                                                              nb_simulations,
+                                                              seed)
 
             # get free GPU memory if device is cuda, to do calculations in batches
             # that fit on the GPU
@@ -1207,22 +1013,48 @@ class SSA():
             # the size depends on
 
             # get size of object states
-            size_states = (object_states[0].size *
-                           object_states[0].itemsize)
+
+            object_state = torch.zeros((1,), dtype=torch.int8)
+            size_states = (np.prod(self._simulation_array_size,
+                                   dtype=np.int64) *
+                           object_state.element_size())
 
             # get size of properties times the number of properties+
-            size_properties = (len(self.properties) *
-                               self.properties[0].array.size *
-                               self.properties[0].array.itemsize)
+            object_property = torch.zeros((1,), dtype=torch.float32)
+            size_properties = (np.prod((len(self.properties),
+                                        *self._simulation_array_size),
+                                       dtype=np.int64) *
+                               object_property.element_size())
 
-            size_density = (np.product(local_density.shape) *
-                            local_density.itemsize)
+            # object_states = np.array(self.object_states)
+            size_density = (np.product((3, local_density_size, nb_simulations,
+                                        nb_parameter_combinations),
+                                               dtype=np.int64) *
+                            object_property.element_size())
 
-            size_tminmax = (property_changes_tminmax_array.size *
-                            property_changes_tminmax_array.itemsize)
+            size_tminmax = (np.product((2, len(self.properties),
+                                        *self._simulation_array_size),
+                                       dtype=np.int64) *
+                            object_property.element_size())
+
+            size_property_changes = (np.product((2, len(self.properties),
+                                                *self._simulation_array_size),
+                                               dtype=np.int64) *
+                                     object_property.element_size())
+
+            size_object_dep_rates = (np.product((nb_dependences,
+                                               *self._simulation_array_size
+                                               ), dtype=np.int64)
+                                     * object_property.element_size())
+
+            # get number of timepoints
+            nb_timepoints = math.ceil(self.min_time / time_resolution)
+            if save_initial_state:
+                nb_timepoints += 1
 
             total_size = ((nb_timepoints+1) * (size_states + size_properties)
-                          + size_density + size_tminmax)
+                          + size_density + size_tminmax
+                          + size_property_changes + size_object_dep_rates)*1.4
 
             # think about sorting parameter values in the array by
             # their magnitude - higher transition rates should be separate from
@@ -1236,6 +1068,7 @@ class SSA():
             # if total size is larger than free memory on GPU
             # split array by number of parameters into smaller pieces
             nb_memory_batches = int(math.ceil(total_size/free_memory))
+
             # also check how many parameter combinations can be processed
             # with the number of cuda cores available
             # total_nb_simulations = (self.object_states.shape[1] *
@@ -1245,124 +1078,266 @@ class SSA():
 
             nb_batches = max(nb_memory_batches, 1)
 
-            parameter_combinations_per_batch = int(math.floor(
-                (nb_parameter_combinations / nb_batches)))
+            param_combinations_per_batch = max(1,
+                                               int(math.floor(
+                                                   (nb_parameter_combinations
+                                                    / nb_batches))))
 
-            size = min(nb_simulations*start_nb_parallel_cores,
-                       int((nb_SM*nb_cc)))
-
-            thread_to_sim_id = np.zeros((size, 3))
-
-            # all_sims = np.array(range(nb_simulations))
-            # randomize_sim_order = False
-            #
-            # if randomize_sim_order:
-            #     np.random.seed(seed)
-            #     sim_nb_order = np.random.choice(all_sims,
-            #                                     size=nb_simulations,
-            #                                     replace=False)
-            # else:
-            #     sim_nb_order = all_sims
-            #
-            # thread_to_sim_id[:,0] = np.repeat(sim_nb_order,
-            #                                   start_nb_parallel_cores)
-            # base_cores = []
-            # for core_nb in range(start_nb_parallel_cores):
-            #     base_cores.append(core_nb)
-            # cores = np.array(base_cores*nb_simulations)
-            # thread_to_sim_id[:, 2] = cores
-            # thread_to_sim_id[:, 1] = 0
+            # if there is more than one batch and the number of parameter
+            # combinations is not divisably by the number of batches,
+            # add one to the number of batches
+            if (nb_batches > 1) & (nb_parameter_combinations % nb_batches != 0):
+                nb_batches += 1
 
             simulation_numba._decorate_all_functions_for_gpu(self)
             object_states_batches = None
             properties_batches_array = None
             times_batches = None
 
+            if nb_batches > nb_parameter_combinations:
+                raise ValueError("GPU memory too small to support all "
+                                 "simulations of one parameter value. Batching "
+                                 "is only implemented for parameter values. "
+                                 "reduce the number of simulations or use a "
+                                 "GPU with more memory.")
+
+            nb_batches = 2
+            param_combinations_per_batch = 500
+
             nb_parallel_cores = to_cuda(convert_array(nb_parallel_cores))
 
-            for batch_nb in range(nb_batches):
+            # are property arrays expanded upon definition?
+            # are parameter value arrays expanded upon definition?
+
+            param_shape_batch = (nb_simulations,
+                                 param_combinations_per_batch)
+
+            print(f"Simulating {nb_batches} batches... \n")
+            print(1, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+            for batch_nb in tqdm.tqdm(range(nb_batches)):
 
                 start_parameter_comb = (batch_nb *
-                                        parameter_combinations_per_batch)
+                                        param_combinations_per_batch)
                 end_parameter_comb = (start_parameter_comb +
-                                      parameter_combinations_per_batch)
+                                      param_combinations_per_batch)
                 param_slice = slice(start_parameter_comb, end_parameter_comb)
 
+                parameter_value_array = self._get_parameter_value_array(param_shape_batch,
+                                                                        param_slice)
+
+                object_dependent_rates = np.zeros((nb_dependences,
+                                                   max_number_objects,
+                                                   *param_shape_batch
+                                                   ))
+
+                self._initialize_object_states(param_shape_batch)
+
+                self._initialize_object_properties(param_shape_batch)
+
+                self.object_states = self.object_states.reshape(
+                    (self.object_states.shape[0],
+                     self.object_states.shape[1],
+                     -1))
+
+                for property in self.properties:
+                    property.array = property.array.reshape(
+                        (property.array.shape[0],
+                         property.array.shape[1],
+                         -1))
+                    property.array = np.array(property.array)
+
+                self.times = torch.zeros((1, *param_shape_batch))
+
+                # reshape to have all different parameter values in one axis
+                # with the first axis being the number of objects
+                self.times = np.array(self.times.reshape((self.times.shape[0],
+                                                          self.times.shape[1],
+                                                          -1)))
+
+                # all parameters for nucleation on objects
+                nb_properties = len(self.properties)
+                end_position_tmax_array = np.zeros((32,
+                                                    nb_properties - 1,
+                                                    *param_shape_batch))
+                properties_tmax_array = np.zeros((32,
+                                                  nb_properties - 1,
+                                                  nb_properties,
+                                                  *param_shape_batch))
+                # first dimensions is unsorted and sorted
+                properties_tmax = np.full((2, 32,
+                                           nb_properties - 1, *param_shape_batch),
+                                          math.nan)
+                # properties_tmax_sorted = np.full((32,
+                #                                   nb_properties-1, *param_shape_batch),
+                #                                  math.nan)
+                current_sum_tmax = np.zeros((32,
+                                             nb_properties, *param_shape_batch))
+                property_changes_tminmax_array = np.zeros(
+                    (2, max_number_objects,
+                     nb_properties,
+                     *param_shape_batch),
+                    dtype=np.float32)
+
+                property_changes_per_state = np.zeros(
+                    (len(self.states), nb_properties,
+                     *param_shape_batch))
+                nucleation_changes_per_state = np.copy(
+                    property_changes_per_state)
+                total_property_changes = np.zeros(
+                    (len(self.states), *param_shape_batch))
+
+                density_threshold_boundaries = np.zeros((3, *param_shape_batch))
+
+                # -  current rates of all transitions (empty)
+                nb_transitions = len(self.transitions)
+                current_transition_rates = np.zeros((nb_transitions,
+                                                     *param_shape_batch))
+                # print(action_parameters, transition_parameters,
+                #       current_parameter_values.shape,
+                #       parameter_value_array.shape)
+
+                # - all total transition rates (empty)
+                total_rates = np.zeros(param_shape_batch)
+
+                # - current reaction times (empty)
+                reaction_times = np.zeros(param_shape_batch)
+
+                current_transitions = np.zeros(param_shape_batch)
+
+                all_transition_positions = np.zeros(param_shape_batch)
+
+                # create new object states object that includes data for all timepoints
+                object_states = np.zeros((nb_timepoints + 1,
+                                          self.object_states.shape[0],
+                                          *param_shape_batch),
+                                         dtype=np.int32)
+
+                object_states[0] = self.object_states
+
+                if save_initial_state:
+                    object_states[1] = self.object_states
+
+                # calculate number of objects for all states
+                nb_objects_all_states = np.zeros((len(self.states) + 1,
+                                                  *param_shape_batch))
+                nb_objects_all_states[0] = self.object_states.shape[0]
+
+                for state_nb, state in enumerate(self.states):
+                    nb_objects_all_states[state_nb + 1] = np.sum(
+                        object_states[0] == state.number, axis=0)
+
+                nb_properties = len(self.properties)
+
+                properties_array = np.full((nb_timepoints + 1, nb_properties,
+                                            self.object_states.shape[0],
+                                            *param_shape_batch),
+                                           math.nan)
+
+                if save_initial_state:
+                    for property_nb, property in enumerate(self.properties):
+                        properties_array[1, property_nb] = property.array
+
+
+                local_density = np.zeros((3, local_density_size, nb_simulations,
+                                          param_combinations_per_batch))
+
+                total_density = np.zeros(
+                    (nb_simulations, param_combinations_per_batch))
+
+                # first idx of first dimension is for constant term,
+                # second idx of first dimension is for second order term
+                # first idx of second dimension is for base part, second idx is for
+                # variable part
+                tau_square_eq_terms = np.zeros(
+                    (2, 2, nb_simulations, param_combinations_per_batch))
+
+                thread_masks = np.zeros((4, *param_shape_batch), dtype=np.int64)
+
+                # set arrays for values over time
+                # the first index is the current timepoint with respect to
+                # time_resolution
+                # the second index with respect to the timestep for reassigning threads
+                # from the third idx the actual timepoints at the respective savepoint
+                # are saved
+                timepoint_array = np.full((nb_timepoints + 2,
+                                           *param_shape_batch),
+                                          math.nan)
+
+                timepoint_array[:1] = 0
+
+                if save_initial_state:
+                    timepoint_array[2] = 0
+
+                timepoint_array = convert_array(timepoint_array)
+                properties_array = convert_array(properties_array)
+                first_last_idx_with_object = self.get_first_last_idx_with_object(
+                    object_states)
+
+                size = min(nb_simulations * param_combinations_per_batch
+                           * start_nb_parallel_cores,
+                           int((nb_SM * nb_cc)))
+
+                thread_to_sim_id = np.zeros((size, 3))
+
+                """
+                Batched data:
+
+                Initial state dependent:
+                object_states
+                properties_array
+                nb_objects_all_states
+                all_transition_positions
+                # for batching don't allow initial states
+                
+                Should additionally be batched:
+                
+                initial cond dependent:
+                first_last_idx_with_object
+                """
+
                 local_density_batch = cuda.to_device(
-                    convert_array(local_density[:,: ,:,param_slice]))
+                    convert_array(local_density))
                 total_density_batch = cuda.to_device(
-                    convert_array(total_density[:,param_slice]))
+                    convert_array(total_density))
 
                 timepoint_array_batch = cuda.to_device(
-                    convert_array(timepoint_array[:,:,param_slice]))
+                    convert_array(timepoint_array))
                 time_resolution = cuda.to_device(time_resolution)
 
                 sim = simulation_numba._execute_simulation_gpu
 
-                object_states_batch = convert_array(object_states[:,:,:,param_slice])
+                object_states_batch = convert_array(object_states)
                 object_states_batch = to_cuda(object_states_batch)
 
-                object_dependent_rates_batch = object_dependent_rates[:,:,:,
-                                               param_slice]
+                object_dependent_rates_batch = object_dependent_rates
                 object_dependent_rates_batch = convert_array(to_cuda(
                     object_dependent_rates_batch))
 
-                property_array_batch = properties_array[:,:,:,:,param_slice]
+                property_array_batch = properties_array
                 property_array_batch = convert_array(property_array_batch)
                 property_array_batch = to_cuda(property_array_batch)
 
-                times_batch = self.times[:,:,param_slice]
-                param_val_array_batch = parameter_value_array[:,:,param_slice]
-                current_trans_rates = current_transition_rates[:,:,param_slice]
-                nb_obj_all_states_batch = nb_objects_all_states[:,:,param_slice]
 
-                total_rates_batch = total_rates[:,param_slice]
-                reaction_times_batch = reaction_times[:,param_slice]
-                current_transitions_batch = current_transitions[:,param_slice]
-                all_trans_pos_batch = all_transition_positions[:,param_slice]
+                times_batch = self.times
+                param_val_array_batch = parameter_value_array
+                current_trans_rates = current_transition_rates
+                nb_obj_all_states_batch = nb_objects_all_states
 
+                total_rates_batch = total_rates
+                reaction_times_batch = reaction_times
+                current_transitions_batch = current_transitions
+                all_trans_pos_batch = all_transition_positions
+
+                first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
                 numba.cuda.profile_start()
 
-                # implement linearly changing parameters,
-                # as added to normal/baseline parameter value
-                # as two values: value at start and/or end of neurite,
-                # if both are defined, then the change per um is calculated
-                # and definitions of change per um etc are not taken into
-                # account
-                # if one of the values is defined then the change from that
-                # position (start or end of neurite) is defined by:
-                # absolute or relative change per um or per % of length
-                # Thereby, the added linearly changing part might even go to 0
-                # array shape:
-                # (nb_params,
-                #  5 (2 (start+end) + 1 (abs/rel of parameter)
-                #     + 1 (um/% of length) + 1 (change) + 1 (idx in object_rates),
-                #  param_value_shape)
-                # for different simulations all parameters can be defined
-                # separately.
-
-                # For position dependent rates, to choose the correct object
-                # for a state transition, the position of the object has to
-                # be taken into account - not every object has the same chance
-                # of transitioning. Therefore, the position dependent rate of
-                # an object must be saved.
-                # A parameter might be used in more than one transition and
-                # therefore the same position dependence might influence more
-                # than one transition. However, since the position dependence
-                # is exactly the same, the position dependent rate will also be
-                # the same for that object. Only the baseline rate might be
-                # different. Therefore, one object value per dependence is
-                # sufficient.
-
-
-                print("Starting simulation batch...")
-
+                # print("Starting simulation batch...")
                 sim[nb_SM,
                  nb_cc](object_states_batch, #int32[:,:,:]
                             property_array_batch, #float32[:,:,:,:]
                             to_cuda(convert_array(times_batch)), #float32[:,:,:]
                             nb_simulations, #int32
-                            parameter_combinations_per_batch, #int32
+                            param_combinations_per_batch, #int32
                             to_cuda(convert_array(param_val_array_batch)), #float32[:,:,:]
                             to_cuda(convert_array(params_pos_dependence)),
                             position_dependence,
@@ -1409,15 +1384,14 @@ class SSA():
                             to_cuda(convert_array(total_property_changes)),
                             to_cuda(convert_array(density_threshold_boundaries)),
 
-                        to_cuda(convert_array(tau_square_eq_terms)),
-
-                            to_cuda(convert_array(first_last_idx_with_object)),
+                            to_cuda(convert_array(tau_square_eq_terms)),
+                        first_last_idx_with_object,
 
                            timepoint_array_batch,
                            time_resolution, min_time, save_initial_state,
 
-                        start_nb_parallel_cores,
-                        nb_parallel_cores,
+                            start_nb_parallel_cores,
+                            nb_parallel_cores,
                             to_cuda(convert_array(thread_masks)),
                             to_cuda(convert_array(thread_to_sim_id)),
 
@@ -1429,7 +1403,7 @@ class SSA():
                 if self.print_times:
                     print("Simulation time: ", np.round(time.time() - start, 2), "\n")
 
-                nb_parallel_cores = nb_parallel_cores.copy_to_host()
+                # nb_parallel_cores = nb_parallel_cores.copy_to_host()
 
                 numba.cuda.synchronize()
                 numba.cuda.profile_stop()
@@ -1440,58 +1414,112 @@ class SSA():
                     property_array_batch.copy_to_host()[1:])
                 times_batch = torch.Tensor(timepoint_array_batch.copy_to_host()[2:])
 
-                if object_states_batches is None:
-                    object_states_batches = object_state_batch
-                else:
-                    object_states_batches = torch.concat((object_states_batches,
-                                                         object_state_batch),
-                                                         axis=-1)
-                if properties_batches_array is None:
-                    properties_batches_array = property_array_batch
-                else:
-                    properties_batches_array = torch.concat((properties_batches_array,
-                                                            property_array_batch),
-                                                            axis=-1)
-                if times_batches is None:
-                    times_batches = times_batch
-                else:
-                    times_batches = torch.concat((times_batches, times_batch),
-                                                 axis=-1)
-
-                local_density_batch = torch.Tensor(
-                    local_density_batch[0].copy_to_host())
-
-                if local_density_batches is None:
-                    local_density_batches = local_density_batch
-                else:
-                    local_density_batches = torch.concat((local_density_batches,
-                                                          local_density_batch),
-                                                         axis=-1)
-
-                total_density_batch = torch.Tensor(
-                    total_density_batch.copy_to_host())
-
-                if total_density_batches is None:
-                    total_density_batches = local_density_batch
-                else:
-                    total_density_batches = torch.concat((total_density_batches,
-                                                          total_density_batch),
-                                                         axis=-1)
+                first_last_idx_with_object = first_last_idx_with_object.copy_to_host()
 
                 del timepoint_array_batch
                 cuda.current_context().memory_manager.deallocations.clear()
 
-            # plt.figure()
-            # plt.plot(local_density_batches.mean(axis=1))
+                # plt.figure()
+                # plt.plot(local_density_batches.mean(axis=1))
 
+                self.object_states = object_state_batch
 
-            self.times = (times_batches * time_resolution.copy_to_host())
-            self.times = self.times.unsqueeze(1).to(self.device)
+                self.times = (times_batch * time_resolution.copy_to_host())
+                self.times = self.times.unsqueeze(1).to(self.device)
 
-            for property_nb, property in enumerate(self.properties):
-                property.array = properties_batches_array[:, property_nb]
-                property.array = property.array.to(self.device)
-            self.object_states = object_states_batches.to(self.device)
+                for property_nb, property in enumerate(self.properties):
+                    property.array = property_array_batch[:, property_nb]
+                    property.array = property.array.to(self.device)
+
+                # self.object_states = object_states_batch#.to(self.device)
+
+                # print(111, self.object_states.shape)
+                # print(222, property_array_batch.shape)
+
+                all_data = {}
+                for data_name, data_extraction in self.data_extractions.items():
+                    start = time.time()
+                    all_data[data_name] = data_extraction.extract(self,
+                                                                  first_last_idx_with_object=
+                                                                  first_last_idx_with_object)
+                    if self.print_times:
+                        print(data_name, "extraction time: ",
+                              np.round(time.time() - start, 2))
+
+                    if data_extraction.show_data:
+                        print_data = False
+                        for sub_name, sub_data in all_data[
+                            data_name].items():
+                            if sub_data.sum() == 0:
+                                continue
+                            if sub_data.shape[1] == 1:
+                                print_data = True
+                                break
+                            if sub_name.endswith("_position"):
+                                continue
+                            if sub_name.find("_bins_") != -1:
+                                continue
+                            plot_data = torch.mean(sub_data[-1].cpu(),
+                                                   dim=(1))
+                            if (len(plot_data.shape) == 1):
+                                plot_data = plot_data.unsqueeze(1)
+                            if plot_data.shape[1] > 1:
+                                plot_data = plot_data[:, 0]
+                            torch.set_printoptions(precision=3,
+                                                   sci_mode=False)
+                            if len(plot_data) < 30:
+                                print(plot_data)
+                                print(plot_data[:-1] / plot_data[1:])
+                                print("\n")
+
+                            plt.figure()
+                            plt.plot(plot_data)
+                            plt.title(data_name + "-" + sub_name)
+                            plt.ylim(0, plt.ylim()[1])
+                            # plt.figure()
+                            # plt.plot(torch.mean(sub_data[-1],dim=(1)))
+                            # plt.ylim(0,3.5)
+                        if not print_data:
+                            continue
+                        for sub_name, sub_data in all_data[
+                            data_name].items():
+                            if sub_name.find("mean") == -1:
+                                continue
+                            # if sub_name.find("inside") == -1:
+                            #     continue
+                            mean = np.nanmean(sub_data[-1].cpu())
+                            if mean == 0:
+                                continue
+                            if np.isnan(mean):
+                                continue
+                            print(sub_name, mean)
+
+                print("Saving raw and analyzed data ...")
+                if self.save_results:
+                    self._save_times_and_object_states(batch_nb)
+                    self._save_data(all_data, batch_nb)
+
+                print(2, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+                self.data_buffer = []
+                del self.times
+                del self.object_states
+                del self.object_states_buffer
+
+                for property in self.properties:
+                    property.array = []
+                # del all_data
+
+                del object_dependent_rates_batch
+                del property_array_batch
+                del object_states_batch
+                del local_density_batch
+                del total_density_batch
+                cuda.current_context().memory_manager.deallocations.clear()
+                torch.cuda.empty_cache()
+                print(3, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+
+            del rng_states
+            cuda.current_context().memory_manager.deallocations.clear()
 
         else:
             if not bug_fixing:
@@ -1569,103 +1597,114 @@ class SSA():
             self.times = (torch.Tensor(np.copy(timepoint_array)).unsqueeze(1)
                           * time_resolution)
 
-        nb_objects_single = torch.count_nonzero(self.object_states, dim=1).to(torch.float)
-        nb_objects = nb_objects_single.mean(dim=-2)
-        for parameter_nb in range(nb_objects.shape[-1]):
-            print("Parameters: ")
-            for parameter in self.parameters:
-                standard_param_val = parameter.value_array[0, 0].item()
-                param_val = parameter.value_array[0, parameter_nb].item()
-                param_val_string = ""
-                if standard_param_val != param_val:
-                    param_val_string += "!! "
-                param_val_string += parameter.name
-                param_val_string += ": "
-                param_val_string += str(param_val)
-                param_val_string += "; "
-                print(param_val_string)
-            print("\n")
-
-        #print("All mean numbers of objects: ", nb_objects.to_list())
-        #print("Parameter nb with max nb of objects: ", torch.where(nb_objects == nb_objects.max().item()).item(),"\n")
-
-        print("Mean number of Objects: ", np.round(nb_objects.mean().item(),2))
-        print("Max number of Objects in single simulation: ", nb_objects_single.max().item(), "\n")
-
-        #print("Mean total density: ", total_density_batches.mean().item())
-        #print("Max total density: ", total_density_batches.max().item(), "\n")
-        # print(nb_objects[0,:,0])
-
-        # if len(self.times.cpu()[0][np.isnan(self.times.cpu()[0])]) > 0:
-        #     print(f"WARNING: The defined max number of objects "
-        #                      f"{self.max_number_objects} was too low. "
-        #                      "Simulations where creating a new object was not "
-        #                      "possible due to too little objects were "
-        #                      "interrupted. To fix this problem increase the "
-        #                      "value for the 'max_number_objects' parameter "
-        #                      "in the 'start' function.")
-
-        all_data = {}
-        for data_name, data_extraction in self.data_extractions.items():
-            start = time.time()
-            all_data[data_name] = data_extraction.extract(self)
-
-            if self.print_times:
-                print(data_name, "extraction time: ", np.round(time.time() - start,2))
-
-            if data_extraction.show_data:
-                print_data = False
-                for sub_name, sub_data in all_data[data_name].items():
-                    if sub_data.sum() == 0:
-                        continue
-                    if sub_data.shape[1] == 1:
-                        print_data = True
-                        break
-                    if sub_name.endswith("_position"):
-                        continue
-                    plot_data = torch.mean(sub_data[-1].cpu(),dim=(1))
-                    if plot_data.shape[1] > 1:
-                        plot_data = plot_data[:,0]
-                    plt.figure()
-                    plt.plot(plot_data)
-                    plt.title(data_name + "-" + sub_name)
-                    plt.ylim(0,plt.ylim()[1])
-                    # plt.figure()
-                    # plt.plot(torch.mean(sub_data[-1],dim=(1)))
-                    # plt.ylim(0,3.5)
-                if not print_data:
-                    continue
-                for sub_name, sub_data in all_data[data_name].items():
-                    if sub_name.find("mean") == -1:
-                        continue
-                    # if sub_name.find("inside") == -1:
-                    #     continue
-                    mean = np.nanmean(sub_data[-1].cpu())
-                    if mean == 0:
-                        continue
-                    if np.isnan(mean):
-                        continue
-                    print(sub_name, mean)
-
-        print("Saving raw and analyzed data ...")
-        if self.save_results:
-            self._save_times_and_object_states(0)
-            self._save_data(all_data, 0)
-
-        print("Saving metadata...")
-        property_names = [property.name for property in self.properties]
-        times = self.times
-        del self.times
-        del self.object_states
-        del self.all_times
-        del self.data_buffer
-        for property in self.properties:
-            property.array = []
-
         self._save_all_metadata(nb_simulations, max_number_objects)
         print("Finished saving all data.")
-        self.all_data = all_data
-        self.times = times
+        # self.all_data = all_data
+        # self.times = times
+
+    def _get_all_parameters(self):
+        # get different parameters from all events#, so that no parameter is
+        # used twice (some transitions may have the same parameter)
+        parameters = [event.parameter for event in [*self.transitions,
+                                                    *self.actions]]
+        param_nb = 0
+        self.parameters = []
+        for parameter in parameters:
+            if parameter.number is None:
+                parameter.number = param_nb
+                if parameter.name == "":
+                    parameter.name = str(parameter.number)
+                param_nb += 1
+                self.parameters.append(parameter)
+
+        # first get all unique dependencies
+        self.dependencies = []
+        dependence_nb = 0
+        for parameter in self.parameters:
+            dependence = parameter.dependence
+            if dependence is None:
+                continue
+            dependence.number = dependence_nb
+            if dependence.name == "":
+                dependence.name = str(dependence.number)
+            dependence_nb += 1
+            self.dependencies.append(dependence)
+
+        # then go through each dependency and extract parameters
+        for dependence in self.dependencies:
+            all_potential_params = [dependence.start_val, dependence.end_val,
+                                    dependence.param_change,
+                                    dependence.param_change_is_abs,
+                                    dependence.pos_change_is_abs]
+            for potential_param in all_potential_params:
+                if type(potential_param) == type(self.parameters[0]):
+                    # check whether parameter was already used somewhere else
+                    # and therefor is already in the self.parameters array
+                    # by checking whether the number is defined
+                    # (as done above when getting the first set of parameters)
+                    if potential_param.number is None:
+                        potential_param.number = param_nb
+                        self.parameters.append(potential_param)
+                        param_nb += 1
+
+    def _get_simulation_parameter_lengths(self):
+        # create list of length of all model parameters
+        simulation_parameter_lengths = [len(parameters.values)
+                                        for parameters
+                                        in self._all_simulation_parameters]
+
+
+        # check whether each parameter either only has a single value
+        # or has a length that is similar between all parameters with more than
+        # one value
+        if (not self.single_parameter_changes) & (not self.all_parameter_combinations):
+            unique_param_lengths = set(simulation_parameter_lengths)
+            param_lengths = unique_param_lengths - set([1])
+            if len(param_lengths) > 1:
+                raise ValueError("If single_parameter_changes is False, then each "
+                                 "parameter can either have one value defined "
+                                 "or as many values defined as all other "
+                                 "parameters that have more than one value "
+                                 "defined. However, at least one parameter "
+                                 "has a different number of values defined.")
+
+        if not self.single_parameter_changes:
+            simulation_parameter_lengths = [nb
+                                              for nb
+                                              in simulation_parameter_lengths
+                                              if nb > 1]
+            if len(simulation_parameter_lengths) == 0:
+                simulation_parameter_lengths = [1]
+            else:
+                simulation_parameter_lengths = [simulation_parameter_lengths[0]]
+
+        elif not self.all_parameter_combinations:
+            # if not all parameter combinations should be used
+            # use the first parameter value as the standard and the other as single
+            # changes that should be done (while leaving the other parameters
+            # undchanged) - therefore for each simulation only one parameter is
+            # changed from the standard set of parameter values
+
+            # the number of simulations is 1 (for all standard parameter values)
+            # plus the number of parameters beyond the standard parameter values
+            # (which is the number of parameter values minus 1 for each
+            # parameter)
+            simulation_parameter_lengths = (np.sum(simulation_parameter_lengths)
+                                            - len(simulation_parameter_lengths)
+                                            + 1)
+            simulation_parameter_lengths = [simulation_parameter_lengths]
+
+        if self.dynamically_increase_nb_objects | (self.max_number_objects is None):
+            # if the number of objects allowed in the simulation should be
+            # dynamically increased, first check the maximum number of objects
+            # that the simulation starts with
+            max_number_objects = self._get_initial_max_nb_objects()
+            # add the nb_objects_added_per_step to the maximum number of objects
+            # to obtain the starting simulation array size
+            self.max_number_objects = (max_number_objects +
+                                       nb_objects_added_per_step)
+
+        return simulation_parameter_lengths
 
     def _save_all_metadata(self, nb_simulations, max_number_objects):
         if self.simulations_summary_path is not None:
@@ -1762,7 +1801,8 @@ class SSA():
             new_script_path = os.path.join(self.data_folder, script_file_name)
             shutil.copy(self.script_path, new_script_path)
 
-    def _get_number_of_cuda_cores(self):
+    @staticmethod
+    def _get_number_of_cuda_cores():
         cc_cores_per_SM_dict = {
             (2, 0): 32,
             (2, 1): 48,
@@ -1785,6 +1825,25 @@ class SSA():
         nb_SM = device.MULTIPROCESSOR_COUNT
         nb_cc_cores = cc_cores_per_SM_dict[device.compute_capability]
         return nb_SM, nb_cc_cores
+
+    def _get_random_number_func(self, nb_parameter_combinations, nb_simulations, seed):
+        # get way to get unique number for each combination of simulation
+        # and parameter combination
+        parameters_log10 = math.log10(nb_parameter_combinations)
+        simulations_log10 = math.log10(nb_simulations)
+        if parameters_log10 < simulations_log10:
+            simulation_factor = int(10**(math.floor(parameters_log10) + 1))
+            parameter_factor = 1
+        else:
+            simulation_factor = 1
+            parameter_factor = int(10**(math.floor(simulations_log10) + 1))
+
+        nb_states = ((nb_parameter_combinations+1) * parameter_factor +
+                     (nb_simulations+1) * simulation_factor)
+
+        random_number_func = numba.cuda.random.create_xoroshiro128p_states
+        rng_states = random_number_func(int(nb_states), seed=int(seed))
+        return rng_states, simulation_factor, parameter_factor
 
     def _empty_buffers(self):
         for property in self.properties:
@@ -1889,8 +1948,8 @@ class SSA():
                 else:
                     array = model_parameters.values
                 array = torch.Tensor(array)
-                array = array.expand(1, *self._simulation_array_size[1:])
-                model_parameters.value_array = array
+                # array = array.expand(1, *self._simulation_array_size[1:])
+                # model_parameters.value_array = array
 
             elif all_parameter_combinations:
                 array_dimension = dimension + 2
@@ -1922,17 +1981,18 @@ class SSA():
                     array[start:end] = model_parameters.values[1:]
                 nb_previous_params += nb_add_params
 
-            array = array.expand(1,*self._simulation_array_size[1:])
+            # array = array.expand(1,*self._simulation_array_size[1:])
             # reshape to have all different parameter values in one axis
-            model_parameters.value_array = np.array(array.reshape((array.shape[1],
-                                                                  -1)))
-
+            model_parameters.value_array = array
+            # model_parameters.value_array = np.array(array.reshape((array.shape[1],
+            #                                                       -1)))
         return None
 
-    def _initialize_object_states(self):
+    def _initialize_object_states(self, param_shape_batch):
         # initial object states, also using defined initial condition of
         # number of objects starting in each state
-        self.object_states = torch.zeros(self._simulation_array_size,
+        self.object_states = torch.zeros((self._simulation_array_size[0],
+                                         *param_shape_batch),
                                          dtype=torch.int8)
 
         # keep track which objects already have a state set
@@ -1979,7 +2039,8 @@ class SSA():
             expanded_array = expanded_array.expand((1,*object_state_shape[1:]))
 
             object_state_mask = (self.index_array.expand(
-                self._simulation_array_size) <= nb_objects_with_states)
+                (self._simulation_array_size[0],*param_shape_batch))
+                                 <= nb_objects_with_states)
 
             self.object_states[object_state_mask] = state.number
             # subtract the number of objects for the current state
@@ -1989,7 +2050,7 @@ class SSA():
 
         return None
 
-    def _initialize_object_properties(self):
+    def _initialize_object_properties(self, param_shape_batch):
         # create tensor for each object property
         # so that each object can have a value for each property
         # also respect initial condition, if defined
@@ -1997,7 +2058,8 @@ class SSA():
         nb_objects_with_states = torch.count_nonzero(object_state_mask)
         for object_property in self.properties:
             random_property_vals = False
-            object_property.array = torch.zeros(self._simulation_array_size,
+            object_property.array = torch.zeros((self._simulation_array_size[0],
+                                                 *param_shape_batch),
                                                 dtype=torch.float32)
             object_property.array[:] = math.nan
             initial_cond = object_property.initial_condition
@@ -2197,7 +2259,6 @@ class SSA():
                     if keyword not in all_data[data_name]:
                         all_data[data_name][keyword] = []
                     all_data[data_name][keyword].append(data_values)
-
         self.data_buffer = []
 
         all_concat_data = {}
