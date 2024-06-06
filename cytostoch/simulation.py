@@ -190,6 +190,7 @@ class SSA():
               max_number_objects=None,
                single_parameter_changes=True, nb_parallel_cores=1,
               all_parameter_combinations=False,
+              seed=42,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
               max_iters_no_data_extraction=2000,
@@ -278,7 +279,7 @@ class SSA():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
                         time_resolution, save_initial_state,
                         max_number_objects, all_parameter_combinations,
-                        single_parameter_changes, nb_parallel_cores,
+                        single_parameter_changes, nb_parallel_cores, seed,
                         ignore_errors=ignore_errors,
                         print_update_time_step=print_update_time_step,
                         nb_objects_added_per_step=nb_objects_added_per_step,
@@ -329,7 +330,7 @@ class SSA():
         properties_array = np.zeros((nb_properties,
                                      *self.properties[0].array.shape))
         for property_nb, property in enumerate(self.properties):
-            properties_array[property_nb] = property.array
+            properties_array[property_nb] = property.array.cpu()
         return properties_array
 
     def _get_property_extreme_val_arrays(self):
@@ -421,14 +422,18 @@ class SSA():
 
         return property_extreme_values
 
-    def _get_parameter_value_array(self, param_shape_batch, param_slice):
+    def _get_parameter_value_array(self, param_shape_batch, nb_timepoints,
+                                   param_slice):
         nb_parameters = len(self.parameters)
         # parameter_value_shape = self.parameters[0].value_array.shape
-        parameter_value_array = np.zeros((nb_parameters, *param_shape_batch))
+        parameter_value_array = np.zeros((nb_parameters,
+                                          nb_timepoints,
+                                          param_shape_batch[1]))
         for nb, parameter in enumerate(self.parameters):
-            array = parameter.value_array[param_slice]
-            array = array.expand((1, *param_shape_batch))
-            array = np.array(array.reshape((array.shape[1], -1)))
+            array = torch.Tensor(parameter.value_array[:,param_slice])
+            # array = array.unsqueeze(1)
+            array = array.expand((1, nb_timepoints, param_shape_batch[1]))
+            array = np.array(array.reshape((nb_timepoints, -1)))
             parameter_value_array[nb] = array
         return parameter_value_array
 
@@ -715,9 +720,21 @@ class SSA():
         # sufficient.
         """
 
+        max_nb_properties = 0
+        for param_nb, parameter in enumerate(self.parameters):
+            if parameter.dependence is None:
+                continue
+            dependence = parameter.dependence
+            if dependence.properties is None:
+                nb_properties = len(self.properties)
+            else:
+                nb_properties = len(dependence.properties)
+            max_nb_properties = max(max_nb_properties, nb_properties)
+
         params_pos_dependence = np.full((len(self.parameters),
-                                         6),
+                                         6 + max_nb_properties),
                                         np.nan)
+
         position_dependence = False
         dependence_nb = 0
         for param_nb, parameter in enumerate(self.parameters):
@@ -768,6 +785,18 @@ class SSA():
             params_pos_dependence[param_nb, 4] = change_param.number
 
             params_pos_dependence[param_nb, 5] = dependence_nb
+
+            # if properties are defined, add the property numbers of all
+            # defined properties
+            if dependence.properties is not None:
+                for property_nb, property in enumerate(dependence.properties):
+                    params_pos_dependence[param_nb,
+                                         6 + property_nb] = property.number
+            else:
+                # if properties are not defined, add all property numbers to
+                # the list
+                params_pos_dependence[param_nb, 6:] = list(range(len(self.properties)))
+
             dependence_nb += 1
 
         return params_pos_dependence, position_dependence, dependence_nb
@@ -775,7 +804,7 @@ class SSA():
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, save_initial_state=False,
                max_number_objects=None, all_parameter_combinations=False,
-               single_parameter_changes=True, nb_parallel_cores=1,
+               single_parameter_changes=True, nb_parallel_cores=1, seed=42,
                ignore_errors=False,
                print_update_time_step=1, nb_objects_added_per_step=10,
                 max_iters_no_data_extraction=2000,
@@ -881,11 +910,16 @@ class SSA():
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths]
 
-        self._initialize_parameter_arrays(self._all_simulation_parameters,
+        # get number of timepoints
+        nb_timepoints = math.ceil(self.min_time / time_resolution)
+        if save_initial_state:
+            nb_timepoints += 1
+
+        self._initialize_parameter_arrays(self.parameters,
                                           simulation_parameter_lengths,
                                           single_parameter_changes,
-                                          all_parameter_combinations)
-
+                                          all_parameter_combinations,
+                                          nb_timepoints)
 
         # create index array in which each entry has the value of the index of
         # the microtubule in the simulation, thereby multi-D operations
@@ -961,8 +995,6 @@ class SSA():
         convert_array = lambda x: np.ascontiguousarray(x)
 
         time_resolution = convert_array(time_resolution)
-
-        seed = 42
 
         device = "gpu"
 
@@ -1047,10 +1079,6 @@ class SSA():
                                                ), dtype=np.int64)
                                      * object_property.element_size())
 
-            # get number of timepoints
-            nb_timepoints = math.ceil(self.min_time / time_resolution)
-            if save_initial_state:
-                nb_timepoints += 1
 
             total_size = ((nb_timepoints+1) * (size_states + size_properties)
                           + size_density + size_tminmax
@@ -1101,8 +1129,8 @@ class SSA():
                                  "reduce the number of simulations or use a "
                                  "GPU with more memory.")
 
-            nb_batches = 2
-            param_combinations_per_batch = 500
+            # nb_batches = 2
+            # param_combinations_per_batch = 500
 
             nb_parallel_cores = to_cuda(convert_array(nb_parallel_cores))
 
@@ -1113,7 +1141,7 @@ class SSA():
                                  param_combinations_per_batch)
 
             print(f"Simulating {nb_batches} batches... \n")
-            print(1, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+            # print(1, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
             for batch_nb in tqdm.tqdm(range(nb_batches)):
 
                 start_parameter_comb = (batch_nb *
@@ -1123,7 +1151,11 @@ class SSA():
                 param_slice = slice(start_parameter_comb, end_parameter_comb)
 
                 parameter_value_array = self._get_parameter_value_array(param_shape_batch,
+                                                                        nb_timepoints,
                                                                         param_slice)
+
+                # for numberr in range(parameter_value_array.shape[0]):
+                #     print(parameter_value_array[numberr])
 
                 object_dependent_rates = np.zeros((nb_dependences,
                                                    max_number_objects,
@@ -1259,7 +1291,7 @@ class SSA():
                 # the second index with respect to the timestep for reassigning threads
                 # from the third idx the actual timepoints at the respective savepoint
                 # are saved
-                timepoint_array = np.full((nb_timepoints + 2,
+                timepoint_array = np.full((nb_timepoints + 1,
                                            *param_shape_batch),
                                           math.nan)
 
@@ -1331,6 +1363,9 @@ class SSA():
                 first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
                 numba.cuda.profile_start()
 
+                # print(params_pos_dependence)
+                # print(param_val_array_batch[:,0,0])
+
                 # print("Starting simulation batch...")
                 sim[nb_SM,
                  nb_cc](object_states_batch, #int32[:,:,:]
@@ -1385,7 +1420,7 @@ class SSA():
                             to_cuda(convert_array(density_threshold_boundaries)),
 
                             to_cuda(convert_array(tau_square_eq_terms)),
-                        first_last_idx_with_object,
+                            first_last_idx_with_object,
 
                            timepoint_array_batch,
                            time_resolution, min_time, save_initial_state,
@@ -1404,6 +1439,7 @@ class SSA():
                     print("Simulation time: ", np.round(time.time() - start, 2), "\n")
 
                 # nb_parallel_cores = nb_parallel_cores.copy_to_host()
+
 
                 numba.cuda.synchronize()
                 numba.cuda.profile_stop()
@@ -1436,6 +1472,25 @@ class SSA():
                 # print(111, self.object_states.shape)
                 # print(222, property_array_batch.shape)
 
+                # nb_objects_single = torch.count_nonzero(self.object_states,
+                #                                         dim=1).to(torch.float)
+                # nb_objects = nb_objects_single.mean(dim=-2)
+                # for parameter_nb in range(nb_objects.shape[-1]):
+                #     print("Parameters: ")
+                #     for parameter in self.parameters:
+                        # standard_param_val = parameter.value_array[0, 0].item()
+                        # param_val = parameter.value_array[
+                        #     0, parameter_nb].item()
+                        # param_val_string = ""
+                        # if standard_param_val != param_val:
+                        #     param_val_string += "!! "
+                        # param_val_string += parameter.name
+                        # param_val_string += ": "
+                        # param_val_string += str(param_val)
+                        # param_val_string += "; "
+                        # print(param_val_string)
+                    # print("\n")
+
                 all_data = {}
                 for data_name, data_extraction in self.data_extractions.items():
                     start = time.time()
@@ -1459,31 +1514,61 @@ class SSA():
                                 continue
                             if sub_name.find("_bins_") != -1:
                                 continue
-                            plot_data = torch.mean(sub_data[-1].cpu(),
-                                                   dim=(1))
-                            if (len(plot_data.shape) == 1):
-                                plot_data = plot_data.unsqueeze(1)
-                            if plot_data.shape[1] > 1:
-                                plot_data = plot_data[:, 0]
-                            torch.set_printoptions(precision=3,
-                                                   sci_mode=False)
-                            if len(plot_data) < 30:
-                                print(plot_data)
-                                print(plot_data[:-1] / plot_data[1:])
-                                print("\n")
+                            all_axs = []
+                            max_y = 0
+                            for timepoint in range(sub_data.shape[0]):
+                                # the first dimension is for the time
+                                # only plot data for the last timepoint
+                                plot_data = torch.mean(sub_data[timepoint].cpu(),
+                                                       dim=(1))
+                                plt.figure()
+                                found_param_change = False
+                                for param_nb in range(plot_data.shape[1]):
+                                    plot_data_param = plot_data[:,param_nb].unsqueeze(1)
+                                    param_val_string = ""
+                                    for parameter in self.parameters:
+                                        standard_param_val = parameter.value_array[0, 0].item()
+                                        param_val = parameter.value_array[0, param_nb].item()
+                                        if standard_param_val != param_val:
+                                            param_val_string = (parameter.name +
+                                                                ": " +
+                                                                str(param_val))
+                                            found_param_change = True
+                                            break
+                                    # if (len(plot_data.shape) == 1):
+                                    #     plot_data = plot_data.unsqueeze(1)
+                                    # if plot_data.shape[1] > 1:
+                                    #     plot_data = plot_data[:, 0]
+                                    torch.set_printoptions(precision=3,
+                                                           sci_mode=False)
+                                    # if len(plot_data) < 30:
+                                    #     print(plot_data)
+                                    #     print(plot_data[:-1] / plot_data[1:])
+                                    #     print("\n")
 
-                            plt.figure()
-                            plt.plot(plot_data)
-                            plt.title(data_name + "-" + sub_name)
-                            plt.ylim(0, plt.ylim()[1])
-                            # plt.figure()
-                            # plt.plot(torch.mean(sub_data[-1],dim=(1)))
-                            # plt.ylim(0,3.5)
+                                    plt.plot(plot_data_param,
+                                             label=param_val_string)
+
+                                    max_y = max(max_y, plt.ylim()[1])
+                                    all_axs.append(plt.gca())
+                                    # plt.figure()
+                                    # plt.plot(torch.mean(sub_data[-1],dim=(1)))
+                                    # plt.ylim(0,3.5)
+                                # plt.ylim(0, max_y)
+                                if found_param_change:
+                                    plt.legend()
+                                plt.title(data_name + "-" + sub_name +
+                                          "; Time: " + str(timepoint))
+                                # to plot total values over time
+                                # print("Time ", timepoint, " : ", plot_data_param.sum())
+                            for ax in all_axs:
+                                ax.set_ylim(0, max_y)
                         if not print_data:
                             continue
                         for sub_name, sub_data in all_data[
                             data_name].items():
-                            if sub_name.find("mean") == -1:
+                            if ((sub_name.find("mean") == -1) &
+                                    (sub_name.find("number") == -1)):
                                 continue
                             # if sub_name.find("inside") == -1:
                             #     continue
@@ -1499,21 +1584,24 @@ class SSA():
                     self._save_times_and_object_states(batch_nb)
                     self._save_data(all_data, batch_nb)
 
-                print(2, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
-                self.data_buffer = []
-                del self.times
-                del self.object_states
-                del self.object_states_buffer
+                # print(2, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+                if nb_batches > 1:
+                    self.data_buffer = []
+                    del self.times
+                    del self.object_states
+                    del self.object_states_buffer
 
-                for property in self.properties:
-                    property.array = []
-                # del all_data
+                    for property in self.properties:
+                        property.array = []
+                    # del all_data
 
-                del object_dependent_rates_batch
-                del property_array_batch
-                del object_states_batch
-                del local_density_batch
-                del total_density_batch
+                    del object_dependent_rates_batch
+                    del property_array_batch
+                    del object_states_batch
+                    del local_density_batch
+                    del total_density_batch
+                else:
+                    self.all_data = all_data
                 cuda.current_context().memory_manager.deallocations.clear()
                 torch.cuda.empty_cache()
                 print(3, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
@@ -1649,10 +1737,16 @@ class SSA():
 
     def _get_simulation_parameter_lengths(self):
         # create list of length of all model parameters
-        simulation_parameter_lengths = [len(parameters.values)
+        state_parameter_lengths = [len(parameters.values)
                                         for parameters
-                                        in self._all_simulation_parameters]
+                                        in self.states]
 
+        parameter_lengths = [len(parameters.values[0])
+                                        for parameters
+                                        in self.parameters]
+
+        simulation_parameter_lengths = [*state_parameter_lengths,
+                                        *parameter_lengths]
 
         # check whether each parameter either only has a single value
         # or has a length that is similar between all parameters with more than
@@ -1748,6 +1842,9 @@ class SSA():
             metadata["data_"+name+"_state_groups"] = [data_extractor.state_groups]
         metadata["nb_simulations"] = [nb_simulations]
         metadata["max_number_objects"] = [max_number_objects]
+        metadata["time_resolution"] = self.time_resolution
+        metadata["min_time"] = self.min_time
+
         file_path = os.path.join(self.data_folder, "metadata.csv")
         metadata.to_csv(file_path)
         metadata = pd.read_csv(file_path)
@@ -1932,58 +2029,91 @@ class SSA():
     def _initialize_parameter_arrays(self, all_simulation_parameters,
                                      simulation_parameter_lengths,
                                      single_parameter_changes,
-                                     all_parameter_combinations):
+                                     all_parameter_combinations,
+                                     nb_timepoints):
         # go through all model parameters and expand array to simulation
         # specific size
         all_dimensions = [dim for dim
                           in range(len(simulation_parameter_lengths) + 2)]
-
         nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
-
-            if not single_parameter_changes:
-                param_vals = model_parameters.values
-                if len(param_vals) == 1:
-                    array = param_vals.repeat((simulation_parameter_lengths))
+            all_timepoints_param_vals = model_parameters.values
+            param_switch_timepoints = model_parameters.switch_timepoints
+            if param_switch_timepoints is not None:
+                param_switch_timepoints = np.floor(param_switch_timepoints /
+                                                   self.time_resolution).astype(np.int32)
+            all_timepoints_array = None
+            # go through parameter values for all timepoints
+            # each sublist of parameter values represents the values until
+            # a defined switchpoint. The index of the parameter values indicates
+            # the index of the switch_timepoints at which parameter values
+            # are switched to the next index (next group). For the last group
+            # there is no switch timepoint defined, since these parameter
+            # values will be active until the last timepoint
+            last_switch_timepoint = 0
+            for (param_timepoint_nb,
+                 param_vals) in enumerate(all_timepoints_param_vals):
+                # if param_switch_timepoints is defined
+                if param_switch_timepoints is not None:
+                    if param_timepoint_nb < len(param_switch_timepoints):
+                        switch_timepoint = param_switch_timepoints[param_timepoint_nb]
+                    else:
+                        switch_timepoint = nb_timepoints
                 else:
-                    array = model_parameters.values
-                array = torch.Tensor(array)
-                # array = array.expand(1, *self._simulation_array_size[1:])
-                # model_parameters.value_array = array
+                    switch_timepoint = nb_timepoints
 
-            elif all_parameter_combinations:
-                array_dimension = dimension + 2
-                expand_dimensions = copy.copy(all_dimensions)
-                expand_dimensions.remove(array_dimension)
-                # expand dimensions of parameter values to simulation array
-                array = np.expand_dims(model_parameters.values,
-                                       expand_dimensions)
-                # save array in object, therefore also change objects saved in
-                # self.transitions and self.actions
-                array = torch.Tensor(array)
-            else:
-                standard_value = model_parameters.values[0]
-                standard_value = torch.Tensor([standard_value])
-                # use standard value across entire array
-                array = standard_value.repeat((simulation_parameter_lengths))
-                # then get the position/s at which the values should be changed
-                # which is starting at the number of previously changed
-                # positions (for other parameters)
-                # the first position should be all the standard values without
-                # any change
-                # the following positions should be the single parameter changes
-                # therefore, the number of additional parameters is the total
-                # number minus 1
-                nb_add_params = len(model_parameters.values) - 1
-                if len(model_parameters.values) > 1:
-                    start = nb_previous_params + 1
-                    end = start + nb_add_params
-                    array[start:end] = model_parameters.values[1:]
-                nb_previous_params += nb_add_params
+                if not single_parameter_changes:
+                    if len(param_vals) == 1:
+                        array = param_vals.repeat((simulation_parameter_lengths))
+                    else:
+                        array = model_parameters.values
+                    array = torch.Tensor(array)
+                    # array = array.expand(1, *self._simulation_array_size[1:])
+                    # model_parameters.value_array = array
+
+                elif all_parameter_combinations:
+                    array_dimension = dimension + 2
+                    expand_dimensions = copy.copy(all_dimensions)
+                    expand_dimensions.remove(array_dimension)
+                    # expand dimensions of parameter values to simulation array
+                    array = np.expand_dims(param_vals,
+                                           expand_dimensions)
+                    # save array in object, therefore also change objects saved in
+                    # self.transitions and self.actions
+                    array = torch.Tensor(array)
+                else:
+                    standard_value = param_vals[0]
+                    standard_value = torch.Tensor([standard_value])
+                    # use standard value across entire array
+                    array = standard_value.repeat((simulation_parameter_lengths))
+                    # then get the position/s at which the values should be changed
+                    # which is starting at the number of previously changed
+                    # positions (for other parameters)
+                    # the first position should be all the standard values without
+                    # any change
+                    # the following positions should be the single parameter changes
+                    # therefore, the number of additional parameters is the total
+                    # number minus 1
+                    nb_add_params = len(model_parameters.values) - 1
+                    if len(model_parameters.values) > 1:
+                        start = nb_previous_params + 1
+                        end = start + nb_add_params
+                        array[start:end] = model_parameters.values[1:]
+                    nb_previous_params += nb_add_params
+                if all_timepoints_array is None:
+                    all_timepoints_array = np.zeros((nb_timepoints,
+                                                     *array.shape))
+                array = np.expand_dims(array, axis=0)
+                # use current array until the timepoint before the
+                # switch_timepoint
+                all_timepoints_array[last_switch_timepoint:
+                                     switch_timepoint] = array
+                # update last switch timepoint
+                last_switch_timepoint = switch_timepoint
 
             # array = array.expand(1,*self._simulation_array_size[1:])
             # reshape to have all different parameter values in one axis
-            model_parameters.value_array = array
+            model_parameters.value_array = all_timepoints_array
             # model_parameters.value_array = np.array(array.reshape((array.shape[1],
             #                                                       -1)))
         return None
@@ -2187,7 +2317,7 @@ class SSA():
 
             for sim_parameter in self._all_simulation_parameters:
                 sim_parameter.value_array = torch.index_select(sim_parameter.value_array,
-                                                             dim=dim,
+                                                             dim=dim+1,
                                                              index=dim_list_tensor)
 
         # clear cache if a position was removed and therefore tensor size changed
@@ -2292,7 +2422,7 @@ class SSA():
         return None
 
     def _save_simulation_parameters(self):
-        for parameter in self._all_simulation_parameters:
+        for parameter in self.parameters:
             file_name = "param_"+parameter.name+".pt"
             torch.save(parameter.value_array, os.path.join(self.data_folder,
                                                            file_name))

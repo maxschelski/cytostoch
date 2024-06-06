@@ -3,6 +3,7 @@ import numpy as np
 import time
 import math
 import numba
+from numba import cuda
 import functools
 from . import simulation
 
@@ -33,6 +34,7 @@ from matplotlib import pyplot as plt
 
 @numba.cuda.jit
 def get_hist_data(input_data, bins, bin_size, output, nb_operations,
+                  timepoint,
                   first_last_idx_with_object):
     nb_parallel_cores = 1
     nb_processes = numba.cuda.gridsize(1)
@@ -54,12 +56,14 @@ def get_hist_data(input_data, bins, bin_size, output, nb_operations,
         #                                                   core_id)
         object_nb = 0
         while object_nb < first_last_idx_with_object[1,sim_nb, param_nb] + 1:
-            if not math.isnan(input_data[0, object_nb, sim_nb, param_nb]):
+            if not math.isnan(input_data[timepoint, object_nb, sim_nb, param_nb]):
                 # go through each bin, with each bin being defined by the boundary
                 # of the current bin_nb and the next bin_nb
-                bin_nb = int(math.floor(input_data[0, object_nb,
+                bin_nb = int(math.floor(input_data[timepoint, object_nb,
                                                    sim_nb, param_nb] / bin_size))
                 bin_nb = min(bin_nb, nb_bins-1)
+                # print(bin_nb, input_data[0, object_nb, sim_nb, param_nb],
+                #       object_nb)
                 # print(index, sim_nb, param_nb, bin_nb,
                 #       input_data[0, index,
                 #                  sim_nb, param_nb],
@@ -68,7 +72,7 @@ def get_hist_data(input_data, bins, bin_size, output, nb_operations,
                 # numba.cuda.atomic.add(output, (0, bin_nb, sim_nb, param_nb), 1)
                 # output[0, input_data[0, object_nb,
                 #                      sim_nb, param_nb], sim_nb, param_nb] += 1
-                output[0, bin_nb, sim_nb, param_nb] += 1
+                output[timepoint, bin_nb, sim_nb, param_nb] += 1
                 # bin_nb = 0
                 # while bin_nb < (nb_bins - 1):
                 #     if (bin_nb == (nb_bins - 2)) | (input_data[0, index, sim_nb, param_nb] < bins[bin_nb + 1]):
@@ -79,6 +83,135 @@ def get_hist_data(input_data, bins, bin_size, output, nb_operations,
             object_nb += 1
         current_operation += nb_processes
 
+@numba.cuda.jit
+def _get_first_and_last_object_pos(nb_objects, nb_parallel_cores, core_id):
+    objects_per_core = math.ceil(nb_objects / nb_parallel_cores)
+    if core_id < 0:
+        core_id_use = int(- (core_id + 1))
+    else:
+        core_id_use = int(core_id)
+
+    object_pos = objects_per_core * core_id_use
+    last_object_pos = objects_per_core * (core_id_use + 1)
+    last_object_pos = min(last_object_pos, nb_objects)
+    # if core_id is negative, then it should be started from the back
+    # (negative object positions)
+    if core_id < 0:
+        last_object_pos = int(- last_object_pos)
+        if object_pos == 0:
+            first_object_pos = -2
+        else:
+            first_object_pos = - object_pos
+    else:
+        first_object_pos = object_pos
+    return int(first_object_pos), int(last_object_pos)
+
+@numba.cuda.jit
+def _get_local_and_total_density(local_density,
+                                 local_resolution,
+                                 start_nb_object, end_nb_object,
+                                 position_array, length_array,
+                                 timepoint, nb_parallel_cores):
+
+    nb_processes = numba.cuda.gridsize(1)
+    thread_id = numba.cuda.grid(1)
+    grid = numba.cuda.cg.this_grid()
+
+    # reassign_threads_time_step_size = 0.1
+    # min_time_diff_for_reassigning = 0.1
+    # nb_reassigned_threads = 1
+    # rel_time_reassignment_check = 0.1
+
+    total_nb_simulations = (position_array.shape[-2] *
+                            position_array.shape[-1] *
+                            nb_parallel_cores)
+    # print(cuda.gridsize(1), total_nb_simulations)
+    current_sim_nb = thread_id
+
+    while current_sim_nb < total_nb_simulations:
+
+        param_id = int(math.floor(current_sim_nb /
+                                  (position_array.shape[-2] *
+                                   nb_parallel_cores)))
+        sim_id = int(math.floor((current_sim_nb -
+                                 param_id * position_array.shape[-2] *
+                                 nb_parallel_cores)
+                                / nb_parallel_cores))
+        core_id = int(current_sim_nb -
+                      param_id * position_array.shape[-2] * nb_parallel_cores -
+                      sim_id * nb_parallel_cores)
+
+        (object_pos,
+         last_object_pos) = _get_first_and_last_object_pos(end_nb_object -
+                                                           start_nb_object,
+                                                           nb_parallel_cores,
+                                                           core_id)
+
+        object_pos += start_nb_object
+        while object_pos < (last_object_pos):
+            if ((not math.isnan(length_array[timepoint, object_pos,
+                                             sim_id, param_id]))):
+                start = position_array[timepoint, object_pos,
+                                             sim_id, param_id]
+                # minimum allowed start position is negative local_resolution
+                # since position 0 is the amount of MTs from
+                # - local_resolution to 0
+                # while the last position, is the amount of MTs from
+                # x_max to local_resolution to x_max
+                end = start + length_array[timepoint, object_pos,
+                                           sim_id, param_id]
+                # if not math.isnan(property_extreme_values[1, 0, 0]):
+                #     end = min(property_extreme_values[1, 0, 0], end)
+                start = max(start, 0)#-local_resolution)
+                if (start != end) & (end >= 0):
+                    x_start = int(math.floor(start / local_resolution))
+                    x_end = int(math.floor(end / local_resolution))
+                    x_pos = max(x_start, 0)
+                    first_x = True
+                    # track the cumulative density of this object
+                    # to get the cumulative local density
+                    while x_pos <= x_end:
+
+                        density = 1
+                        # if first_x:
+                        #     # the start point is not actually at the very
+                        #     # beginning of the resolution but after that
+                        #     # therefore the added density is below 1 for the
+                        #     # first position. Subtract the relative amount of
+                        #     # the local resolution that the object starts
+                        #     # after the x_pos
+                        #     first_x = False
+                        #     x_um = x_pos * local_resolution
+                        #     density -= ((start - x_um) / local_resolution)
+                        # if (x_pos == x_end):
+                        #     # for the x bin in which the MT ended, don't add a
+                        #     # full MT but just the relative amount of the bin
+                        #     # crossed by the MT
+                        #     x_um = x_pos * local_resolution
+                        #     density -= ((x_um - end) / local_resolution)
+
+                        cuda.atomic.add(local_density,
+                                        (timepoint, x_pos, sim_id, param_id), density)
+                        # density = 1
+                        # if first_x | (x_pos == x_end):
+                        #     # the start point is not actually at the very
+                        #     # beginning of the resolution but after that
+                        #     # therefore the added density is below 1 for the
+                        #     # first position. Subtract the relative amount of
+                        #     # the local resolution that the object starts
+                        #     # after the x_pos
+                        #     x_um = x_pos * local_resolution
+                        #     density -= ((x_um - numba.cuda.selp(first_x,
+                        #                                         start, end))
+                        #                 / local_resolution)
+                        #     first_x = False
+                        #
+                        #
+                        # cuda.atomic.add(local_density,
+                        #                 (timepoint, x_pos, sim_id, param_id), density)
+                        x_pos += 1
+            object_pos += 1
+        current_sim_nb += nb_processes
 
 def _run_operation_2D_to_1D_density_numba(sim_id, param_id, object_states, properties_array, times,
                                            transition_rates_array, all_transition_states,
@@ -138,11 +271,11 @@ def _run_operation_2D_to_1D_density_numba(sim_id, param_id, object_states, prope
         # also use the maximum number of objects of interest for all
         # simulations, to discard all parts of the sorted array that only
         # contains objects which are not of interest
-        position_array[~mask] = float("nan")
+        position_array[mask_inv] = float("nan")
         position_array = torch.gather(position_array, dim=1, index=idx)
         position_array = position_array[:, :max_nb_objects]
 
-        length_array[~mask] = float("nan")
+        length_array[mask_inv] = float("nan")
         length_array = torch.gather(length_array, dim=1, index=idx)
         length_array = length_array[:, :max_nb_objects]
 
@@ -499,8 +632,10 @@ class DataExtraction():
 
         # get mask of each position not being in any of the state_numbers
         mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
+        mask_inv = torch.full(object_states.shape, 1).to(torch.bool)
         for state in state_numbers:
-            mask = (mask & (object_states != state))
+            mask_inv = (mask_inv & (object_states != state))
+            mask = (mask | (object_states == state))
 
         # convert list or tuple of properties to dict by using property names
         # as key
@@ -531,7 +666,7 @@ class DataExtraction():
                 # else:
                 #     property_array = torch.concat(property.array_buffer)
 
-            property_array[mask] = float("nan")
+            property_array[mask_inv] = float("nan")
             analysis_properties[name] = property_array
 
         # create histogram of distributions for
@@ -568,10 +703,12 @@ class DataExtraction():
             nb_operations = values.shape[-1] * values.shape[-2]
 
             values_cuda = numba.cuda.to_device(np.ascontiguousarray(np.array(values.cpu())))
-
-            get_hist_data[nb_SM, nb_cc](values_cuda, bins_cuda, bin_size, hist,
-                                        nb_operations,
-                                        first_last_idx_with_object)
+            start = time.time()
+            for timepoint in range(object_states.shape[0]):
+                get_hist_data[nb_SM, nb_cc](values_cuda, bins_cuda, bin_size, hist,
+                                            nb_operations, timepoint,
+                                            first_last_idx_with_object)
+            # print("length extr time: ", time.time() - start)
             numba.cuda.synchronize()
             hist = hist.copy_to_host()
 
@@ -628,7 +765,7 @@ class DataExtraction():
         #     object_states = torch.concat(simulation_object.object_states_buffer)
 
         mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
-        mask_inv = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
+        mask_inv = torch.full(object_states.shape, 1).to(torch.bool)
         for state in state_numbers:
             mask = (mask | (object_states == state))
             mask_inv = (mask_inv & (object_states != state))
@@ -696,6 +833,7 @@ class DataExtraction():
         data_dict["length"] = dimensions[0].length.array.cpu()
         return data_dict
 
+
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,
                                     state_numbers=None, regular_print=False,
                                     resolution=0.2, end_density=False,
@@ -746,10 +884,11 @@ class DataExtraction():
             # else:
             #     object_states = torch.concat(simulation_object.object_states_buffer)
             mask = torch.zeros_like(object_states).to(torch.bool)
-            mask_inv = torch.zeros_like(object_states).to(torch.bool)
+            mask_inv = torch.full(object_states.shape, 1).to(torch.bool)
             for state in state_numbers:
                 mask = (mask | (object_states == state))
                 mask_inv = (mask_inv & (object_states != state))
+
             # get the maximum number of objects that should be analyzed
             # (from all simulations)
             # first sort mask so that first in the matrix there are all True
@@ -777,145 +916,79 @@ class DataExtraction():
             length_array = torch.gather(length_array, dim=1, index=idx)
             length_array = length_array[:, :max_nb_objects]
 
-        # create boolean data array later by expanding each microtubule in space
-        # size of array will be:
-        # (max_position of neurite / resolution) x nb of microtubules
-        min_position = dimensions[0].positions[0].min_value
-        if min_position is None:
-            min_position = 0
-        max_position = dimensions[0].positions[0].max_value
-
-        device = simulation_object.device
-
-        positions = torch.arange(min_position, max_position+resolution*0.9,
-                                 resolution).to(device)
-
-        # print(position_array.shape, positions.shape)
-        all_data = torch.zeros((position_array.shape[0], positions.shape[0],
-                                *position_array.shape[2:])).to(device)
-
         # only if at least one element is True, analyze the data
         if mask.sum() > 0:
 
+            # create boolean data array later by expanding each microtubule in space
+            # size of array will be:
+            # (max_position of neurite / resolution) x nb of microtubules
+            min_position = dimensions[0].positions[0].min_value
+            if min_position is None:
+                min_position = 0
+            max_position = dimensions[0].positions[0].max_value
+
             position_dimension = int(round((max_position - min_position)
-                                           / resolution,5))
-            # print(1, time.time() - start)
-            start = time.time()
-            # create tensors on correct device
-            tensors = simulation_object.tensors
+                                           / resolution,5)) + 1
 
-            # data type depends on dimension 0 - since that is the number of
-            # different int values needed (int8 for <=256; int16 for >=256)
-            # (dimension 0 is determined by max_x of neurite / resolution)
-            if (position_dimension+1) < 256:
-                indices_tensor = torch.ByteTensor
-                indices_dtype = torch.uint8
-            else:
-                indices_tensor = torch.ShortTensor
-                indices_dtype = torch.short
+            positions = torch.arange(min_position,
+                                     max_position + resolution * 0.9,
+                                     resolution)
 
-            # extract positions of the array that actually contains objects
-            # crop data so that positions that don't contain objects
-            # are excluded
-            #objects_array = ~torch.isnan(position_array)
-            #positions_object = torch.nonzero(objects_array)
-            #min_pos_with_object = positions_object[:,0].min()
-
-            position_start = position_array
-            #max_nb_objects = position_start.shape[0]
-            #position_start = position_start[min_pos_with_object:max_nb_objects]
-
-            # transform object properties into multiples of resolution
-            # then transform length into end position
-            position_start = torch.div(position_start, resolution,
-                                       rounding_mode="floor")#.to(torch.short)
-            position_start = torch.unsqueeze(position_start, 1)
-
-            position_end = length_array.unsqueeze(1)
-
-            #position_end = position_end[min_pos_with_object:max_nb_objects]
-            position_end = torch.div(position_end + position_array.unsqueeze(1),
-                                     resolution,
-                                     rounding_mode="floor")#.to(indices_dtype)
-
-            # # remove negative numbers to only look at inside the neurite
-            # position_start[position_start < 0] = 0
-            # position_start = position_start#.to(indices_dtype)
-
-            # create indices array which each number
-            # corresponding to one position in space (in dimension 0)
-            indices = np.linspace(0,position_dimension, position_dimension+1)
-            indices = np.expand_dims(indices,
-                                     tuple(range(1,len(position_start.shape)-1)))
-            indices = indices_tensor(indices).unsqueeze(0).to(device=device)
-
-            # split by simulations to reduce memory usage, if needed
-            # otherwise high memory usage leads to
-            # massively increased processing time
-            # with this split, processing time increases linearly with
-            # array size (up to a certain max array size beyond which
-            # the for loop leads to a supralinear increase in processing time)
-
-            nb_objects = position_start.shape[2]
-
+            nb_objects = length_array.shape[1]
             # find way to dynamically determine ideal step size!
-            step_size = nb_objects
+            step_size = nb_objects  # 5
+            nb_steps = int(nb_objects / step_size)
+            start_nb_objects = torch.linspace(0, nb_objects - step_size,
+                                              nb_steps)
 
-            # calculate total memory needed
-            element_size = indices.element_size()
-            nb_elements = (indices.numel() * position_start.shape[0] *
-                           np.product(position_start.shape[3:]))
-            # divide by 1024 to prevent overflow
-            expected_size = 2 * ((nb_elements*element_size)/1024*step_size)
-            free_gpu_memory = (torch.cuda.get_device_properties(0).total_memory
-                               - torch.cuda.memory_reserved(0))/1024
-            if expected_size > free_gpu_memory:
-                step_size = math.floor(nb_objects /
-                                       math.ceil(expected_size/free_gpu_memory))
-            else:
-                step_size = nb_objects
+            all_data = 0
 
-            nb_steps = math.ceil(nb_objects/step_size)
-            start_nb_objects = torch.arange(start=0, end=nb_objects,
-                                            step=step_size)
-
-            # print(2, time.time() - start)
-            start = time.time()
-            nb_timepoints = position_start.shape[0]
             for start_nb_object in start_nb_objects:
                 end_nb_object = int((start_nb_object + step_size).item())
                 end_nb_object = min(end_nb_object, nb_objects)
                 start_nb_object = int(start_nb_object.item())
-                actual_step_size = end_nb_object - start_nb_object
-                # create boolean data array later by expanding each microtubule in space
-                # use index array to set all positions in boolean data array to True
-                # that are between start point and end point
-                data_array = ((indices.expand(nb_timepoints, -1,
-                                              actual_step_size,
-                                              *position_start.shape[3:])
-                            >= position_start[:,:, start_nb_object:end_nb_object]) &
-                            (indices.expand(nb_timepoints, -1, actual_step_size,
-                                              *position_start.shape[3:])
-                            <= position_end[:,:, start_nb_object:end_nb_object]))
 
-                # remove data from objects that have no length
-                # (e.g. objects that should only have one property will have 0
-                #  in the other property and therefore should have a density
-                #  of 0)
-                if not end_density:
-                    data_array[:,:,length_array[0,
-                                   start_nb_object:end_nb_object] == 0] = 0
-                # then sum across microtubules to get number of MTs at each position
-                data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
+                to_cuda = lambda x:numba.cuda.to_device(np.ascontiguousarray(x))
+
+                local_density = np.zeros((object_states.shape[0],
+                                          position_dimension,
+                                          *object_states.shape[-2:]))
+                local_density = to_cuda(local_density)
+
+                position_array_cuda = to_cuda(position_array[:,
+                                              start_nb_object:
+                                              end_nb_object].cpu().to(
+                    torch.float32))
+
+                length_array_cuda = to_cuda(length_array[:,start_nb_object:
+                                                           end_nb_object].cpu())
+
+                nb_parallel_cores = 32
+
+                nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
+
+                for timepoint in range(object_states.shape[0]):
+                    _get_local_and_total_density[nb_SM, nb_cc](local_density,
+                                                               resolution,
+                                                               start_nb_object,
+                                                               end_nb_object,
+                                                               position_array_cuda,
+                                                               length_array_cuda,
+                                                               timepoint,
+                                                               nb_parallel_cores)
+
+                local_density = local_density.copy_to_host()
+                data_array_sum = local_density
+                numba.cuda.synchronize()
+
+                # # then sum across microtubules to get number of MTs at each position
+                # data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
                 all_data = all_data + data_array_sum
                 # val_tmp = all_data[:2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-                del data_array
                 del data_array_sum
                 torch.cuda.empty_cache()
 
-        # print(3, time.time() - start)
-        start = time.time()
-        data_array = all_data[:,:-1]
+        data_array = all_data[:,:]
 
         dimensions = [-1] + [1] * (len(data_array.shape) - 2)
         positions = positions.view(*dimensions)[:-1]
@@ -923,8 +996,8 @@ class DataExtraction():
                                                    *positions.shape])
 
         data_dict = {}
-        data_dict["1D_density_position"] = positions.cpu()
-        data_dict["1D_density"] = data_array.cpu()
+        data_dict["1D_density_position"] = positions
+        data_dict["1D_density"] = torch.Tensor(data_array)
         del positions
 
         torch.cuda.empty_cache()
@@ -1242,25 +1315,40 @@ class ObjectRemovalCondition():
 
 class Parameter():
 
-    def __init__(self, values, type="rates", convert_half_lifes=True,
-                 dependence=None,
+    def __init__(self, values, scale="rates", convert_half_lifes=True,
+                 dependence=None, switch_timepoints=None,
                  name=""):
         """
 
         Args:
             values (Iterable): 1D Iterable (list, numpy array) of all values
-                which should be used. If type is half-lifes, then values will
+                which should be used. If scale is half-lifes, then values will
                 be converted to rates if convert_half_lifes is True.
-            type (String): Type of values supplied, can be "rates", "half-lifes"
+                Each sublist of parameter values represents the values until
+                a defined switchpoint. The index of the parameter values indicates
+                the index of the switch_timepoints at which parameter values
+                are switched to the next index (next group). For the last group
+                there is no switch timepoint defined, since these parameter
+                values will be active until the last timepoint.
+            scale (String): Type of values supplied, can be "rates", "half-lifes"
                 or "other". For half-lifes, values will be converted to rates
                 if convert_half_lifes is True.
             convert_half_lifes: Whether to convert half lifes to rates
             dependence: Dependence object to make parameter value
                 depend on something else,
-                e.g. position with LinearPositionDependence
+                e.g. position with PropertyDependence
+            switch_timepoints: Timepoints (in minutes) at which parameter values
+                change to the values in the next sublist. The number of switch
+                timepoints has to equal the number of sublists minus 1. E.g.
+                if two sublists of parameter values are defined
+                (e.g. [[0,1,2],[1,2,3]]) then one switch timepoint should be
+                defined.
             name (string): Name of parameter
         """
-        if (type == "half-lifes") & (convert_half_lifes):
+        if type(values[0]) not in [list, tuple]:
+            values = [values]
+
+        if (scale == "half-lifes") & (convert_half_lifes):
             lifetime_to_rates_factor = np.log(np.array([2]))
             self.values = torch.DoubleTensor(lifetime_to_rates_factor / values)
         else:
@@ -1270,8 +1358,11 @@ class Parameter():
         self.number = None
         self.value_array = torch.DoubleTensor([])
         self.dependence = dependence
+        self.switch_timepoints = None
+        if switch_timepoints is not None:
+            self.switch_timepoints = np.array(switch_timepoints)
 
-class LinearPositionDependence():
+class PropertyDependence():
 
     """
     Define a dependence of a parameter on the position of the object.
@@ -1281,12 +1372,24 @@ class LinearPositionDependence():
                  param_change = None,
                  param_change_is_abs = False,
                  pos_change_is_abs = False,
+                 properties = None,
                  name=None):
         """
+         implement parameters depending on property values,
+        as added to normal/baseline parameter value
+        as two values: value at start and/or end of neurite,
+        if both are defined, then the change per um is calculated
+        and definitions of change per um etc are not taken into
+        account
+        if one of the values is defined then the change from that
+        position (start or end of neurite) is defined by:
+        absolute or relative change per um or per % of length
+        Thereby, the added linearly changing part might even go to 0
 
         Params:
-            start_val: Parameter object for absolute start value of parameter
-            end_val: Parameter object for absolute end_val of parameter
+            start_val: Parameter object for absolute start value of parameter.
+            end_val: Parameter object for absolute end_val of parameter.
+                If end_val is defined but start_val is not defined, then
             param_change: Parameter object for
                 change of parameter per position change
             param_change_is_abs: Boolean of whether
@@ -1296,7 +1399,8 @@ class LinearPositionDependence():
             pos_change_is_abs: Boolean of whether
                 change of position in param_change
                 is absolute (in um) or relative (fraction of length)
-
+            properties: List of ObjectProperty objects that should be summed
+                to obtain the value that the parameter depends on
         """
         if (start_val is None) & (end_val is None):
             error_msg = ("When defining a dependence, the start "
@@ -1318,6 +1422,7 @@ class LinearPositionDependence():
         self.param_change = param_change
         self.param_change_is_abs = param_change_is_abs
         self.pos_change_is_abs = pos_change_is_abs
+        self.properties = properties
         self.name = name
         self.number = None
 
