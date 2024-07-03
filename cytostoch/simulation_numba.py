@@ -17,7 +17,7 @@ from matplotlib import pyplot as plt
 def _execute_simulation_gpu(object_states, properties_array, times,
                             nb_simulations, nb_parameter_combinations,
                             parameter_value_array,
-                            params_pos_dependence, position_dependence,
+                            params_prop_dependence, position_dependence,
                             object_dependent_rates,
                             transition_parameters, all_transition_states,
                             action_parameters, action_state_array,
@@ -243,7 +243,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                 success = _run_iteration(object_states,
                                          properties_array,
                                        times, parameter_value_array,
-                                         params_pos_dependence,
+                                         params_prop_dependence,
                                          position_dependence,
                                         object_dependent_rates,
                                        transition_parameters, all_transition_states,
@@ -281,7 +281,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
 
                                         first_last_idx_with_object,
 
-                                       timepoint_array,
+                                       timepoint_array, min_time,
                                        time_resolution, save_initial_state,
 
                                          nb_parallel_cores, thread_masks,
@@ -604,7 +604,7 @@ def _get_incrementing_core_ids_for_reassigned_thread(thread_to_sim_id,
 def _execute_simulation_cpu(object_states, properties_array, times,
                         nb_simulations, nb_parameter_combinations,
                             parameter_value_array,
-                            params_pos_dependence,
+                            params_prop_dependence,
                                          position_dependence,
                             object_dependent_rates,
                             transition_parameters, all_transition_states,
@@ -690,7 +690,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
             success = _run_iteration(object_states,
                                      properties_array,
                                        times, parameter_value_array,
-                            params_pos_dependence,
+                            params_prop_dependence,
                                          position_dependence,
                             object_dependent_rates,
                                        transition_parameters,
@@ -730,7 +730,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
 
                                      first_last_idx_with_object,
 
-                                       timepoint_array,
+                                       timepoint_array, min_time,
                                        time_resolution, save_initial_state,
 
                                      nb_parallel_cores, thread_masks,
@@ -787,7 +787,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                         #             print(property_vals_state)
                     # check that the calculated number of objects is correct
                     nb_objects = len(object_states[0][object_states[0] == state])
-                    saved_nb_objects = nb_objects_all_states[state,
+                    saved_nb_objects = nb_objects_all_states[0, state,
                                                              sim_id, param_id]
                     assert nb_objects == saved_nb_objects
                     # check that the maximum transition position is within
@@ -807,7 +807,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
 
 def _run_iteration(object_states, properties_array , times,
                    parameter_value_array,
-                            params_pos_dependence,
+                            params_prop_dependence,
                                          position_dependence,
                             object_dependent_rates,
                    transition_parameters, all_transition_states,
@@ -842,7 +842,7 @@ def _run_iteration(object_states, properties_array , times,
 
                    first_last_idx_with_object,
 
-                   timepoint_array,
+                   timepoint_array, min_time,
                    time_resolution, save_initial_state,
 
                    nb_parallel_cores, thread_masks,
@@ -887,7 +887,7 @@ def _run_iteration(object_states, properties_array , times,
     # then don't recalculate the transition rates each iteration
     # but just update the few rates affected by the changed object state
     _get_rates = _get_total_and_single_rates_for_state_transitions
-    _get_rates(parameter_value_array, params_pos_dependence, position_dependence,
+    _get_rates(parameter_value_array, params_prop_dependence, position_dependence,
                             object_dependent_rates,
                transition_parameters,
                all_transition_states, current_transition_rates, total_rates,
@@ -1051,6 +1051,9 @@ def _run_iteration(object_states, properties_array , times,
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
+        if times[0, sim_id, param_id] >= min_time:
+            return 1
+
     _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 action_state_array,
                                 properties_array ,
@@ -1093,7 +1096,7 @@ def _run_iteration(object_states, properties_array , times,
     # then get updated rates to have the correct nucleation rate and
     # total rate
     _get_rates = _get_total_and_single_rates_for_state_transitions
-    _get_rates(parameter_value_array, params_pos_dependence, position_dependence,
+    _get_rates(parameter_value_array, params_prop_dependence, position_dependence,
                         object_dependent_rates,
                transition_parameters,
                all_transition_states, current_transition_rates, total_rates,
@@ -1118,7 +1121,7 @@ def _run_iteration(object_states, properties_array , times,
                                             all_transition_states,
                                             nb_objects_all_states,
                                             all_transition_positions,
-                                            params_pos_dependence,
+                                            params_prop_dependence,
                                             object_dependent_rates,
                                             parameter_value_array,
                                         transition_parameters,
@@ -1143,6 +1146,7 @@ def _run_iteration(object_states, properties_array , times,
                           all_transition_positions, object_states,
                           nb_objects_all_states,
                           properties_array ,
+                          transition_parameters,
                           all_transition_tranferred_vals,
                           all_transition_set_to_zero_properties,
                           property_start_values,
@@ -1176,7 +1180,7 @@ def _run_iteration(object_states, properties_array , times,
 
     if math.isnan(times[0, sim_id, param_id]):
         if core_id == 0:
-            print(sim_id, nb_objects_all_states[0, sim_id, param_id])
+            print(sim_id, nb_objects_all_states[0, 0, sim_id, param_id])
         return 0
 
     thread_masks[0, sim_id, param_id] = 0
@@ -1206,11 +1210,11 @@ def _decorate_all_functions_for_cpu():
     #     _execute_simulation_cpu = numba.njit(_execute_simulation_cpu)
 
 
-    global _get_rate_of_pos_dependent_transition
-    if not isinstance(_get_rate_of_pos_dependent_transition,
+    global _get_rate_of_prop_dependent_transition
+    if not isinstance(_get_rate_of_prop_dependent_transition,
                       numba.core.registry.CPUDispatcher):
-        _get_rate_of_pos_dependent_transition = numba.njit(
-            _get_rate_of_pos_dependent_transition)
+        _get_rate_of_prop_dependent_transition = numba.njit(
+            _get_rate_of_prop_dependent_transition)
 
 
     global _run_iteration
@@ -1339,11 +1343,11 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
         _run_iteration = numba.cuda.jit(_run_iteration, debug=debug, opt=opt,
                                         fastmath=fastmath, lineinfo=lineinfo)
 
-    global _get_rate_of_pos_dependent_transition
-    if not isinstance(_get_rate_of_pos_dependent_transition,
+    global _get_rate_of_prop_dependent_transition
+    if not isinstance(_get_rate_of_prop_dependent_transition,
                       numba.cuda.dispatcher.CUDADispatcher):
-        _get_rate_of_pos_dependent_transition = numba.cuda.jit(
-            _get_rate_of_pos_dependent_transition, debug=debug, opt=opt,
+        _get_rate_of_prop_dependent_transition = numba.cuda.jit(
+            _get_rate_of_prop_dependent_transition, debug=debug, opt=opt,
             fastmath=fastmath, lineinfo=lineinfo)
 
     global _reassign_thread
@@ -1570,7 +1574,8 @@ def _get_nucleation_on_objects_rate(some_creation_on_objects,
     if math.isnan(transition_nb_creation_on_objects):
         return math.nan
 
-    parameter_nb = transition_parameters[int(transition_nb_creation_on_objects)]
+    parameter_nb = transition_parameters[int(transition_nb_creation_on_objects),
+                                         0]
     nucleation_on_objects_rate = parameter_value_array[int(parameter_nb),
                                                        0, param_id]
 
@@ -1824,7 +1829,7 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
 
 
 def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
-                                                      params_pos_dependence,
+                                                      params_prop_dependence,
                                                       position_dependence,
                                                       object_dependent_rates,
                                                       transition_parameters,
@@ -1863,7 +1868,7 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
         transition_states = all_transition_states[transition_nb]
         start_state = transition_states[0]
         transition_rate = parameter_value_array[int(transition_parameters[
-                                                        transition_nb]),
+                                                        transition_nb, 0]),
                                                 int(timepoint_array[
                                                         0, sim_id, param_id]),
                                                 param_id]
@@ -1879,20 +1884,36 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                          sim_id, param_id] = transition_rate
 
             # for nucleation multiply the nucleation rate by the fraction of
-            # free nucleation sites. Thereby implement a resource limitation
-            # for nucleation new microtubules.
-            current_transition_rates[transition_nb,
-                                     sim_id,
-                                     param_id] *= (nb_objects_all_states[0,
-                                                                         sim_id,
-                                                                         param_id]
-                                                   / object_states.shape[1])
+            # free nucleation sites if limited resources are defined.
+            # Thereby implement a resource limitation for nucleation new objects
+            if not math.isnan(transition_parameters[transition_nb, 1]):
+
+                # multiply by the percentage of unused resources.
+                # If all resources are used, the transition rate is 0.p
+                current_transition_rates[transition_nb,
+                                         sim_id,
+                                         param_id] *= ((transition_parameters[transition_nb, 1] -
+                                                       nb_objects_all_states[1, transition_nb,
+                                                                             sim_id,
+                                                                             param_id])
+                                                       / transition_parameters[transition_nb, 1])
+                # if transition_nb == 1:
+                #     if nb_objects_all_states[1, transition_nb,
+                #                                 sim_id,
+                #                                 param_id] > 0:
+                #         print(222, core_id, current_transition_rates[transition_nb,
+                #                                  sim_id, param_id],
+                #               transition_parameters[transition_nb, 1],
+                #               nb_objects_all_states[1, transition_nb,
+                #                                     sim_id,
+                #                                     param_id]
+                #               )
             # print((nb_objects_all_states[0,
             #                                                              sim_id,
             #                                                              param_id]
             #                                        / object_states.shape[0]))
         else:
-            nb_objects = nb_objects_all_states[int(start_state),
+            nb_objects = nb_objects_all_states[0, int(start_state),
                                                sim_id, param_id]
             current_transition_rates[transition_nb,
                                      sim_id, param_id] = (nb_objects *
@@ -1924,19 +1945,19 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
         transition_states = all_transition_states[transition_nb]
         # if the first value is nan then the parameter has no position
         # dependence
-        if not math.isnan(params_pos_dependence[int(transition_parameters[
-                                                        transition_nb]), 2]):
+        if not math.isnan(params_prop_dependence[int(transition_parameters[
+                                                        transition_nb, 0]), 2]):
             # if there is a position dependence, check whether the transition
             # actually might be executed (are there objects with the
             # the correct start state). Position dependent nucleation rate
             # is not supported at this stage and in fact would not need
             # per-object calculations.
             # print(current_transition_rates.shape[0])
-            if (nb_objects_all_states[int(transition_states[0]),
+            if (nb_objects_all_states[0, int(transition_states[0]),
                                       sim_id, param_id] > 0):
-                _get_rate_of_pos_dependent_transition(params_pos_dependence[int(
+                _get_rate_of_prop_dependent_transition(params_prop_dependence[int(
                                                         transition_parameters[
-                                                            transition_nb])],
+                                                            transition_nb, 0])],
                                                       parameter_value_array,
                                                       object_dependent_rates,
                                                       transition_nb,
@@ -1954,7 +1975,7 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
         transition_nb += 1
 
 
-def _get_rate_of_pos_dependent_transition(param_pos_dependence,
+def _get_rate_of_prop_dependent_transition(param_prop_dependence,
                                           parameter_value_array,
                                           object_dependent_rates,
                                          transition_nb,
@@ -1984,15 +2005,15 @@ def _get_rate_of_pos_dependent_transition(param_pos_dependence,
             # calculate the change from the start position value
             # otherwise take the end value as the starting state
 
-            base_value = cuda.selp(math.isnan(param_pos_dependence[0]),
+            base_value = cuda.selp(math.isnan(param_prop_dependence[0]),
                                    parameter_value_array[int(
-                                       param_pos_dependence[1]),
+                                       param_prop_dependence[1]),
                                                          int(timepoint_array[
                                                                  0, sim_id,
                                                                  param_id]),
                                                          param_id],
                                    parameter_value_array[int(
-                                       param_pos_dependence[0]),
+                                       param_prop_dependence[0]),
                                                          int(timepoint_array[
                                                                  0, sim_id,
                                                                  param_id]),
@@ -2001,84 +2022,90 @@ def _get_rate_of_pos_dependent_transition(param_pos_dependence,
             # add all defined properties to get the total property value
             # that the parameter value depends on
             end_position = 0
-            dependence_prop_nb = 6
-            while dependence_prop_nb < param_pos_dependence.shape[0]:
+            dependence_prop_nb = 7
+            while dependence_prop_nb < param_prop_dependence.shape[0]:
                 end_position += properties_array[0,
-                                                 int(param_pos_dependence[
+                                                 int(param_prop_dependence[
                                                          dependence_prop_nb]),
                                                  object_nb,
                                                  sim_id, param_id]
 
                 dependence_prop_nb += 1
 
-            position_diff = cuda.selp(math.isnan(param_pos_dependence[0]),
+            position_diff = cuda.selp(math.isnan(param_prop_dependence[0]),
                                       max_position - end_position,
                                       end_position)
 
             # if the change is per absolute position diff (0) or relative
             # position difference (1)
-            position_diff = cuda.selp(param_pos_dependence[3] == 0,
+            position_diff = cuda.selp(param_prop_dependence[3] == 0,
                                       position_diff,
                                       position_diff/max_position)
 
             # if change is not defined, get it from difference between
             # end and start value, divided by either absolute length in um
             # or relative length (1, unchanged value)
-            rate_diff = cuda.selp(math.isnan(param_pos_dependence[4]),
+            rate_diff = cuda.selp(math.isnan(param_prop_dependence[4]),
 
                                  (parameter_value_array[int(
-                                     param_pos_dependence[1]),
+                                     param_prop_dependence[1]),
                                                         int(timepoint_array[
                                                                 0, sim_id,
                                                                 param_id]),
                                                         param_id] -
                                   parameter_value_array[int(
-                                      param_pos_dependence[0]),
+                                      param_prop_dependence[0]),
                                                         int(timepoint_array[
                                                                 0, sim_id,
                                                                 param_id]),
                                                         param_id])
-                                  / cuda.selp(param_pos_dependence[3] == 0,
+                                  / cuda.selp(param_prop_dependence[3] == 0,
                                               max_position, float(1)),
 
                                   parameter_value_array[int(
-                                      param_pos_dependence[4]),
+                                      param_prop_dependence[4]),
                                                         int(timepoint_array[
                                                                 0, sim_id,
                                                                 param_id]),
                                                         param_id])
 
-            # for exponential position dependence
-            rate_diff = base_value * math.exp(- rate_diff * position_diff)
-            final_rate = rate_diff
+            # 0 for linear, 1 for exponential property dependence
+            rate_diff = cuda.selp(param_prop_dependence[6] == 0,
 
-            # print(end_position, position_diff, rate_diff, base_value)
+                                  cuda.selp(param_prop_dependence[2] == 0,
+                                            rate_diff * position_diff,
+                                            rate_diff * base_value
+                                            * position_diff),
 
-            # # if param_change is relative, multiply rate diff change with base value
-            # rate_diff = cuda.selp(param_pos_dependence[2] == 0,
-            #                       rate_diff,
-            #                       rate_diff * base_value)
-            #
-            # # prevent changes through position dependence smaller than 0
-            # # which would mean a reduction of the separately defined baseline
-            # # value. Such a reduction should be implemented through a reduced
-            # # separately defined baseline value of the parameter and a steeper
-            # # change of the position dependence.
-            # final_rate = max(0, base_value + rate_diff)
+                                  base_value *
+                                  math.exp(- rate_diff * position_diff))
 
-
-            # the maximum final rate allowed is the maximum of the value in the
+            # for linear parameter dependence:
+            # Prevent changes through parameter dependence smaller than 0
+            # which would mean a reduction of the separately defined baseline
+            # value. Such a reduction should be implemented through a reduced
+            # separately defined baseline value of the parameter and a steeper
+            # change of the position dependence.
+            # The maximum final rate allowed is the maximum of the value in the
             # start and end, don't allow values at positions in between the
             # start and the end to be higher than the maximum of both.
-            final_rate = min(max(param_pos_dependence[0],
-                                 param_pos_dependence[1]),
-                             final_rate)
 
-            # print(final_rate, rate_diff,
-            #       properties_array[0, 0, object_nb, sim_id, param_id],
-            #       max_position, position_diff)
+            final_rate = cuda.selp(param_prop_dependence[6] == 0,
 
-            object_dependent_rates[int(param_pos_dependence[5]),
+                                   min(max(param_prop_dependence[0],
+                                           param_prop_dependence[1]),
+                                       max(0, base_value + rate_diff)),
+
+                                   rate_diff)
+
+            # print(final_rate, rate_diff, base_value,
+            #       end_position, max_position, position_diff,
+            #       param_prop_dependence[6], # 0 for linear
+            #       # param_prop_dependence[2], # 0 for absolute change
+            #       param_prop_dependence[4] # change value, nan for none defined
+            #       )
+
+            object_dependent_rates[int(param_prop_dependence[5]),
                                    object_nb, sim_id, param_id] = final_rate
 
             cuda.atomic.add(current_transition_rates,
@@ -2629,10 +2656,13 @@ def _determine_next_transition(total_rates, current_transition_rates,
     while transition_nb < current_transition_rates.shape[0]:
         current_rate_sum += current_transition_rates[transition_nb,
                                                      sim_id, param_id]
-        if current_rate_sum >= threshold:
+        if round(current_rate_sum, 6) >= round(threshold, 6):
             current_transitions[sim_id, param_id] = transition_nb
-            break
+            return
         transition_nb += 1
+
+    print(666666, threshold, current_rate_sum, total_rates[sim_id, param_id],
+          random_number)
 
     return
 
@@ -2641,7 +2671,7 @@ def _determine_positions_of_transitions(current_transitions,
                                         all_transition_states,
                                         nb_objects_all_states,
                                         all_transition_positions,
-                                            params_pos_dependence,
+                                            params_prop_dependence,
                                             object_dependent_rates,
                                         parameter_value_array,
                                         transition_parameters,
@@ -2660,6 +2690,7 @@ def _determine_positions_of_transitions(current_transitions,
     # setting all positions where no catastrophe can take place to 0
     all_transition_positions[sim_id, param_id] = math.nan
     if math.isnan(current_transitions[sim_id, param_id]):
+        print(55555)
         return
 
     start_state = all_transition_states[int(current_transitions[sim_id,
@@ -2690,14 +2721,15 @@ def _determine_positions_of_transitions(current_transitions,
 
         # if the current transition does not have a dependence, choose a random
         # object for the transition
-        # params_pos_dependence needs the parameter number which one gets
+        # params_prop_dependence needs the parameter number which one gets
         # from transition parameters at the idx of the transition number
-        if math.isnan(params_pos_dependence[
+        if math.isnan(params_prop_dependence[
                           int(transition_parameters[int(
                               current_transitions[sim_id, param_id]
-                          ),]), 2]):
+                          ), 0]), 2]):
             # for all other states, choose a random position with that state
-            nb_objects = nb_objects_all_states[int(start_state), sim_id, param_id]
+            nb_objects = nb_objects_all_states[0, int(start_state),
+                                               sim_id, param_id]
             random_object_pos = math.floor(_get_random_number(sim_id, param_id,
                                                          rng_states,
                                                          simulation_factor,
@@ -2716,7 +2748,6 @@ def _determine_positions_of_transitions(current_transitions,
                 #     print(555, object_state, object_pos)
                 if (object_states[0, object_pos, sim_id, param_id] ==
                         start_state):
-
 
                     if current_nb_state_objects == random_object_pos:
                         all_transition_positions[sim_id, param_id] = object_pos
@@ -2752,14 +2783,14 @@ def _determine_positions_of_transitions(current_transitions,
 
             baseline_rate = parameter_value_array[int(
                 transition_parameters[int(current_transitions[sim_id, param_id]
-                                          ),]),
+                                          ), 0]),
                                                   int(timepoint_array[0, sim_id,
                                                                       param_id]),
                                                   param_id]
-            dependence_idx = int(params_pos_dependence[
+            dependence_idx = int(params_prop_dependence[
                                      int(transition_parameters[
                                              int(current_transitions[
-                                                     sim_id, param_id])]), 5])
+                                                     sim_id, param_id]), 0]), 5])
 
             # accumulate the linear and baseline rates for each object
             # until the threshold is crossed, then set the transition position
@@ -2787,15 +2818,15 @@ def _determine_positions_of_transitions(current_transitions,
                                                           object_pos,
                                                           sim_id, param_id]
 
-                    if current_sum > random_thresh:
+                    if round(current_sum, 6) >= round(random_thresh, 6):
                         all_transition_positions[sim_id, param_id] = object_pos
                         return
                 object_pos += 1
 
-            # print(object_pos, current_sum, random_thresh,
-            #       transition_rate,
-            #       baseline_rate, start_state,
-            #       nb_objects_all_states[int(start_state), sim_id, param_id])
+            print(44444, object_pos, current_sum, random_thresh,
+                  transition_rate,
+                  baseline_rate, start_state,
+                  nb_objects_all_states[0, int(start_state), sim_id, param_id])
 
     return
 
@@ -3260,6 +3291,7 @@ def _get_cumsum_of_local_density(local_density, total_density, thread_masks,
 def _update_object_states(current_transitions, all_transition_states,
                           all_transition_positions, object_states,
                           nb_objects_all_states, properties_array ,
+                          transition_parameters,
                           all_transition_tranferred_vals,
                           all_transition_set_to_zero_properties,
                           property_start_vals,
@@ -3286,16 +3318,42 @@ def _update_object_states(current_transitions, all_transition_states,
         # change the object counter according to the executed transition
         if core_id == 0:
             if start_state != 0:
-                nb_objects_all_states[int(start_state), sim_id, param_id] -= 1
+                nb_objects_all_states[0, int(start_state),
+                                      sim_id, param_id] -= 1
             else:
-                nb_objects_all_states[0, sim_id, param_id] -= 1
+                nb_objects_all_states[0, 0, sim_id, param_id] -= 1
+
+                # if resources for the object generation transition are defined,
+                # set generation method for object
+                if not math.isnan(
+                        transition_parameters[int(transition_number), 1]):
+                    # set as transition_number + 1 so that 0 indicates
+                    # not generated by a resource limited object generation
+                    object_states[1, int(transition_position),
+                                  sim_id, param_id] = transition_number + 1
+                    nb_objects_all_states[1, int(transition_number),
+                                          sim_id, param_id] += 1
+
             if end_state != 0:
-                nb_objects_all_states[int(end_state), sim_id, param_id] += 1
+                nb_objects_all_states[0, int(end_state), sim_id, param_id] += 1
             else:
-                nb_objects_all_states[0, sim_id, param_id] += 1
+                nb_objects_all_states[0, 0, sim_id, param_id] += 1
+                # set generation method of object to 0 since the object is
+                # removed
+                if object_states[1, int(transition_position),
+                                 sim_id, param_id] != 0:
+                    nb_objects_all_states[1,
+                                          object_states[1,
+                                                       int(transition_position),
+                                                       sim_id, param_id]-1,
+                                          sim_id, param_id] -= 1
+                    object_states[1, int(transition_position),
+                                  sim_id, param_id] = 0
 
         # change property values based on transitions
         if start_state == 0:
+
+
             # check if the idx for creating a new object is higher than
             # the currently highest idx
             if transition_position > first_last_idx_with_object[1,sim_id,
@@ -3572,6 +3630,7 @@ def _update_object_states(current_transitions, all_transition_states,
                     first_last_idx_with_object[0,sim_id,
                                                param_id] = transition_position
 
+
             # if an object was removed, set property values to NaN
             nb_properties = property_start_vals.shape[0]
             (property_nb,
@@ -3709,23 +3768,36 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
 
                     if nb_parallel_cores[sim_id, param_id] > 1:
                         cuda.atomic.add(nb_objects_all_states,
-                                        (object_state_to_remove,sim_id, param_id),
+                                        (0, object_state_to_remove,
+                                         sim_id, param_id),
                                         -1)
                         cuda.atomic.add(nb_objects_all_states,
-                                        (0,sim_id, param_id), 1)
+                                        (0, 0, sim_id, param_id), 1)
                         cuda.atomic.min(first_last_idx_with_object,
                                         (0, sim_id, param_id), object_pos)
                         # if object_pos < first_last_idx_with_object[0,sim_id, param_id]:
                         #     first_last_idx_with_object[0,sim_id,
                         #                          param_id] = object_pos
                     else:
-                        nb_objects_all_states[object_state_to_remove,
+                        nb_objects_all_states[0, object_state_to_remove,
                                               sim_id, param_id] -= 1
-                        nb_objects_all_states[0, sim_id, param_id] += 1
+                        nb_objects_all_states[0, 0, sim_id, param_id] += 1
                         if object_pos < first_last_idx_with_object[0,sim_id,
                                                                    param_id]:
                             first_last_idx_with_object[0,sim_id,
                                                        param_id] = object_pos
+                    # if object was generated by a resource limited generation
+                    # transition, reduce number of objects generated from that
+                    # transition and set object generation method to 0
+                    if object_states[1, int(object_pos),
+                                     sim_id, param_id] != 0:
+                        nb_objects_all_states[1,
+                                              object_states[1,
+                                                            int(object_pos),
+                                                            sim_id, param_id]-1,
+                                              sim_id, param_id] -= 1
+                        object_states[1, int(object_pos),
+                                      sim_id, param_id] = 0
 
                     object_states[0, int(object_pos),
                                   sim_id, param_id] = 0
@@ -3786,7 +3858,7 @@ def _save_values_with_temporal_resolution(timepoint_array,
         if object_pos > 0:
             object_state = object_states[0, object_pos, sim_id, param_id]
 
-            object_states[timepoint_idx+1,
+            object_states[timepoint_idx+2,
                         object_pos,
                         sim_id, param_id] = object_state
 

@@ -440,9 +440,11 @@ class SSA():
     def _get_transition_parameters(self):
         # - all transition rates
         nb_transitions = len(self.transitions)
-        transition_parameters = np.zeros((nb_transitions))
+        transition_parameters = np.full((nb_transitions, 2), np.nan)
         for nb, transition in enumerate(self.transitions):
-            transition_parameters[nb] = transition.parameter.number
+            transition_parameters[nb, 0] = transition.parameter.number
+            if transition.resources is not None:
+                transition_parameters[nb, 1] = transition.resources
         return transition_parameters
 
     def _get_transition_state_arrays(self):
@@ -686,7 +688,7 @@ class SSA():
                                                     axis=0)
         return first_last_idx_with_object
 
-    def _get_param_pos_dependence_array(self):
+    def _get_param_prop_dependence_array(self):
         """
         # implement linearly changing parameters,
         # as added to normal/baseline parameter value
@@ -731,8 +733,8 @@ class SSA():
                 nb_properties = len(dependence.properties)
             max_nb_properties = max(max_nb_properties, nb_properties)
 
-        params_pos_dependence = np.full((len(self.parameters),
-                                         6 + max_nb_properties),
+        params_prop_dependence = np.full((len(self.parameters),
+                                         7 + max_nb_properties),
                                         np.nan)
 
         position_dependence = False
@@ -745,26 +747,26 @@ class SSA():
             dependence = parameter.dependence
             if type(dependence.start_val) == type(self.parameters[0]):
                 start_val_param_nb = dependence.start_val.number
-                params_pos_dependence[param_nb, 0] = start_val_param_nb
+                params_prop_dependence[param_nb, 0] = start_val_param_nb
             if type(dependence.end_val) == type(self.parameters[0]):
                 end_val_param_nb = dependence.end_val.number
-                params_pos_dependence[param_nb, 1] = end_val_param_nb
+                params_prop_dependence[param_nb, 1] = end_val_param_nb
             # if the start and end values are defined but no change
             # calculate the linear change from the start to the end val
             if ((dependence.start_val is not None) &
                     (dependence.end_val is not None) &
                     (dependence.param_change is None)):
                 # use absolute changes of parameter
-                params_pos_dependence[param_nb, 2] = 0
+                params_prop_dependence[param_nb, 2] = 0
                 # change is per um length
-                params_pos_dependence[param_nb, 3] = 0
+                params_prop_dependence[param_nb, 3] = 0
 
                 # start_val_param = dependence.start_val
                 # end_val_param = dependence.end_val.number
                 # param_diff = (start_val_param.value_array -
                 #               end_val_param.value_array)
                 # abs_change = param_diff / self.properties[0].max_value
-                params_pos_dependence[param_nb, 4] = math.nan
+                params_prop_dependence[param_nb, 4] = math.nan
                 dependence_nb += 1
                 continue
 
@@ -773,33 +775,40 @@ class SSA():
                 rel_param_change = 0
             else:
                 rel_param_change = 1
-            params_pos_dependence[param_nb, 2] = rel_param_change
+            params_prop_dependence[param_nb, 2] = rel_param_change
 
-            if dependence.pos_change_is_abs:
+            if dependence.prop_change_is_abs:
                 rel_length_change = 0
             else:
                 rel_length_change = 1
-            params_pos_dependence[param_nb, 3] = rel_length_change
+            params_prop_dependence[param_nb, 3] = rel_length_change
 
             change_param = dependence.param_change
-            params_pos_dependence[param_nb, 4] = change_param.number
+            params_prop_dependence[param_nb, 4] = change_param.number
 
-            params_pos_dependence[param_nb, 5] = dependence_nb
+            params_prop_dependence[param_nb, 5] = dependence_nb
+
+            if dependence.function == "exponential":
+                function = 1
+            else:
+                function = 0
+
+            params_prop_dependence[param_nb, 6] = function
 
             # if properties are defined, add the property numbers of all
             # defined properties
             if dependence.properties is not None:
                 for property_nb, property in enumerate(dependence.properties):
-                    params_pos_dependence[param_nb,
-                                         6 + property_nb] = property.number
+                    params_prop_dependence[param_nb,
+                                         7 + property_nb] = property.number
             else:
                 # if properties are not defined, add all property numbers to
                 # the list
-                params_pos_dependence[param_nb, 6:] = list(range(len(self.properties)))
+                params_prop_dependence[param_nb, 7:] = list(range(len(self.properties)))
 
             dependence_nb += 1
 
-        return params_pos_dependence, position_dependence, dependence_nb
+        return params_prop_dependence, position_dependence, dependence_nb
 
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, save_initial_state=False,
@@ -1015,9 +1024,9 @@ class SSA():
         local_density_batches = None
         total_density_batches = None
 
-        (params_pos_dependence,
+        (params_prop_dependence,
          position_dependence,
-         nb_dependences) = self._get_param_pos_dependence_array()
+         nb_dependences) = self._get_param_prop_dependence_array()
 
         print(0, numba.cuda.current_context().get_memory_info()[
             0] / 1024 / 1024 / 1024)
@@ -1239,7 +1248,7 @@ class SSA():
                 all_transition_positions = np.zeros(param_shape_batch)
 
                 # create new object states object that includes data for all timepoints
-                object_states = np.zeros((nb_timepoints + 1,
+                object_states = np.zeros((nb_timepoints + 2,
                                           self.object_states.shape[0],
                                           *param_shape_batch),
                                          dtype=np.int32)
@@ -1250,12 +1259,13 @@ class SSA():
                     object_states[1] = self.object_states
 
                 # calculate number of objects for all states
-                nb_objects_all_states = np.zeros((len(self.states) + 1,
+                nb_objects_all_states = np.zeros((2, max(len(self.transitions),
+                                                      len(self.states)) + 1,
                                                   *param_shape_batch))
-                nb_objects_all_states[0] = self.object_states.shape[0]
+                nb_objects_all_states[0, 0] = self.object_states.shape[0]
 
                 for state_nb, state in enumerate(self.states):
-                    nb_objects_all_states[state_nb + 1] = np.sum(
+                    nb_objects_all_states[0, state_nb + 1] = np.sum(
                         object_states[0] == state.number, axis=0)
 
                 nb_properties = len(self.properties)
@@ -1291,7 +1301,7 @@ class SSA():
                 # the second index with respect to the timestep for reassigning threads
                 # from the third idx the actual timepoints at the respective savepoint
                 # are saved
-                timepoint_array = np.full((nb_timepoints + 1,
+                timepoint_array = np.full((nb_timepoints + 2,
                                            *param_shape_batch),
                                           math.nan)
 
@@ -1363,7 +1373,7 @@ class SSA():
                 first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
                 numba.cuda.profile_start()
 
-                # print(params_pos_dependence)
+                # print(params_prop_dependence)
                 # print(param_val_array_batch[:,0,0])
 
                 # print("Starting simulation batch...")
@@ -1374,7 +1384,7 @@ class SSA():
                             nb_simulations, #int32
                             param_combinations_per_batch, #int32
                             to_cuda(convert_array(param_val_array_batch)), #float32[:,:,:]
-                            to_cuda(convert_array(params_pos_dependence)),
+                            to_cuda(convert_array(params_prop_dependence)),
                             position_dependence,
                             object_dependent_rates_batch,
                             to_cuda(convert_array(transition_parameters)), #int32[:]
@@ -1445,7 +1455,7 @@ class SSA():
                 numba.cuda.profile_stop()
 
                 object_state_batch = torch.Tensor(
-                    object_states_batch.copy_to_host()[1:])
+                    object_states_batch.copy_to_host()[2:])
                 property_array_batch = torch.Tensor(
                     property_array_batch.copy_to_host()[1:])
                 times_batch = torch.Tensor(timepoint_array_batch.copy_to_host()[2:])
@@ -1723,7 +1733,7 @@ class SSA():
             all_potential_params = [dependence.start_val, dependence.end_val,
                                     dependence.param_change,
                                     dependence.param_change_is_abs,
-                                    dependence.pos_change_is_abs]
+                                    dependence.prop_change_is_abs]
             for potential_param in all_potential_params:
                 if type(potential_param) == type(self.parameters[0]):
                     # check whether parameter was already used somewhere else

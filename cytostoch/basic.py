@@ -62,8 +62,6 @@ def get_hist_data(input_data, bins, bin_size, output, nb_operations,
                 bin_nb = int(math.floor(input_data[timepoint, object_nb,
                                                    sim_nb, param_nb] / bin_size))
                 bin_nb = min(bin_nb, nb_bins-1)
-                # print(bin_nb, input_data[0, object_nb, sim_nb, param_nb],
-                #       object_nb)
                 # print(index, sim_nb, param_nb, bin_nb,
                 #       input_data[0, index,
                 #                  sim_nb, param_nb],
@@ -667,7 +665,13 @@ class DataExtraction():
                 #     property_array = torch.concat(property.array_buffer)
 
             property_array[mask_inv] = float("nan")
-            analysis_properties[name] = property_array
+
+            position = dimensions[0].positions[0].array.clone()
+            # only consider length starting from start of neurite
+            # therefore add all negative positions to property array
+            position[position > 0] = 0
+
+            analysis_properties[name] = property_array + position
 
         # create histogram of distributions for
 
@@ -676,7 +680,7 @@ class DataExtraction():
             nb_bins = int(np.ceil(max_length / bin_size)) + 1
         bins = np.linspace(0, max_length, nb_bins).astype(np.float32)
 
-        bins_torch = torch.linspace(0, max_length, nb_bins).to(torch.float32).to(simulation_object.device)
+        # bins_torch = torch.linspace(0, max_length, nb_bins).to(torch.float32).to(simulation_object.device)
 
         bins_cuda = numba.cuda.to_device(np.ascontiguousarray(bins))
         all_data_columns = ["number"]
@@ -730,6 +734,7 @@ class DataExtraction():
             # use numpy.histogram to compare results to custom implementation
             # print(np.histogram(values.cpu(), bins=nb_bins, range=(0, max_length))[0]/values.cpu().shape[2])
 
+            bins[-2] += bins[-1]
             bins = bins[:-1]
 
             data_dict["length_hist_" + name+"_bins"] = torch.Tensor(bins).unsqueeze(0).unsqueeze(2).unsqueeze(3).expand(hist.shape)
@@ -1371,8 +1376,9 @@ class PropertyDependence():
     def __init__(self, start_val = None, end_val = None,
                  param_change = None,
                  param_change_is_abs = False,
-                 pos_change_is_abs = False,
+                 prop_change_is_abs = False,
                  properties = None,
+                 function="linear",
                  name=None):
         """
          implement parameters depending on property values,
@@ -1396,11 +1402,14 @@ class PropertyDependence():
                 change of parameter is absolute
                 (in parameter units) or relative (in fraction of difference
                 between end_val and start_val)
-            pos_change_is_abs: Boolean of whether
+            prop_change_is_abs: Boolean of whether
                 change of position in param_change
                 is absolute (in um) or relative (fraction of length)
             properties: List of ObjectProperty objects that should be summed
                 to obtain the value that the parameter depends on
+            function: String "linear" or "exponential", determining the
+                type of parameter dependence. If "exponential", the param_change
+                is the rate (lambda) of the exponential function.
         """
         if (start_val is None) & (end_val is None):
             error_msg = ("When defining a dependence, the start "
@@ -1421,8 +1430,9 @@ class PropertyDependence():
 
         self.param_change = param_change
         self.param_change_is_abs = param_change_is_abs
-        self.pos_change_is_abs = pos_change_is_abs
+        self.prop_change_is_abs = prop_change_is_abs
         self.properties = properties
+        self.function = function
         self.name = name
         self.number = None
 
@@ -1457,6 +1467,8 @@ class StateTransition():
                 the time dependency function range from 0 to 1, which makes the
                 supplied rates maximum rates.
             name (str): Name of transition, used for data export and readability
+
+
         """
         self.start_state = start_state
         self.end_state = end_state
@@ -1467,6 +1479,7 @@ class StateTransition():
         self.transfer_property = transfer_property
         self.properties_set_to_zero = properties_set_to_zero
         self.name = name
+        self.resources = None
 
         # initialize variable that will be filled during simulation
         self.simulation_mask = torch.HalfTensor([])
@@ -1495,7 +1508,7 @@ class ObjectCreation(StateTransition):
 
     def __init__(self, state, parameter, changed_start_values=None,
                  creation_on_objects=False,
-                 time_dependency=None, name=""):
+                 time_dependency=None, resources = None, name=""):
         """
 
         Args:
@@ -1503,8 +1516,19 @@ class ObjectCreation(StateTransition):
             parameter:
             changed_start_values: List or tuple of ChangedStartValue objects
             time_dependency:
+
+            resources (int): How many active transitions are allowed. This is
+                only implemented for generating new objects. The generation
+                process they originate from will be tracked in the object_state
+                array at an additional index that will track the generation
+                process as transition number. Additionally, the current number
+                of objects generated from a specific transition is saved in the
+                nb_objects_all_states array as additional dimension with one
+                entry per transition. But only generating transitions with
+                defined resources will be tracked.
         """
         super().__init__(end_state=state, parameter=parameter,
                          time_dependency=time_dependency, name=name)
         self.changed_start_values = changed_start_values
         self.creation_on_objects = creation_on_objects
+        self.resources = resources
