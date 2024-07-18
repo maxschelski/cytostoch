@@ -12,6 +12,9 @@ import os
 import psutil
 import pickle
 import dill
+import re
+import socket
+import datetime
 
 # NUMBA_DEBUG=1
 # NUMBA_DEVELOPER_MODE = 1
@@ -186,7 +189,7 @@ class SSA():
                                "to" + str(end_state))
 
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
-              time_resolution, save_initial_state=False,
+              time_resolution, start_save_time=None, save_initial_state=False,
               max_number_objects=None,
                single_parameter_changes=True, nb_parallel_cores=1,
               all_parameter_combinations=False,
@@ -198,7 +201,7 @@ class SSA():
               remove_finished_sims=False, save_states=False,
               save_results=True, print_times=True,
               use_assertion_checks=True, reset_folder=True, bug_fixing=False,
-              choose_gpu=False):
+              choose_gpu=False, gpu_number=0):
         """
 
         Args:
@@ -251,33 +254,36 @@ class SSA():
             print(gpu_list)
             valid_input = False
             while not valid_input:
-                gpu_nb = input()
+                gpu_number = input()
                 try:
-                    gpu_nb = int(gpu_nb)
+                    gpu_number = int(gpu_number)
 
                 except:
                     print("You have to enter an integer number.\n"
                           + enter_number)
                     continue
 
-                if (gpu_nb < 0):
+                if (gpu_number < 0):
                     print("You have to enter a non negative number.\n"
                           + enter_number)
                     continue
 
-                if gpu_nb >= len(gpu_names):
+                if gpu_number >= len(gpu_names):
                     print(f"You can't enter a number larger than {number}.\n"
                           + enter_number)
                     continue
 
-                print(f"GPU {str(gpu_nb)} selected - "
-                      f"{gpu_names[gpu_nb]}")
+                print(f"GPU {str(gpu_number)} selected - "
+                      f"{gpu_names[gpu_number]}")
                 valid_input = True
-            cuda.select_device(gpu_nb)
+            cuda.select_device(gpu_number)
+
+        else:
+            cuda.select_device(gpu_number)
 
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
-                        time_resolution, save_initial_state,
+                        time_resolution, start_save_time, save_initial_state,
                         max_number_objects, all_parameter_combinations,
                         single_parameter_changes, nb_parallel_cores, seed,
                         ignore_errors=ignore_errors,
@@ -432,9 +438,10 @@ class SSA():
         for nb, parameter in enumerate(self.parameters):
             array = torch.Tensor(parameter.value_array[:,param_slice])
             # array = array.unsqueeze(1)
-            array = array.expand((1, nb_timepoints, param_shape_batch[1]))
+            # array = array.expand((nb_timepoints, param_shape_batch[1]))
             array = np.array(array.reshape((nb_timepoints, -1)))
             parameter_value_array[nb] = array
+
         return parameter_value_array
 
     def _get_transition_parameters(self):
@@ -444,7 +451,7 @@ class SSA():
         for nb, transition in enumerate(self.transitions):
             transition_parameters[nb, 0] = transition.parameter.number
             if transition.resources is not None:
-                transition_parameters[nb, 1] = transition.resources
+                transition_parameters[nb, 1] = transition.resources.number
         return transition_parameters
 
     def _get_transition_state_arrays(self):
@@ -531,12 +538,39 @@ class SSA():
 
     def get_creation_on_objects_array(self):
 
-        creation_on_objects = np.full(len(self.transitions), math.nan)
+        creation_on_objects = np.full((len(self.transitions)+1,
+                                       len(self.properties)),
+                                      math.nan)
+        all_properties_for_creation = set([])
         for transition_nb, transition in enumerate(self.transitions):
             if not hasattr(transition, "creation_on_objects"):
                 continue
             if transition.creation_on_objects:
-                creation_on_objects[transition_nb] = 1
+                # creation_on_objects[transition_nb] = 1
+                properties_for_creation = transition.properties_for_creation
+                # if properties for creation are defined, add them to the array
+                if properties_for_creation is not None:
+                    properties_to_add = []
+                    for (prop_nb,
+                         property) in enumerate(properties_for_creation):
+                        creation_on_objects[transition_nb,
+                                            prop_nb] = property.number
+                        properties_to_add.append(property.number)
+
+                    all_properties_for_creation.update(properties_to_add)
+                else:
+                    # if they are not defined, add all properties to array
+                    for prop_nb, property in enumerate(self.properties):
+                        creation_on_objects[transition_nb,
+                                            prop_nb] = property.number
+                    all_properties_for_creation.update(list(range(len(self.properties))))
+
+        # at the last index of creation_on_objects
+        # add all property numbers that are used in any of the transitions
+        # to know for which properties the object density should be calculated
+        for iteration_nb, property_nb in enumerate(all_properties_for_creation):
+            creation_on_objects[-1, iteration_nb] = property_nb
+
         return creation_on_objects
 
     def _get_transition_set_to_zero_properties(self):
@@ -811,7 +845,8 @@ class SSA():
         return params_prop_dependence, position_dependence, dependence_nb
 
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
-               time_resolution, save_initial_state=False,
+               time_resolution, start_save_time = None,
+               save_initial_state=False,
                max_number_objects=None, all_parameter_combinations=False,
                single_parameter_changes=True, nb_parallel_cores=1, seed=42,
                ignore_errors=False,
@@ -820,7 +855,8 @@ class SSA():
                dynamically_increase_nb_objects=False,
                remove_finished_sims=False, save_states=False,
                save_results=True, print_times=True,
-               use_assertion_checks=True, reset_folder=True,
+               use_assertion_checks=True, reset_folder=True, overwrite=False,
+               nb_simulations_same_name=999,
                bug_fixing=False):
         """
 
@@ -869,6 +905,34 @@ class SSA():
                 time.sleep(0.1)
             # os.mkdir(data_folder)
 
+        # if data should not be overwritten, create a new datafolder
+        # by appending a "__number" (e.g. "__001") to it
+        if not overwrite:
+            if os.path.exists(data_folder):
+                last_folder = os.path.basename(os.path.normpath(data_folder))
+                number_finder = re.compile("__([\d]+)$")
+                number_string = number_finder.search(last_folder)
+                number_len = len(str(nb_simulations_same_name))
+                if number_string is not None:
+                    number = number_string.group(1)
+                    # increase the number until the path does not exist
+                    # anymore
+                    while os.path.exists(data_folder):
+                        last_number = number
+                        number = int(number) + 1
+                        number = str(number).zfill(number_len)
+                        new_folder = last_folder.replace("__"+last_number,
+                                                         "__"+number)
+                        data_folder = data_folder.replace(last_folder,
+                                                          new_folder)
+                        last_folder = new_folder
+
+                else:
+                    number = 1
+                    number = str(number).zfill(number_len)
+                    new_folder = last_folder + "__" + number
+                    data_folder = data_folder.replace(last_folder, new_folder)
+
         if not os.path.exists(data_folder):
             os.mkdir(data_folder)
 
@@ -888,6 +952,9 @@ class SSA():
         self.all_parameter_combinations = all_parameter_combinations
         self.single_parameter_changes = single_parameter_changes
         self.time_resolution = time_resolution
+        if start_save_time is None:
+            start_save_time = 0
+        self.start_save_time = start_save_time
 
         if (not single_parameter_changes) & self.all_parameter_combinations:
             print("If the parameters single_parameter_changes is False, "
@@ -930,6 +997,7 @@ class SSA():
                                           all_parameter_combinations,
                                           nb_timepoints)
 
+
         # create index array in which each entry has the value of the index of
         # the microtubule in the simulation, thereby multi-D operations
         # on single simulations can be executed
@@ -970,7 +1038,7 @@ class SSA():
 
         property_start_values = self._get_property_start_val_arrays()
 
-        properties_array = self._get_property_vals_array()
+        # properties_array = self._get_property_vals_array()
 
         property_extreme_values = self._get_property_extreme_val_arrays()
 
@@ -1010,7 +1078,8 @@ class SSA():
         nb_parameter_combinations = np.sum(simulation_parameter_lengths)
 
         local_resolution = 0.02
-        local_density_size = int(20 / local_resolution) + 1
+        local_density_size = int(self.properties[0].max_value /
+                                 local_resolution) + 1
 
         if np.nansum(creation_on_objects) > 0:
             some_creation_on_objects = True
@@ -1027,6 +1096,7 @@ class SSA():
         (params_prop_dependence,
          position_dependence,
          nb_dependences) = self._get_param_prop_dependence_array()
+
 
         print(0, numba.cuda.current_context().get_memory_info()[
             0] / 1024 / 1024 / 1024)
@@ -1206,10 +1276,12 @@ class SSA():
                                                   *param_shape_batch))
                 # first dimensions is unsorted and sorted
                 properties_tmax = np.full((2, 32,
-                                           nb_properties - 1, *param_shape_batch),
+                                           nb_properties - 1,
+                                           *param_shape_batch),
                                           math.nan)
                 # properties_tmax_sorted = np.full((32,
-                #                                   nb_properties-1, *param_shape_batch),
+                #                                   nb_properties-1,
+                #                                   *param_shape_batch),
                 #                                  math.nan)
                 current_sum_tmax = np.zeros((32,
                                              nb_properties, *param_shape_batch))
@@ -1247,7 +1319,30 @@ class SSA():
 
                 all_transition_positions = np.zeros(param_shape_batch)
 
-                # create new object states object that includes data for all timepoints
+                # subtract number of timepoints before determining the
+                # size of data arrays
+                nb_timepoints = (nb_timepoints -
+                                 max(0, (math.floor(start_save_time /
+                                            time_resolution) - 1)))
+
+                # set arrays for values over time
+                # the first index is the current timepoint with respect to
+                # time_resolution
+                # the second index with respect to the timestep for
+                # reassigning threads from the third idx the actual timepoints
+                # at the respective savepoint are saved
+                timepoint_array = np.full((nb_timepoints + 2,
+                                           *param_shape_batch),
+                                          math.nan)
+
+
+                timepoint_array[:1] = 0
+
+                if save_initial_state:
+                    timepoint_array[2] = 0
+
+                # create new object states object that includes data for
+                # all timepoints
                 object_states = np.zeros((nb_timepoints + 2,
                                           self.object_states.shape[0],
                                           *param_shape_batch),
@@ -1275,12 +1370,15 @@ class SSA():
                                             *param_shape_batch),
                                            math.nan)
 
+                for property_nb, property in enumerate(self.properties):
+                    properties_array[0, property_nb] = property.array
+
                 if save_initial_state:
                     for property_nb, property in enumerate(self.properties):
                         properties_array[1, property_nb] = property.array
 
-
-                local_density = np.zeros((3, local_density_size, nb_simulations,
+                local_density = np.zeros((len(self.properties),
+                                          local_density_size, nb_simulations,
                                           param_combinations_per_batch))
 
                 total_density = np.zeros(
@@ -1288,27 +1386,13 @@ class SSA():
 
                 # first idx of first dimension is for constant term,
                 # second idx of first dimension is for second order term
-                # first idx of second dimension is for base part, second idx is for
-                # variable part
+                # first idx of second dimension is for base part, second idx is
+                # for variable part
                 tau_square_eq_terms = np.zeros(
                     (2, 2, nb_simulations, param_combinations_per_batch))
 
                 thread_masks = np.zeros((4, *param_shape_batch), dtype=np.int64)
 
-                # set arrays for values over time
-                # the first index is the current timepoint with respect to
-                # time_resolution
-                # the second index with respect to the timestep for reassigning threads
-                # from the third idx the actual timepoints at the respective savepoint
-                # are saved
-                timepoint_array = np.full((nb_timepoints + 2,
-                                           *param_shape_batch),
-                                          math.nan)
-
-                timepoint_array[:1] = 0
-
-                if save_initial_state:
-                    timepoint_array[2] = 0
 
                 timepoint_array = convert_array(timepoint_array)
                 properties_array = convert_array(properties_array)
@@ -1320,6 +1404,7 @@ class SSA():
                            int((nb_SM * nb_cc)))
 
                 thread_to_sim_id = np.zeros((size, 3))
+
 
                 """
                 Batched data:
@@ -1375,6 +1460,7 @@ class SSA():
 
                 # print(params_prop_dependence)
                 # print(param_val_array_batch[:,0,0])
+
 
                 # print("Starting simulation batch...")
                 sim[nb_SM,
@@ -1433,7 +1519,8 @@ class SSA():
                             first_last_idx_with_object,
 
                            timepoint_array_batch,
-                           time_resolution, min_time, save_initial_state,
+                           time_resolution, min_time, start_save_time,
+                        save_initial_state,
 
                             start_nb_parallel_cores,
                             nb_parallel_cores,
@@ -1446,7 +1533,8 @@ class SSA():
                            rng_states, simulation_factor, parameter_factor
                              )
                 if self.print_times:
-                    print("Simulation time: ", np.round(time.time() - start, 2), "\n")
+                    print("Simulation time: ",
+                          np.round(time.time() - start, 2), "\n")
 
                 # nb_parallel_cores = nb_parallel_cores.copy_to_host()
 
@@ -1542,7 +1630,7 @@ class SSA():
                                         if standard_param_val != param_val:
                                             param_val_string = (parameter.name +
                                                                 ": " +
-                                                                str(param_val))
+                                                                str(round(param_val,3)))
                                             found_param_change = True
                                             break
                                     # if (len(plot_data.shape) == 1):
@@ -1587,14 +1675,14 @@ class SSA():
                                 continue
                             if np.isnan(mean):
                                 continue
-                            print(sub_name, mean)
 
                 print("Saving raw and analyzed data ...")
                 if self.save_results:
                     self._save_times_and_object_states(batch_nb)
                     self._save_data(all_data, batch_nb)
 
-                # print(2, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+                # print(2, numba.cuda.current_context().get_memory_info()[0]
+                # /1024/1024/1024)
                 if nb_batches > 1:
                     self.data_buffer = []
                     del self.times
@@ -1614,7 +1702,8 @@ class SSA():
                     self.all_data = all_data
                 cuda.current_context().memory_manager.deallocations.clear()
                 torch.cuda.empty_cache()
-                print(3, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+                print(3, numba.cuda.current_context().get_memory_info()[0]
+                      /1024/1024/1024)
 
             del rng_states
             cuda.current_context().memory_manager.deallocations.clear()
@@ -1705,6 +1794,16 @@ class SSA():
         # used twice (some transitions may have the same parameter)
         parameters = [event.parameter for event in [*self.transitions,
                                                     *self.actions]]
+        for transition in self.transitions:
+            if not hasattr(transition, "resources"):
+                continue
+            if transition.resources is None:
+                continue
+            if not type(transition.resources) == type(parameters[0]):
+                raise ValueError("Resources have to be defined through a "
+                                 "parameter.")
+            parameters.append(transition.resources)
+
         param_nb = 0
         self.parameters = []
         for parameter in parameters:
@@ -1761,7 +1860,8 @@ class SSA():
         # check whether each parameter either only has a single value
         # or has a length that is similar between all parameters with more than
         # one value
-        if (not self.single_parameter_changes) & (not self.all_parameter_combinations):
+        if ((not self.single_parameter_changes) &
+                (not self.all_parameter_combinations)):
             unique_param_lengths = set(simulation_parameter_lengths)
             param_lengths = unique_param_lengths - set([1])
             if len(param_lengths) > 1:
@@ -1798,7 +1898,8 @@ class SSA():
                                             + 1)
             simulation_parameter_lengths = [simulation_parameter_lengths]
 
-        if self.dynamically_increase_nb_objects | (self.max_number_objects is None):
+        if (self.dynamically_increase_nb_objects |
+                (self.max_number_objects is None)):
             # if the number of objects allowed in the simulation should be
             # dynamically increased, first check the maximum number of objects
             # that the simulation starts with
@@ -1826,8 +1927,18 @@ class SSA():
         folder_link = ('=HYPERLINK("file://' + self.data_folder +
                               '","'+os.path.basename(self.data_folder)+'")')
         metadata["folder"] = [folder_link]
+        new_parameter_names = []
         for parameter in self.parameters:
             metadata[parameter.name] = str(list(np.unique(parameter.values)))
+            new_parameter_names.append(parameter.name)
+
+        if parameter.switch_timepoints is not None:
+            metadata["time_switch_"+parameter.name] = str(parameter.switch_timepoints)
+
+        date_time = datetime.datetime.now()
+        date_string = date_time.strftime("%Y%m%d-%H%M")
+        metadata["datetime"] = date_string
+
         metadata["all_param_combinations"] = str(self.all_parameter_combinations)
         metadata["nb_of_states"] = [len(self.states)]
         metadata["states"] = [str([state.name for state in self.states])]
@@ -1854,6 +1965,7 @@ class SSA():
         metadata["max_number_objects"] = [max_number_objects]
         metadata["time_resolution"] = self.time_resolution
         metadata["min_time"] = self.min_time
+        metadata["simulation_computer"] = socket.gethostname()
 
         file_path = os.path.join(self.data_folder, "metadata.csv")
         metadata.to_csv(file_path)
@@ -1871,22 +1983,36 @@ class SSA():
                 if column not in metadata.columns:
                     metadata[column] = ""
 
-            folder_in_summary = simulations_summary["folder"] == folder_link
-            # prevent creating multiple entries for the same folder
-            if len(simulations_summary.loc[folder_in_summary]) > 0:
-                for column in metadata.columns:
-                    val = metadata.iloc[0][column]
-                    simulations_summary.loc[folder_in_summary, column] = [val]
-                # print(len(metadata.iloc[0].values))
-                # print(simulations_summary.loc[simulations_summary["folder"] ==
-                #                         folder_link].values)
-                # print(len(simulations_summary.loc[simulations_summary["folder"] ==
-                #                         folder_link].values[0]))
-                # simulations_summary.loc[simulations_summary["folder"] ==
-                #                         folder_link] = metadata.iloc[0].values
-            else:
-                # if the folder is not present already, add it
-                simulations_summary = pd.concat([simulations_summary, metadata])
+            # remove rows in the simulations summary that have the same number
+            # folder link
+            simulations_summary = simulations_summary.loc[simulations_summary["folder"]
+                                                          != folder_link]
+
+            # only keep rows for which the folder columns starts with HYPERLINK
+            correct_rows = simulations_summary["folder"]
+            correct_rows = correct_rows.str.startswith("=HYPERLINK(")
+            simulations_summary = simulations_summary.loc[correct_rows]
+
+            simulations_summary = pd.concat([simulations_summary, metadata])
+
+            simulations_summary.reset_index(inplace=True)
+            simulations_summary.drop("index", axis=1, inplace=True)
+
+            # resort columns to first have rate columns
+            rate_columns = []
+            non_rate_columns = []
+            for column in simulations_summary:
+                if (column.startswith("k_") | column.startswith("v_") |
+                        (column in new_parameter_names)):
+                    rate_columns.append(column)
+                else:
+                    if column not in ["folder", "nb_simulations", "datetime"]:
+                        non_rate_columns.append(column)
+
+            simulations_summary = simulations_summary[["folder", "datetime",
+                                                       *rate_columns,
+                                                       "nb_simulations",
+                                                       *non_rate_columns]]
 
             simulations_summary.to_csv(simulations_summary_path)
 
@@ -1904,7 +2030,8 @@ class SSA():
                                  f"is to use the __file__ variable.")
             script_file_name = os.path.basename(self.script_path)
             experiment = os.path.basename(self.data_folder)
-            script_file_name = script_file_name.replace(".py", "_"+experiment+".py")
+            script_file_name = script_file_name.replace(".py",
+                                                        "_"+experiment+".py")
             new_script_path = os.path.join(self.data_folder, script_file_name)
             shutil.copy(self.script_path, new_script_path)
 
@@ -1933,7 +2060,8 @@ class SSA():
         nb_cc_cores = cc_cores_per_SM_dict[device.compute_capability]
         return nb_SM, nb_cc_cores
 
-    def _get_random_number_func(self, nb_parameter_combinations, nb_simulations, seed):
+    def _get_random_number_func(self, nb_parameter_combinations, nb_simulations,
+                                seed):
         # get way to get unique number for each combination of simulation
         # and parameter combination
         parameters_log10 = math.log10(nb_parameter_combinations)
@@ -2066,7 +2194,8 @@ class SSA():
                 # if param_switch_timepoints is defined
                 if param_switch_timepoints is not None:
                     if param_timepoint_nb < len(param_switch_timepoints):
-                        switch_timepoint = param_switch_timepoints[param_timepoint_nb]
+                        switch_timepoint = param_switch_timepoints[
+                            param_timepoint_nb]
                     else:
                         switch_timepoint = nb_timepoints
                 else:
@@ -2074,13 +2203,13 @@ class SSA():
 
                 if not single_parameter_changes:
                     if len(param_vals) == 1:
-                        array = param_vals.repeat((simulation_parameter_lengths))
+                        array = param_vals.repeat(
+                            (simulation_parameter_lengths))
                     else:
-                        array = model_parameters.values
+                        array = param_vals#model_parameters.values
                     array = torch.Tensor(array)
                     # array = array.expand(1, *self._simulation_array_size[1:])
                     # model_parameters.value_array = array
-
                 elif all_parameter_combinations:
                     array_dimension = dimension + 2
                     expand_dimensions = copy.copy(all_dimensions)
@@ -2088,27 +2217,30 @@ class SSA():
                     # expand dimensions of parameter values to simulation array
                     array = np.expand_dims(param_vals,
                                            expand_dimensions)
-                    # save array in object, therefore also change objects saved in
-                    # self.transitions and self.actions
+                    # save array in object, therefore also change objects saved
+                    # in self.transitions and self.actions
                     array = torch.Tensor(array)
                 else:
                     standard_value = param_vals[0]
                     standard_value = torch.Tensor([standard_value])
                     # use standard value across entire array
                     array = standard_value.repeat((simulation_parameter_lengths))
-                    # then get the position/s at which the values should be changed
-                    # which is starting at the number of previously changed
-                    # positions (for other parameters)
-                    # the first position should be all the standard values without
-                    # any change
-                    # the following positions should be the single parameter changes
-                    # therefore, the number of additional parameters is the total
-                    # number minus 1
-                    nb_add_params = len(model_parameters.values) - 1
-                    if len(model_parameters.values) > 1:
+                    # then get the position/s at which the values
+                    # should be changed which is starting at the number
+                    # of previously changed positions (for other parameters)
+                    # the first position should be all the standard values
+                    # without any change
+                    # the following positions should be the single parameter
+                    # changes therefore, the number of additional parameters
+                    # is the total number minus 1
+                    nb_add_params = model_parameters.values.shape[1] - 1
+                    if nb_add_params > 0:
                         start = nb_previous_params + 1
                         end = start + nb_add_params
-                        array[start:end] = model_parameters.values[1:]
+                        # if the first dimension of the array is larger than 1
+                        # fill each array with the correct shape
+                        array[start:end] = model_parameters.values[
+                                           param_timepoint_nb,1:]
                     nb_previous_params += nb_add_params
                 if all_timepoints_array is None:
                     all_timepoints_array = np.zeros((nb_timepoints,
@@ -2126,6 +2258,7 @@ class SSA():
             model_parameters.value_array = all_timepoints_array
             # model_parameters.value_array = np.array(array.reshape((array.shape[1],
             #                                                       -1)))
+
         return None
 
     def _initialize_object_states(self, param_shape_batch):
@@ -2255,7 +2388,6 @@ class SSA():
             else:
                 object_property.array = object_property.array.masked_scatter(object_state_mask,
                                                                              property_values)
-
         return None
 
     def _get_random_poperty_values(self, min_value,

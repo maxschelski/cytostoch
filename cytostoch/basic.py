@@ -733,8 +733,8 @@ class DataExtraction():
 
             # use numpy.histogram to compare results to custom implementation
             # print(np.histogram(values.cpu(), bins=nb_bins, range=(0, max_length))[0]/values.cpu().shape[2])
-
-            bins[-2] += bins[-1]
+            # hist[-2] += hist[-1]
+            # hist = hist[:-1]
             bins = bins[:-1]
 
             data_dict["length_hist_" + name+"_bins"] = torch.Tensor(bins).unsqueeze(0).unsqueeze(2).unsqueeze(3).expand(hist.shape)
@@ -879,7 +879,7 @@ class DataExtraction():
                 length_array = length_array + new_length_array
         else:
             length_array = position_array.clone()
-            length_array[:] = 0
+            length_array[:] = resolution/100
 
         if state_numbers is not None:
             # get mask for all objects in defined state
@@ -996,7 +996,7 @@ class DataExtraction():
         data_array = all_data[:,:]
 
         dimensions = [-1] + [1] * (len(data_array.shape) - 2)
-        positions = positions.view(*dimensions)[:-1]
+        positions = positions.view(*dimensions)
         positions = positions.unsqueeze(0).expand([data_array.shape[0],
                                                    *positions.shape])
 
@@ -1350,7 +1350,9 @@ class Parameter():
                 defined.
             name (string): Name of parameter
         """
-        if type(values[0]) not in [list, tuple]:
+        try:
+            iter(values[0])
+        except TypeError:
             values = [values]
 
         if (scale == "half-lifes") & (convert_half_lifes):
@@ -1507,7 +1509,7 @@ class ObjectCreation(StateTransition):
     """
 
     def __init__(self, state, parameter, changed_start_values=None,
-                 creation_on_objects=False,
+                 creation_on_objects=False, properties_for_creation=None,
                  time_dependency=None, resources = None, name=""):
         """
 
@@ -1531,4 +1533,5 @@ class ObjectCreation(StateTransition):
                          time_dependency=time_dependency, name=name)
         self.changed_start_values = changed_start_values
         self.creation_on_objects = creation_on_objects
+        self.properties_for_creation = properties_for_creation
         self.resources = resources

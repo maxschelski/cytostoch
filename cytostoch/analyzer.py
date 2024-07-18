@@ -5,6 +5,7 @@ import os
 import re
 import copy
 import time
+from tqdm import tqdm
 
 
 class Analyzer():
@@ -78,81 +79,104 @@ class Analyzer():
         self._rename_files_for_sorting(self.data_folder)
 
         print("Starting loading time files...")
+        params_removed = False
+        if self.simulation is None:
+            all_times = self._load_data(self.data_folder,
+                                        file_name_keyword="times")
 
-        all_times, params_removed = self._load_data(self.data_folder,
-                                                    file_name_keyword="times")
+            removed_vals_filename = "removed_param_values.feather"
+            # load removed_param_value data
+            if ((removed_vals_filename not in os.listdir(self.data_folder))
+                    & params_removed):
+                raise ValueError(
+                    "No file for removed parameter values was found. "
+                    "But the shape of arrays changes - therefore,"
+                    "param values were removed. Maybe the file name"
+                    "is not 'removed_param_values.feather' anymore or "
+                    "the file was moved to another folder?")
+            removed_param_vals_path = os.path.join(self.data_folder,
+                                                   removed_vals_filename)
+            removed_param_vals = None
+            if os.path.exists(removed_param_vals_path):
+                removed_param_vals = pd.read_feather(removed_param_vals_path)
+
+            self.array_resizing_dict = {}
+
+            # Reconstruct full time arrays by going through removed param values
+            # grouped by timepoint
+            # create list of ALL indices for all dimensions from first timepoint
+            self.all_dim_list = [torch.IntTensor(range(shape)).to(self.device)
+                                 for shape in all_times[0].shape[2:]]
+
+            if removed_param_vals is not None:
+                removed_param_vals.groupby(["iteration_nb"]
+                                           ).apply(
+                    self._build_array_resize_dict)
+
+                print("Starting concatenating arrays with removed params")
+                # for time in all_times:
+
+                all_times = self._concat_arrays_with_removed_param_vals(
+                    all_times)
+            else:
+                all_times = torch.concat(all_times)
+        else:
+            all_times = self.simulation.times.to(self.device)
+
         print("Finished loading time files.")
         parameters = self._load_parameters()
-
-        removed_vals_filename = "removed_param_values.feather"
-        # load removed_param_value data
-        if ((removed_vals_filename not in os.listdir(self.data_folder))
-                & params_removed):
-            raise ValueError("No file for removed parameter values was found. "
-                             "But the shape of arrays changes - therefore,"
-                             "param values were removed. Maybe the file name"
-                             "is not 'removed_param_values.feather' anymore or "
-                             "the file was moved to another folder?")
-        removed_param_vals_path = os.path.join(self.data_folder,
-                                               removed_vals_filename)
-        removed_param_vals = None
-        if os.path.exists(removed_param_vals_path):
-            removed_param_vals = pd.read_feather(removed_param_vals_path)
-
-        self.array_resizing_dict = {}
-
-        # Reconstruct full time arrays by going through removed param values
-        # grouped by timepoint
-        # create list of ALL indices for all dimensions from first timepoint
-        self.all_dim_list = [torch.IntTensor(range(shape)).to(self.device)
-                             for shape in all_times[0].shape[2:]]
-
-        if removed_param_vals is not None:
-            removed_param_vals.groupby(["iteration_nb"]
-                                       ).apply(self._build_array_resize_dict)
-
-            print("Starting concatenating arrays with removed params")
-            # for time in all_times:
-
-            all_times = self._concat_arrays_with_removed_param_vals(all_times)
-        else:
-            all_times = torch.concat(all_times)
-
         time_array = all_times
         # go through each folder that contains sub data
         # There is one folder for each function in DataExtraction used.
         # Time and parameter data is in the parent folder and therefore does
         # not need to be looked at per folder (therefore before this for loop)
-        for folder_name in os.listdir(self.data_folder):
-            if not folder_name.startswith("_data"):
-                continue
-            data_path = os.path.join(self.data_folder, folder_name)
-            if not os.path.isdir(data_path):
-                continue
-            print("Rename files for sorting...")
-            self._rename_files_for_sorting(data_path)
-            data_keywords = self._get_data_keywords(data_path)
-            if "times" in data_keywords:
-                data_keywords.remove("times")
+        if self.simulation is None:
+            all_data_dict = {}
+            for folder_name in os.listdir(self.data_folder):
+                if not folder_name.startswith("_data"):
+                    continue
+                data_path = os.path.join(self.data_folder, folder_name)
+                if not os.path.isdir(data_path):
+                    continue
+                all_data_dict[data_path] = {}
+                print("Rename files for sorting...")
+                self._rename_files_for_sorting(data_path)
+                data_keywords = self._get_data_keywords(data_path)
+                if "times" in data_keywords:
+                    data_keywords.remove("times")
+                for data_keyword in data_keywords:
+                    new_data = self._load_data(data_path,
+                                               file_name_keyword=data_keyword)
+                    new_data = self._equalize_object_nb(new_data)
+                    try:
+                        new_data = torch.concat(new_data)
+                    except:
+                        concat_func = self._concat_arrays_with_removed_param_vals
+                        new_data = concat_func(new_data)
+                    all_data_dict[data_path][data_keyword] = new_data
+        else:
+            all_data_dict = {}
+            for data_name, data in self.simulation.all_data.items():
+                data_path = os.path.join(self.data_folder, "_data_"+data_name)
+                if not os.path.exists(data_path):
+                    os.mkdir(data_path)
+                all_data_dict[data_path] = {}
+                for keyword, data_array in data.items():
+                    all_data_dict[data_path][keyword] = data_array.cpu()
+
+        print("Analyzer saving data...")
+        for data_path, data_dict in tqdm(all_data_dict.items()):
             all_data = {}
-            for data_keyword in data_keywords:
-                new_data, _ = self._load_data(data_path,
-                                              file_name_keyword=data_keyword)
-                new_data = self._equalize_object_nb(new_data)
-                try:
-                    new_data = torch.concat(new_data)
-                except:
-                    concat_func = self._concat_arrays_with_removed_param_vals
-                    new_data = concat_func(new_data)
+            for data_keyword, new_data in data_dict.items():
                 # sort data by number of datapoints for each timepoint
                 # since for each different number of datapoints, a new dataframe
                 if new_data.shape[1] not in all_data:
                     all_data[new_data.shape[1]] = {}
                 all_data[new_data.shape[1]][data_keyword] = new_data
                 del new_data
-            print("All data batches loaded.")
+            #print("All data batches loaded.")
             all_data = self._add_single_datapoint_data_to_other_sets(all_data)
-            print("Saving data...")
+            #print("Saving data...")
             self._save_all(all_data, time_array, parameters, data_path)
 
             del all_data
@@ -234,7 +258,6 @@ class Analyzer():
         all_data = []
         old_shape = ()
         new_data_array = None
-        params_removed = False
         # Load all data files, then concatenate together
         file_nb = 0
         for file_name in sorted(os.listdir(data_folder)):
@@ -255,8 +278,6 @@ class Analyzer():
                     # second dimension indicates the number of objects,
                     # which does not inform about whether parameter values
                     # were removed)
-                    if new_shape[2:] != old_shape[2:]:
-                        params_removed = True
                     all_data.append(torch.concat(new_data_array))
                 new_data_array = [new_data]
                 old_shape = new_shape
@@ -265,7 +286,7 @@ class Analyzer():
 
         all_data.append(torch.concat(new_data_array))
 
-        return all_data, params_removed
+        return all_data
 
     def _build_array_resize_dict(self, removed_params):
         iteration_nb = removed_params["iteration_nb"].unique()[0]
@@ -560,8 +581,24 @@ class Analyzer():
             data_values = []
             column_names = []
             # first add time data
-            data_values.append(time_array.cpu().expand(data_shape)
-                               .flatten().unsqueeze(1))
+            # print(time_array.shape, data_shape)
+            # print("new data shape: ", data_shape)
+            # for one_data_shape in data_shapes:
+            #     print(one_data_shape)
+
+            # if data_shape at last two positions (simulations and parameters)
+            # is 1 then the data is simulation invariant
+            if (data_shape[-2] == 1) & (data_shape[-1] == 1):
+                time_shape = [slice(None) for _ in time_array.shape]
+                time_shape[-1] = 0
+                time_shape[-2] = 0
+                time_array = time_array[time_shape]
+
+            # get equal dimensions for time array and data shape
+            while len(time_array.shape) < len(data_shape):
+                time_array = time_array.unsqueeze(-1)
+
+            data_values.append(time_array.cpu().expand(data_shape).flatten().unsqueeze(1))
             column_names.append("time")
             # add information about simulation number
             simulation_array_shape = [1 for _ in data_shape]
@@ -574,7 +611,31 @@ class Analyzer():
 
             # next add all simulation parameters
             for name, parameter in parameters.items():
-                data_values.append(torch.Tensor(parameter).cpu().expand(
+                # print(parameter.shape, data_shape)
+                # print(torch.Tensor(parameter).unsqueeze(2).unsqueeze(1).expand(data_shape).shape)
+                # print(torch.Tensor(parameter).unsqueeze(1).unsqueeze(2).shape)
+
+                # ONLY TAKE PARAMETER VALUE BEFORE TIMESWITCH!
+                if len(parameter.shape) > 2:
+                    parameter = parameter[:, :, 0]
+
+                # if recording of values did not start at t = 0,
+                # parameter size might be too large in first dimension
+                # since it contains the parameter value for each timepoint at
+                # the defined resolution, even before recording of data started
+                # therefore select the last data of parameter that corresponds
+                # to the parameter values after data recording started
+                if parameter.shape[0] > data_shape[0]:
+                    parameter = parameter[-data_shape[0]:]
+
+                # if the last dimensions is larger for parameter
+                # get the same size of the last dimension as for the data_shape
+                if parameter.shape[-1] > data_shape[-1]:
+                    param_idx = [slice(shape) for shape in parameter.shape]
+                    param_idx[-1] = slice(data_shape[-1])
+                    parameter = parameter[*param_idx]
+
+                data_values.append(torch.Tensor(parameter).unsqueeze(1).unsqueeze(2).cpu().expand(
                     data_shape).flatten().unsqueeze(1))
                 column_names.append(name)
 
@@ -589,6 +650,6 @@ class Analyzer():
             dataframe = pd.DataFrame(data=data, columns=column_names)
             # file_name = "_".join(column_names[1:])
             file_name = "data"
-            print("Saving dataframe...")
+            #print("Saving dataframe...")
             dataframe.to_feather(os.path.join(data_folder,
                                               file_name + ".feather"))
