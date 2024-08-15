@@ -61,7 +61,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                             start_nb_parallel_cores, nb_parallel_cores,
                             thread_masks, thread_to_sim_id,
 
-                            local_density, local_resolution,total_density,
+                            local_density, local_resolution, total_density,
                             rng_states, simulation_factor, parameter_factor
                         ):
     # np.random.seed(seed)
@@ -1336,6 +1336,12 @@ def _decorate_all_functions_for_cpu():
                       numba.core.registry.CPUDispatcher):
         _update_object_states = numba.njit(_update_object_states)
 
+    global _get_density_dependent_position
+    if not isinstance(_get_density_dependent_position,
+                      numba.core.registry.CPUDispatcher):
+        _get_density_dependent_position = numba.njit(
+            _get_density_dependent_position)
+
     global _save_values_with_temporal_resolution
     if not isinstance(_save_values_with_temporal_resolution,
                       numba.core.registry.CPUDispatcher):
@@ -1515,6 +1521,15 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
                                                     fastmath=fastmath,
                                                  lineinfo=lineinfo)
 
+    global _get_density_dependent_position
+    if not isinstance(_get_density_dependent_position,
+                      numba.cuda.dispatcher.CUDADispatcher):
+        _get_density_dependent_position = numba.cuda.jit(
+            _get_density_dependent_position,
+            debug=debug, opt=opt,
+            fastmath=fastmath,
+            lineinfo=lineinfo)
+
     global _update_object_states
     if not isinstance(_update_object_states,
                       numba.cuda.dispatcher.CUDADispatcher):
@@ -1589,7 +1604,7 @@ def _get_nucleation_on_objects_rate(creation_on_objects,
     transition_nb = 0
     transition_nb_creation_on_objects = math.nan
     while transition_nb < creation_on_objects.shape[0]:
-        if (not math.isnan(creation_on_objects[transition_nb, 0])):
+        if (not math.isnan(creation_on_objects[transition_nb, 0, 0])):
             transition_nb_creation_on_objects = transition_nb
             break
         transition_nb += 1
@@ -1720,8 +1735,10 @@ def _reset_local_density(local_density, nb_parallel_cores, core_id,
                                                                     param_id],
                                                   core_id)
     while x_pos < last_x_pos:
-        local_density[0, x_pos, sim_id, param_id] = 0
-        local_density[1, x_pos, sim_id, param_id] = 0
+        property_nb = 0
+        while property_nb < local_density.shape[0]:
+            local_density[property_nb, x_pos, sim_id, param_id] = 0
+            property_nb += 1
         x_pos += 1
 
 
@@ -1784,16 +1801,18 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                                  core_id, sim_id, param_id):
         # get density of MTs at timepoint
         if core_id == 0:
-            total_density[sim_id, param_id] = 0
+            property_nb = 0
+            while property_nb <= total_density.shape[0]:
+                total_density[property_nb, sim_id, param_id] = 0
+                property_nb += 1
 
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
         nb_objects = first_last_idx_with_object[1,sim_id, param_id] + 1
         (object_pos,
-         last_object_pos) = _get_first_and_last_object_pos(nb_objects,
-                                                        nb_parallel_cores[sim_id, param_id],
-                                                        core_id)
+         last_object_pos) = _get_first_and_last_object_pos(
+            nb_objects, nb_parallel_cores[sim_id, param_id], core_id)
         # if sim_id == 356:
         #     print(1111, core_id, object_pos, last_object_pos)
         #
@@ -1803,116 +1822,217 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
 
         while object_pos < last_object_pos:
             if object_states[0, object_pos, sim_id, param_id] > 0:
-                # start_point = 0
-                # max_start_point = 0
-                # while start_point <= max_start_point:
-                #     start = 0
-                #     prop_nb = 0
-                #     while prop_nb <= start_point:
-                #         start += properties_array[0, prop_nb, object_pos,
-                #                                   sim_id, param_id]
-                #         prop_nb += 1
-                # end = properties_array[0, start_point+1,
-                #                        object_pos, sim_id, param_id]
-                    start = properties_array[0, 0, object_pos,
-                                              sim_id, param_id]
-                    # minimum allowed start position is negative local_resolution
-                    # since position 0 is the amount of MTs from
-                    # - local_resolution to 0
-                    # while the last position, is the amount of MTs from
-                    # x_max to local_resolution to x_max
-                    end = start + properties_array[0, 1,object_pos,sim_id, param_id]
-                    # end += properties_array[0, 2,object_pos,sim_id, param_id]
-                    # if not math.isnan(property_extreme_values[1, 0, 0]):
-                    #     end = min(property_extreme_values[1, 0, 0], end)
-                    start = max(start, -local_resolution)
-                    if start != end:
-                        x_start = int(math.ceil(start / local_resolution))
-                        x_end = int(math.ceil(end / local_resolution))
-                        x_pos = max(x_start, 0)
-                        first_x = True
-                        # track the cumulative density of this object
-                        # to get the cumulative local density
-                        density_from_object = 0
-                        while x_pos <= x_end:
-                            density = 1
-                            if first_x:
-                                # the start point is not actually at the very
-                                # beginning of the resolution but after that
-                                # therefore the added density is below 1 for the
-                                # first position. Subtract the relative amount of
-                                # the local resolution that the object starts
-                                # after the x_pos
-                                first_x = False
-                                x_um = x_pos * local_resolution
-                                density -= ( 1 - (x_um - start) / local_resolution)
-                            if (x_pos == x_end):
-                                # for the x bin in which the MT ended, don't add a
-                                # full MT but just the relative amount of the bin
-                                # crossed by the MT
-                                x_um = x_pos * local_resolution
-                                density -= ((x_um - end) / local_resolution)
 
-                            cuda.atomic.add(local_density,
-                                            (0, x_pos, sim_id, param_id), density)
-                            density_from_object += density
-                            x_pos += 1
+                creation_property = 0
+                end = 0
+                while creation_property < creation_on_objects.shape[2]:
+                    # stop calculation of densities of individual properties
+                    # once there is a nan in creation on objects
+                    # in the case of only nans, only the total density is needed
+                    if ((creation_property > 0) &
+                            (math.isnan(creation_on_objects[
+                                            -1, 0, creation_property]))):
+                        break
 
-                        cuda.atomic.add(total_density,
-                                        (sim_id, param_id), density_from_object)
+                    # don't perform calculations if object has zero value of
+                    # needed property
+                    # but only for the last property of the array since
+                    # calculations depend on calculations of previous properties
+                    # since calculations are started from end point of last
+                    # calculation
+                    last_idx = cuda.selp(creation_property ==
+                                         (creation_on_objects.shape[0] -1),
+
+                                         1,
+                                         int(math.isnan(creation_on_objects[
+                                                        -1, 0,
+                                                        creation_property + 1]))
+                                         )
+                    # print(222)
+                    if (((math.isnan(creation_on_objects[-1, 0, 0])) |
+                            (properties_array[0, int(creation_on_objects[
+                                                         -1, 0,
+                                                         creation_property]),
+                                            object_pos, sim_id, param_id] > 0))
+                        | (last_idx == 0)):
+                        # creation_on_objects defines which property is actually
+                        # used while the start property defines the end of which
+                        # property defines the start position
+
+                        # if only the total local density is needed,
+                        # the start property is 0
+
+                        # Due to property numbers in creation_on_objects[-1
+                        # being sorted ascendingly, the last end can be used as
+                        # new start. Then all properties from the
+                        # last end property + 1 to the new start property
+                        # have to still be added.
+
+                        target_property = cuda.selp(
+                            math.isnan(creation_on_objects[-1, 0, 0]),
+
+                            0,
+                            int(creation_on_objects[-1, 0, creation_property]))
+                        # start either at property_nb of 0
+                        # or start at one after the last quantified
+                        # property_nb + 1
+                        property_nb = cuda.selp(creation_property == 0,
+
+                                                0,
+                                                int(creation_on_objects[
+                                                        -1, 0, creation_property
+                                                        - 1] + 1)
+                                                )
+                        # use last end as new start
+                        start = end
+                        while property_nb <= max(0, target_property-1):
+                            start += properties_array[0, property_nb,
+                                                      object_pos,
+                                                      sim_id, param_id]
+                            property_nb += 1
+
+                        # print(1, property_nb, target_property, start, end)
+                        # to get the end value of the property add all
+                        # properties until the defined property value that should
+                        # be quantified - this is always just one property
+                        # further, except for calculating the combined density
+                        # of all properties only. In that case, it is all the
+                        # properties
+                        end = start
+                        # the end property number is the last property number
+                        # if the combined local density should be calculated
+                        # and otherwise the  property number defined in
+                        # creation_on_objects
+                        max_property = cuda.selp(math.isnan(
+                                creation_on_objects[-1, 0, creation_property]),
+
+                                properties_array.shape[1] - 1,
+
+                                int(creation_on_objects[-1, 0,
+                                                        creation_property]))
+
+                        while property_nb <= max_property:
+                            end += properties_array[0, property_nb,
+                                                    object_pos,
+                                                    sim_id, param_id]
+                            property_nb += 1
+
+                        # print(2, max_property, end)
+                        # minimum allowed start position is negative local_resolution
+                        # since position 0 is the amount of MTs from
+                        # - local_resolution to 0
+                        # while the last position, is the amount of MTs from
+                        # x_max to local_resolution to x_max
+                        # start += properties_array[0, 1,object_pos,sim_id, param_id]
+                        # end = start + properties_array[0, 1,object_pos,sim_id, param_id]
+                        # end += properties_array[0, 2,object_pos,sim_id, param_id]
+                        # if not math.isnan(property_extreme_values[1, 0, 0]):
+                        #     end = min(property_extreme_values[1, 0, 0], end)
+                        start = max(start, -local_resolution)
+                        if (start != end) & (end > 0):
+                            x_start = int(math.ceil(start / local_resolution))
+                            x_end = int(math.ceil(end / local_resolution))
+                            x_pos = max(x_start, 0)
+                            first_x = True
+                            # track the cumulative density of this object
+                            # to get the cumulative local density
+                            density_from_object = 0
+                            while x_pos <= x_end:
+                                density = 1
+                                if first_x:
+                                    # the start point is not actually at the very
+                                    # beginning of the resolution but after that
+                                    # therefore the added density is below 1 for the
+                                    # first position. Subtract the relative amount of
+                                    # the local resolution that the object starts
+                                    # after the x_pos
+                                    first_x = False
+                                    x_um = x_pos * local_resolution
+                                    density -= ( 1 -
+                                                 (x_um - start)
+                                                 / local_resolution)
+                                if (x_pos == x_end):
+                                    # for the x bin in which the MT ended, don't add a
+                                    # full MT but just the relative amount of the bin
+                                    # crossed by the MT
+                                    x_um = x_pos * local_resolution
+                                    density -= ((x_um - end) / local_resolution)
+                                # multiply by local_resolution to get the actual
+                                # density in objects/um
+                                density *= local_resolution
+                                cuda.atomic.add(local_density,
+                                                (target_property, x_pos,
+                                                 sim_id, param_id), density)
+
+                                # check whether x pos is not higher than
+                                # local density size (still within neurite)
+                                if x_pos > local_density.shape[1]:
+                                    print(1111111, x_pos, local_density.shape[1],
+                                          properties_array[0, 0,
+                                                           object_pos,
+                                                           sim_id, param_id],
+                                          properties_array[0, 1,
+                                                           object_pos,
+                                                           sim_id, param_id],
+                                          properties_array[0, 2,
+                                                           object_pos,
+                                                           sim_id, param_id]
+                                          )
+                                #
+                                # # check whether density is always above 0
+                                # if (density < 0):
+                                #     print(7777777, density, object_pos,
+                                #           x_um, start, end
+                                #           )
+                                # # check whether end is never lower than start
+                                # # (which would indicate negative properties)
+                                # if end < start:
+                                #     print(666666, start, end, density)
+
+                                density_from_object += density
+                                x_pos += 1
+
+                            cuda.atomic.add(total_density,
+                                            (target_property, sim_id, param_id),
+                                            density_from_object)
+                    creation_property += 1
             object_pos += 1
 
-            # while object_pos < last_object_pos:
-            #     if object_states[0, object_pos, sim_id, param_id] > 0:
-            #         start = properties_array[0, 0, object_pos, sim_id, param_id]
-            #         # minimum allowed start position is negative local_resolution
-            #         # since position 0 is the amount of MTs from
-            #         # - local_resolution to 0
-            #         # while the last position, is the amount of MTs from
-            #         # x_max to local_resolution to x_max
-            #         end = start + properties_array[
-            #             0, 1, object_pos, sim_id, param_id]
-            #         end += properties_array[0, 2, object_pos, sim_id, param_id]
-            #         # if not math.isnan(property_extreme_values[1, 0, 0]):
-            #         #     end = min(property_extreme_values[1, 0, 0], end)
-            #         start = max(start, -local_resolution)
-            #         if start != end:
-            #             x_start = int(math.ceil(start / local_resolution))
-            #             x_end = int(math.ceil(end / local_resolution))
-            #             x_pos = max(x_start, 0)
-            #             first_x = True
-            #             # track the cumulative density of this object
-            #             # to get the cumulative local density
-            #             density_from_object = 0
-            #             while x_pos <= x_end:
-            #                 density = 1
-            #                 if first_x:
-            #                     # the start point is not actually at the very
-            #                     # beginning of the resolution but after that
-            #                     # therefore the added density is below 1 for the
-            #                     # first position. Subtract the relative amount of
-            #                     # the local resolution that the object starts
-            #                     # after the x_pos
-            #                     first_x = False
-            #                     x_um = x_pos * local_resolution
-            #                     density -= (1 - (
-            #                                 x_um - start) / local_resolution)
-            #                 if (x_pos == x_end):
-            #                     # for the x bin in which the MT ended, don't add a
-            #                     # full MT but just the relative amount of the bin
-            #                     # crossed by the MT
-            #                     x_um = x_pos * local_resolution
-            #                     density -= ((x_um - end) / local_resolution)
-            #
-            #                 cuda.atomic.add(local_density,
-            #                                 (0, x_pos, sim_id, param_id),
-            #                                 density)
-            #                 density_from_object += density
-            #                 x_pos += 1
-            #
-            #             cuda.atomic.add(total_density,
-            #                             (sim_id, param_id), density_from_object)
-            #     object_pos += 1
+
+        # # Test whether all values in local density together sum up to total
+        # # density
+        # if nb_parallel_cores[sim_id, param_id] > 1:
+        #     cuda.syncwarp(thread_masks[0,sim_id, param_id])
+        #
+        # if core_id == 0:
+        #     property_nb = 0
+        #     while property_nb < total_density.shape[0]:
+        #         density_sum = 0
+        #         x_pos = 0
+        #         while x_pos < local_density.shape[1]:
+        #             density_sum += local_density[property_nb, x_pos,
+        #                                          sim_id, param_id]
+        #             x_pos += 1
+        #
+        #         if round(density_sum, 4) < round(total_density[property_nb,
+        #                                                        sim_id,
+        #                                                        param_id],4):
+        #
+        #             print(9999999, density_sum, total_density[property_nb,
+        #                                                       sim_id, param_id],
+        #                   sim_id, property_nb, target_property)
+        #
+        #         if round(density_sum, 4) < round(total_density[property_nb,
+        #                                                        sim_id,
+        #                                                        param_id],
+        #                                          4):
+        #             print(8888888, density_sum, total_density[property_nb,
+        #                                                       sim_id, param_id],
+        #                   sim_id, property_nb, target_property)
+        #         property_nb += 1
+
+
+
 
 
 def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
@@ -1961,11 +2081,27 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                 param_id]
         if start_state == 0:
             # for state 0, the number of objects in state 0 does not matter
-            if not math.isnan(creation_on_objects[transition_nb, 0]):
+            if not math.isnan(creation_on_objects[transition_nb, 0, 0]):
+                density_sum = 0
+                # if only one density was measured (of all combined properties)
+                # then only take the first index in total density
+                if math.isnan(creation_on_objects[-1, 0, 0]):
+                    density_sum += total_density[0, sim_id, param_id]
+                else:
+                    # Otherwise sum all densities relevant to the current
+                    # transition
+                    property_nb = 0
+                    while property_nb < creation_on_objects.shape[2]:
+                        if math.isnan(creation_on_objects[transition_nb, 0,
+                                                          property_nb]):
+                            break
+                        density_sum += total_density[int(creation_on_objects[
+                            transition_nb, 0, property_nb]), sim_id, param_id]
+                        property_nb += 1
+
                 current_transition_rates[transition_nb,
                                          sim_id, param_id] = (transition_rate *
-                                                              total_density[sim_id, param_id] *
-                                                              local_resolution)
+                                                              density_sum)
             else:
                 current_transition_rates[transition_nb,
                                          sim_id, param_id] = transition_rate
@@ -1977,18 +2113,37 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
             # Thereby implement a resource limitation for nucleation new objects
             if not math.isnan(transition_parameters[transition_nb, 1]):
                 # multiply by the percentage of unused resources.
-                # If all resources are used, the transition rate is 0.p
+                # If all resources are used, the transition rate is 0
+
                 current_transition_rates[transition_nb,
                                          sim_id,
-                                         param_id] *= ((parameter_value_array[int(transition_parameters[transition_nb, 1]),
-                                                                              int(timepoint_array[0, sim_id, param_id]),
-                                                                              param_id] -
-                                                       nb_objects_all_states[1, transition_nb,
-                                                                             sim_id,
-                                                                             param_id])
-                                                       / parameter_value_array[int(transition_parameters[transition_nb, 1]),
-                                                                               int(timepoint_array[0, sim_id, param_id]),
-                                                                              param_id])
+                                         param_id] *= (
+                        (parameter_value_array[int(transition_parameters[
+                                                       transition_nb, 1]),
+                                               int(timepoint_array[0, sim_id,
+                                                                   param_id]),
+                                               param_id] -
+                         nb_objects_all_states[1, transition_nb,
+                                               sim_id, param_id])
+                        / parameter_value_array[int(transition_parameters[
+                                                        transition_nb, 1]),
+                                                int(timepoint_array[0, sim_id,
+                                                                    param_id]),
+                                                param_id])
+
+                # if (transition_nb == 13) & (nb_objects_all_states[1, transition_nb,
+                #                                 sim_id, param_id] > 0):
+                #     print(222,
+                #           current_transition_rates[transition_nb,
+                #                                    sim_id, param_id],
+                #           parameter_value_array[int(transition_parameters[
+                #                                         transition_nb, 1]),
+                #                                 int(timepoint_array[0, sim_id,
+                #                                                     param_id]),
+                #                                 param_id],
+                #           nb_objects_all_states[1, transition_nb,
+                #                                 sim_id, param_id]
+                #           )
 
         else:
             nb_objects = nb_objects_all_states[0, int(start_state),
@@ -2925,7 +3080,7 @@ def _determine_positions_of_transitions(current_transitions,
             # go through all objects, check which one is in the start_state
             # and then choose the nth (n=random_object_pos) object that is in
             # the start_state
-            while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:# object_states.shape[0]:#
+            while object_pos <= first_last_idx_with_object[1,sim_id, param_id]+20:# object_states.shape[0]:#
                 # if object_state > 4:
                 #     print(555, object_state, object_pos)
                 if (object_states[0, object_pos, sim_id, param_id] ==
@@ -2937,12 +3092,14 @@ def _determine_positions_of_transitions(current_transitions,
                     current_nb_state_objects += 1
                 object_pos += 1
 
-            print(33333, object_pos, first_last_idx_with_object[1,sim_id, param_id],
-                  nb_objects, start_state,
-                  int(current_transitions[sim_id,
-                                           param_id]),
-                  all_transition_states.shape[0]
-                  )
+            if core_id == 0:
+                print(33333, object_pos, first_last_idx_with_object[1,sim_id, param_id],
+                      current_nb_state_objects, random_object_pos,
+                      nb_objects, start_state,
+                      int(current_transitions[sim_id,
+                                               param_id]),
+                      all_transition_states.shape[0]
+                      )
         else:
             # print(nb_objects_all_states[1, sim_id, param_id],
             #       nb_objects_all_states[2, sim_id, param_id],
@@ -3201,7 +3358,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
 
     return
 
-def _get_random_mt_at_position(position, object_states, property_array,
+def _get_random_mt_at_position(position, object_states, properties_array,
                                 first_last_idx_with_object, core_id, sim_id,
                                param_id,
                                 rng_states, thread_masks, nb_parallel_cores,
@@ -3226,11 +3383,11 @@ def _get_random_mt_at_position(position, object_states, property_array,
         if object_states[0, object_pos, sim_id, param_id] == target_state:
             # check whether the starting point of the object is before the
             # target position
-            object_pos = property_array[0, object_pos, sim_id, param_id]
+            object_pos = properties_array[0, object_pos, sim_id, param_id]
             if object_pos < position:
                 property_nb = 1
-                while property_nb < property_array.shape[0]:
-                    object_pos += property_array[property_nb, object_pos,
+                while property_nb < properties_array.shape[0]:
+                    object_pos += properties_array[property_nb, object_pos,
                                                  sim_id, param_id]
                 if object_pos >= position:
                     # if the end position of the object is at least at
@@ -3285,9 +3442,96 @@ def _get_random_mt_at_position(position, object_states, property_array,
                                                          random_object_idx)
                                                          ),
                                                         sim_id, param_id]
-
     cuda.syncwarp(thread_masks[sim_id, param_id])
     return
+
+def _get_density_dependent_position(transition_number, creation_on_objects,
+                                    local_density, total_density,
+                                    local_resolution, rng_states,
+                                    simulation_factor, parameter_factor,
+                                    sim_id, param_id, core_id):
+        # check if only one density was measured (last index only NaN,
+        # which means that all density dependent transitions rely on the total
+        # density (of all properties) and not on densities of a subset of
+        # properties
+        all_density = 0
+        if math.isnan(creation_on_objects[-1, 0, 0]):
+            all_density += total_density[0, sim_id, param_id]
+        else:
+            # if more than one density was measured, add the densities that
+            # the current transition dependes on
+            property_nb = 0
+            while property_nb < creation_on_objects.shape[2]:
+                if math.isnan(creation_on_objects[transition_number, 0,
+                                                  property_nb]):
+                    break
+                all_density += total_density[int(creation_on_objects[
+                                                   transition_number, 0,
+                                                   property_nb]),
+                                           sim_id, param_id]
+                property_nb += 1
+
+        # get threshold by multiplying total density by random number
+        # from 0 to 1
+        threshold = all_density * _get_random_number(sim_id, param_id,
+                                       rng_states,
+                                       simulation_factor,
+                                       parameter_factor)
+
+        # go through local density until threshold is reached
+        x_pos = 0
+        density_sum = 0
+        while x_pos < local_density.shape[1]:
+            local_density_here = 0
+            # sum densities relevant to current transition
+            if math.isnan(creation_on_objects[-1, 0, 0]):
+                local_density_here += local_density[0, x_pos,
+                                                   sim_id, param_id]
+            else:
+                property_nb = 0
+                while property_nb < creation_on_objects.shape[2]:
+                    if math.isnan(creation_on_objects[transition_number, 0,
+                                                      property_nb]):
+                        break
+                    local_density_here += local_density[int(
+                        creation_on_objects[transition_number,
+                                            0, property_nb]),
+                                                        x_pos, sim_id, param_id]
+
+                    if local_density[int(
+                        creation_on_objects[transition_number,
+                                            0, property_nb]),
+                                                        x_pos, sim_id, param_id] < 0:
+                        print(345)
+                    property_nb += 1
+
+            if local_density_here < 0:
+                print(2345)
+
+            density_sum = density_sum + local_density_here
+            if round(density_sum,6) >= round(threshold,6):
+                property_val = (x_pos + 1) * local_resolution
+                # assume linear transition of density
+                # from last point to this point
+                # the exact point of crossing the threshold can then
+                # easily be determined as that much below the current x
+                # as the fraction of the added density at the current
+                # x position that the sum is above the threshold
+                # e.g. if the sum is almost the entirety of the density
+                # added at the current x position above the threshold
+                # then the actual x position at which the threshold is
+                # crossed should be very close to the last x position
+                property_val -= (((density_sum - threshold) /
+                                 local_density_here) *
+                                 local_resolution)
+                return x_pos, property_val, local_density_here
+            x_pos += 1
+
+        if core_id == 0:
+            print(123456, local_density.shape[1], x_pos, density_sum, threshold,
+                  all_density, sim_id, param_id)
+
+        return x_pos, math.nan, local_density_here
 
 
 def _update_object_states(current_transitions, all_transition_states,
@@ -3315,10 +3559,14 @@ def _update_object_states(current_transitions, all_transition_states,
         transition_states = all_transition_states[transition_number]
         start_state = transition_states[0]
         end_state = transition_states[1]
-        transition_position = all_transition_positions[sim_id, param_id]
-        object_states[0, int(transition_position),sim_id, param_id] = end_state
+        transition_position = int(all_transition_positions[sim_id, param_id])
+        object_states[0, transition_position,sim_id, param_id] = end_state
         # change the object counter according to the executed transition
-        if core_id == 0:
+        # don't apply standard changes for cutting (creation on object == 2)
+        # since changes in object numbers are more complicated due to
+        # different object states being differently affected by cutting
+        if (core_id == 0) & (math.isnan(creation_on_objects[transition_number,
+                                                             1, 0])):
             if start_state != 0:
                 nb_objects_all_states[0, int(start_state),
                                       sim_id, param_id] -= 1
@@ -3331,7 +3579,7 @@ def _update_object_states(current_transitions, all_transition_states,
                         transition_parameters[int(transition_number), 1]):
                     # set as transition_number + 1 so that 0 indicates
                     # not generated by a resource limited object generation
-                    object_states[1, int(transition_position),
+                    object_states[1, transition_position,
                                   sim_id, param_id] = transition_number + 1
                     nb_objects_all_states[1, int(transition_number),
                                           sim_id, param_id] += 1
@@ -3342,18 +3590,347 @@ def _update_object_states(current_transitions, all_transition_states,
                 nb_objects_all_states[0, 0, sim_id, param_id] += 1
                 # set generation method of object to 0 since the object is
                 # removed
-                if object_states[1, int(transition_position),
+                if object_states[1, transition_position,
                                  sim_id, param_id] != 0:
                     nb_objects_all_states[1,
                                           object_states[1,
-                                                       int(transition_position),
-                                                       sim_id, param_id]-1,
+                                                       transition_position,
+                                                       sim_id, param_id] - 1,
                                           sim_id, param_id] -= 1
-                    object_states[1, int(transition_position),
+                    object_states[1, transition_position,
                                   sim_id, param_id] = 0
 
+        # if objects are cut creation_on_objects for the transition is not
+        # nan at idx 1 and 2 and contain transition maps at these indices
+        if not math.isnan(creation_on_objects[transition_number, 1, 0]):
+            if core_id == 0:
+                # get the x position of the cut
+                x_pos, _, local_density_here = _get_density_dependent_position(
+                    transition_number, creation_on_objects,
+                    local_density, total_density, local_resolution,
+                    rng_states, simulation_factor, parameter_factor,
+                    sim_id, param_id, core_id)
+
+                target_property_nb = int(creation_on_objects[
+                                             transition_number, 0, 0])
+
+                # get the object that was cut at that position
+                # by first finding a random threshold, depending on the local
+                # density at that position
+                threshold = (_get_random_number(sim_id, param_id,
+                                               rng_states,
+                                               simulation_factor,
+                                               parameter_factor) *
+                             local_density_here)
+
+                density_sum = 0
+                # Go through each object, check whether it is in range
+                # and then check whether adding its density in the range
+                # pushes the density sum above the threshold
+                object_position = 0
+                while object_position <= first_last_idx_with_object[1, sim_id,
+                                                                    param_id]:
+                    if object_states[0, object_position, sim_id, param_id] > 0:
+                        # check if property value is zero
+                        if properties_array[0, target_property_nb,
+                                          object_position,
+                                          sim_id, param_id] > 0:
+                            property_nb = 0
+                            # start position is the sum of all properties before
+                            # the target property, for the end position
+                            # add the target property to that
+                            start = 0
+                            while property_nb < target_property_nb:
+                                start += properties_array[0, property_nb,
+                                                          object_position,
+                                                          sim_id, param_id]
+                                property_nb += 1
+
+                            end = start + properties_array[0, target_property_nb,
+                                                           object_position,
+                                                           sim_id, param_id]
+                            start_min = max(-local_resolution, start)
+                            if (end - start_min) > 0:
+                                if ((end > (x_pos - 1) * local_resolution)):
+                                    # increase density_sum by fraction of
+                                    # the range filled by the property values
+                                    # of the current object
+                                    # allow a maximum of 1 to be added
+                                    # if end is until the end of the range
+
+                                    density = 1
+                                    # the start point is not actually at the very
+                                    # beginning of the resolution but after that
+                                    # therefore the added density is below 1 for the
+                                    # first position. Subtract the relative amount of
+                                    # the local resolution that the object starts
+                                    # after the x_pos
+                                    x_um = (x_pos + 1) * local_resolution
+                                    density -= max(0, ( 1 -
+                                                 max(0, (x_um - start_min)
+                                                     / local_resolution)))
+                                    # for the x bin in which the MT ended, don't add a
+                                    # full MT but just the relative amount of the bin
+                                    # crossed by the MT
+                                    x_um = x_pos * local_resolution
+                                    density -= max(0, ((x_um - end) /
+                                                       local_resolution))
+                                    length_in_range = density * local_resolution
+                                    # length_in_range = min(1,
+                                    #                    (end - x_pos *
+                                    #                     local_resolution)
+                                    #                    / local_resolution)
+                                    # length_in_range -= max(0, min(1,
+                                    #                            (start - (x_pos-1) *
+                                    #                             local_resolution) /
+                                    #                            local_resolution))
+                                    # if (sim_id == 2) & (core_id == 0):
+                                    #     print(density_sum, length_in_range,
+                                    #           x_um, start, end,
+                                    #           (x_um - start), (x_um - end),
+                                    #           local_density_here
+                                    #           )
+                                    density_sum += length_in_range
+                                    # subtract a maximum of 1 if the start
+                                    # is at the end of the range
+                                    if round(density_sum,6) >= round(threshold,6):
+                                        break
+                    object_position += 1
+
+                if (round(density_sum, 6) < round(threshold, 6)) & (core_id == 0) & (sim_id == 2):
+                    print(78910, object_position,
+                          density_sum, threshold, length_in_range,
+                          local_density_here, x_pos,
+                          local_density[target_property_nb, x_pos, sim_id, param_id])
+                # elif (sim_id == 2) & (core_id == 0):
+                #     print(0)
+
+                # now determine random position within the range
+                # at which the object is cut
+                # the length_in_range can be max of 1, if the entire range
+                # of the x position is covered
+                cut_length = (_get_random_number(sim_id, param_id,
+                                                rng_states,
+                                                simulation_factor,
+                                                parameter_factor) *
+                              length_in_range)
+
+                # add the previous property value to that
+                # length in range, but don't allow it to be reduced
+                # (e.g. if start is after the beginning of the range)
+                cut_length += max(0, ((x_pos-1) * local_resolution - start))
+
+                # cutting has to be done on one specific property
+                # reduce this property by cut_length
+                property_nb = int(creation_on_objects[transition_number, 0, 0])
+
+                # make sure cut length is not larger than the property value
+                if properties_array[0, property_nb,
+                               object_position, sim_id, param_id] < cut_length:
+                    print(55555, properties_array[0, property_nb,
+                               object_position, sim_id, param_id], cut_length,
+                          start, end, x_pos,
+                          (x_pos-1) * local_resolution)
+
+                property_nb_tmp = 0
+                while property_nb_tmp < properties_array.shape[1]:
+                    properties_array[0, property_nb_tmp,
+                                   transition_position,
+                                   sim_id,
+                                   param_id] = 0
+                    property_nb_tmp += 1
+
+                # property_nb_tmp = 0
+                # while property_nb_tmp < properties_array.shape[1]:
+                #     print(1, property_nb_tmp,
+                #           properties_array[0, property_nb_tmp, transition_position,
+                #                      sim_id, param_id])
+                #     print(2, property_nb_tmp,
+                #           properties_array[0, property_nb_tmp, object_position,
+                #                      sim_id, param_id])
+                #     property_nb_tmp += 1
+
+                properties_array[0, property_nb,
+                                 object_position,
+                                 sim_id, param_id] -= cut_length
+
+                if cut_length < 0:
+                    print(400000, cut_length)
+
+                # the new object will get the cut length as new property value
+                properties_array[0, property_nb,
+                                 transition_position,
+                                 sim_id, param_id] = cut_length
+
+                # print(111, object_position, property_nb, cut_length, start, x_pos, local_resolution, length_in_range)
+                # transfer values of all properties before the
+                # current property (since the order of properties defines the
+                # physical order of properties in the object) to the new object
+                # and set those properties to zero in the original
+                # object (do it differently for the position though,
+                # property_nb == 0)
+                property_nb -= 1
+                while property_nb > 0:
+                    # set the property value of the new object
+                    # to the value of the old object
+                    properties_array[0, property_nb,
+                                   transition_position,
+                                   sim_id,
+                                   param_id] = properties_array[0, property_nb,
+                                                              object_position,
+                                                              sim_id, param_id]
+
+                    # set the property value of the old object to 0
+                    properties_array[0, property_nb,
+                                   object_position,
+                                   sim_id, param_id] = 0
+                    property_nb -= 1
+
+                # the new object will have the position of the old object
+                properties_array[0, 0,
+                               transition_position,
+                               sim_id,
+                               param_id] = properties_array[0, 0,
+                                                          object_position,
+                                                          sim_id, param_id]
+
+                # position of the old object will be set to the cut position
+                properties_array[0, 0, object_position,
+                               sim_id, param_id] = cut_length + start
+
+                ## check that no changed object is beyond hard coded maximum
+                ## of 20 (for max dimension of 20)
+                # property_nb_tmp = 0
+                # length_tmp = 0
+                # while property_nb_tmp < properties_array.shape[1]:
+                #     length_tmp += properties_array[0, property_nb_tmp,
+                #                                    transition_position,
+                #                                    sim_id, param_id]
+                #     property_nb_tmp += 1
+                #
+                # if length_tmp > 20:
+                #     print(200000, length_tmp)
+                #
+                # property_nb_tmp = 0
+                # length_tmp = 0
+                # while property_nb_tmp < properties_array.shape[1]:
+                #     length_tmp += properties_array[0, property_nb_tmp,
+                #                                    object_position,
+                #                                    sim_id, param_id]
+                #     property_nb_tmp += 1
+                #
+                # if length_tmp > 20:
+                #     print(300000, length_tmp,
+                #           properties_array[0, 0,
+                #                            object_position,
+                #                            sim_id, param_id],
+                #           properties_array[0, 1,
+                #                            object_position,
+                #                            sim_id, param_id],
+                #           properties_array[0, 2,
+                #                            object_position,
+                #                            sim_id, param_id],
+                #           object_position, start,
+                #           cut_length, tmp_prop, tmp_prop2, x_pos
+                #           )
+
+                # property_nb_tmp = 0
+                # while property_nb_tmp < properties_array.shape[1]:
+                #     print(11, property_nb_tmp,
+                #           properties_array[0, property_nb_tmp, transition_position,
+                #                      sim_id, param_id])
+                #     print(22, property_nb_tmp,
+                #           properties_array[0, property_nb_tmp, object_position,
+                #                      sim_id, param_id])
+                #     property_nb_tmp += 1
+
+                # reduce object number for state of the cut object
+                nb_objects_all_states[0, object_states[0, int(object_position),
+                                                       sim_id, param_id],
+                                      sim_id, param_id] -= 1
+
+                # increase object number for target states of object
+                # Before cut is the new object (new tip position)
+                state_before_cut = creation_on_objects[transition_number, 1,
+                                                       object_states[
+                                                           0, int(object_position),
+                                                           sim_id, param_id]-1]
+                # After cut is the old object (same tip position)
+                state_after_cut = creation_on_objects[transition_number, 2,
+                                                       object_states[
+                                                           0, int(object_position),
+                                                           sim_id, param_id]-1]
+
+                if state_before_cut == 0:
+                    property_nb_tmp = 0
+                    while property_nb_tmp < properties_array.shape[1]:
+                        properties_array[0, property_nb_tmp,
+                                       transition_position,
+                                       sim_id,
+                                       param_id] = math.nan
+                        property_nb_tmp += 1
+                    # object_states[0, transition_position, sim_id, param_id] = 0
+                    # if transition_position == first_last_idx_with_object[1, ]
+
+                if state_after_cut == 0:
+                    property_nb_tmp = 0
+                    while property_nb_tmp < properties_array.shape[1]:
+                        properties_array[0, property_nb_tmp,
+                                       object_position,
+                                       sim_id,
+                                       param_id] = math.nan
+                        property_nb_tmp += 1
+
+                    nb_objects_all_states[0,
+                                          int(object_states[0, object_position,
+                                                            sim_id, param_id]),
+                                          sim_id, param_id] -= 1
+                    object_states[0, object_position, sim_id, param_id] = 0
+                else:
+                    nb_objects_all_states[0, int(state_after_cut),
+                                          sim_id, param_id] += 1
+
+                    object_states[1, transition_position,
+                                  sim_id, param_id] = transition_number + 1
+                    nb_objects_all_states[1, int(transition_number),
+                                          sim_id, param_id] += 1
+
+
+
+                # print(333, state_before_cut, state_after_cut,
+                #       transition_position, object_states[0, transition_position,
+                #               sim_id, param_id],
+                #       object_position,object_states[0, object_position,
+                #               sim_id, param_id],  density_sum, threshold)
+
+                # change object state of old object (that was cut)
+                object_states[0, object_position,
+                              sim_id, param_id] = state_after_cut
+
+
+                # change object state of new object
+                # (new object end(tip) that was formed)
+                object_states[0, transition_position,
+                              sim_id, param_id] = state_before_cut
+
+                nb_objects_all_states[0, int(state_before_cut),
+                                      sim_id, param_id] += 1
+
+                # if length_tmp > 20:
+                #     print(300001,
+                #           object_states[0, object_position, sim_id, param_id],
+                #           object_states[0, transition_position,sim_id, param_id]
+                #           )
+                # check if the idx for creating a new object is higher than
+                # the currently highest idx
+                if transition_position > first_last_idx_with_object[1,sim_id,
+                                                                    param_id]:
+                    first_last_idx_with_object[1,sim_id,
+                                               param_id] = transition_position
+
+
         # change property values based on transitions
-        if start_state == 0:
+        elif start_state == 0:
 
 
             # check if the idx for creating a new object is higher than
@@ -3365,55 +3942,26 @@ def _update_object_states(current_transitions, all_transition_states,
 
             # if a new object was created, set property values according to
             # defined value
-            # nb_properties = property_start_vals.shape[0]
-            # (property_nb,
-            #  last_property_nb) = _get_first_and_last_object_pos(nb_properties,
-            #                                                   nb_parallel_cores[sim_id, param_id],
-            #                                                   core_id)
-            property_nb = 0
-            while property_nb < property_start_vals.shape[0]:
+            nb_properties = property_start_vals.shape[0]
+            (property_nb,
+             last_property_nb) = _get_first_and_last_object_pos(
+                nb_properties, nb_parallel_cores[sim_id, param_id], core_id)
+
+            # property_nb = 0
+            # while property_nb < property_start_vals.shape[0]:
+            while property_nb < last_property_nb:
 
                 if ((not math.isnan(creation_on_objects[
-                                        transition_number, 0])) &
+                                        transition_number, 0, 0])) &
                         (property_nb == 0)):
 
                     # One more arrays needed:
                     # density_threshold_boundaries (3, sim_id, param_id)
-
-                    # the following code (not getting the cumsum but afterwards)
-                    # does not work when reassigning threads for some reason
-                    # also the code leads to different results overall and
-                    # less performance
-
-                    random_nb = _get_random_number(sim_id, param_id,
-                                                   rng_states,
-                                                   simulation_factor,
-                                                   parameter_factor)
-                    threshold = random_nb * total_density[sim_id, param_id]
-
-                    # go through local density until threshold is reached
-                    x_pos = 0
-                    density_sum = 0
-                    while x_pos < local_density.shape[1]:
-                        local_density_here = local_density[0, x_pos,
-                                                           sim_id, param_id]
-                        density_sum = density_sum + local_density_here
-                        if density_sum > threshold:
-                            property_val = (x_pos + 1) * local_resolution
-                            # assume linear transition of density
-                            # from last point to this point
-                            # the exact point of crossing the threshold can then
-                            # easily be determined as that much below the current x
-                            # as the fraction of the added density at the current
-                            # x position that the sum is above the threshold
-                            # e.g. if the sum is almost the entirety of the density
-                            # added at the current x position above the threshold
-                            # then the actual x position at which the threshold is
-                            # crossed should be very close to the last x position
-                            property_val -= ((density_sum - threshold) /
-                                             local_density_here) * local_resolution
-                            break
-                        x_pos += 1
+                    x_pos, property_val, _  = _get_density_dependent_position(
+                        transition_number, creation_on_objects,
+                        local_density, total_density, local_resolution,
+                        rng_states, simulation_factor, parameter_factor,
+                        sim_id, param_id, core_id)
 
                     # # check whether property value was calculated correctly
                     # if core_id == 0:

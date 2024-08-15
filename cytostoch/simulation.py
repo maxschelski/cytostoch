@@ -29,6 +29,7 @@ import seaborn as sns
 from . import analyzer
 from .basic import PropertyGeometry
 from . import simulation_numba
+from .basic import ObjectPosition
 import tqdm
 
 """
@@ -134,6 +135,22 @@ class SSA():
         self.script_path = script_path
         self.name = name
         self.simulations_summary_path = simulations_summary_path
+
+        # resort properties so that position/s are always first
+        positions = []
+        other_properties = []
+        for property in self.properties:
+            if type(property) == type(ObjectPosition()):
+                positions.append(property)
+                continue
+            other_properties.append(property)
+
+        if len(positions) > 1:
+            raise ValueError("So far only one position property is supported, "
+                             f"but {len(positions)} position properties were "
+                             f"supplied.")
+
+        self.properties = [*positions, *other_properties]
 
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
@@ -538,9 +555,16 @@ class SSA():
 
     def get_creation_on_objects_array(self):
 
+        # creation on objects contains three classes of properties per
+        # transition:
+        # the properties the transition depends on (for all creation on objects)
+        # and specifically for cutting an object, a state map for what state
+        # is used before and what state is used after the cut site
         creation_on_objects = np.full((len(self.transitions)+1,
-                                       len(self.properties)),
+                                       3, max(len(self.properties),
+                                              len(self.states))),
                                       math.nan)
+        separate_densities = False
         all_properties_for_creation = set([])
         for transition_nb, transition in enumerate(self.transitions):
             if not hasattr(transition, "creation_on_objects"):
@@ -553,23 +577,83 @@ class SSA():
                     properties_to_add = []
                     for (prop_nb,
                          property) in enumerate(properties_for_creation):
-                        creation_on_objects[transition_nb,
+                        creation_on_objects[transition_nb, 0,
                                             prop_nb] = property.number
                         properties_to_add.append(property.number)
+                    # check whether there is the need to calculate separate
+                    # densities (based on different properties)
+                    if len(properties_to_add) < len(self.properties):
+                        separate_densities = True
 
                     all_properties_for_creation.update(properties_to_add)
                 else:
                     # if they are not defined, add all properties to array
                     for prop_nb, property in enumerate(self.properties):
-                        creation_on_objects[transition_nb,
+                        creation_on_objects[transition_nb, 0,
                                             prop_nb] = property.number
-                    all_properties_for_creation.update(list(range(len(self.properties))))
+                    all_properties_for_creation.update(
+                        list(range(len(self.properties))))
 
+            # check if the transition has attributes needed for cutting
+            if ((not hasattr(transition, "states_before_cut")) &
+                    (not hasattr(transition, "states_after_cut"))):
+                continue
+
+            # create an empty state map for the transition before and after cut
+            # the index is the starting state, the value is the end state
+            # by default, each state maps to itself
+            # this can be changed for single states when providing a new map
+            # (dictionary) in the before_cut and after_cut attributes
+            state_map_before_cut = [nb for nb in range(1, len(self.states)+1)]
+            state_map_after_cut = [nb for nb in range(1, len(self.states)+1)]
+            if transition.states_before_cut is not None:
+                # if before_cut is just a single state object, all states
+                # should be mapped to this state
+                if type(transition.states_before_cut) in [list, tuple]:
+                    for (start_state,
+                         end_state) in transition.states_before_cut:
+                        state_map_before_cut[start_state.number] = (end_state.
+                                                                    number)
+                else:
+                    state_map_before_cut[:] = ([transition.
+                                               states_before_cut.number] *
+                                               len(self.states))
+
+            if transition.states_after_cut is not None:
+                if type(transition.states_after_cut) in [list, tuple]:
+                    for (start_state,
+                         end_state) in transition.states_after_cut:
+                        state_map_after_cut[start_state.number] = (end_state.
+                                                                   number)
+                else:
+                    state_map_after_cut[:] = ([transition.
+                                              states_after_cut.number] *
+                                               len(self.states))
+
+            all_state_maps = [state_map_before_cut, state_map_after_cut]
+            for map_nb, state_map in enumerate(all_state_maps):
+                for start_state, end_state in enumerate(state_map):
+                    # add one to the map number since the first index is
+                    # for properties, the second is for before the cut, the
+                    # third is for after the cut
+                    creation_on_objects[transition_nb,
+                                        map_nb+1, start_state] = end_state
+
+        # if there is no need for separate densities, leave the last index
+        # of creation on objects completely nan, so that only the total density
+        # of all objects is calculated
+        if not separate_densities:
+            return creation_on_objects
+
+        # sort propertiey for creation to start with the lowest first
+        all_properties_for_creation = sorted(all_properties_for_creation,
+                                             key=int)
+        # otherwise add for which properties the density should be calculated
         # at the last index of creation_on_objects
         # add all property numbers that are used in any of the transitions
         # to know for which properties the object density should be calculated
         for iteration_nb, property_nb in enumerate(all_properties_for_creation):
-            creation_on_objects[-1, iteration_nb] = property_nb
+            creation_on_objects[-1, 0, iteration_nb] = property_nb
 
         return creation_on_objects
 
@@ -888,6 +972,44 @@ class SSA():
                 combination of parameter value changes.
         Returns:
         """
+
+        # get normalized path
+        data_folder = os.path.abspath(data_folder)
+
+        # if data should not be overwritten, create a new datafolder
+        # by appending a "__number" (e.g. "__001") to it
+        if not overwrite:
+            if os.path.exists(data_folder):
+                last_folder = os.path.basename(os.path.normpath(data_folder))
+                number_finder = re.compile("__([\d]+)$")
+                number_string = number_finder.search(last_folder)
+                number_len = len(str(nb_simulations_same_name))
+                if number_string is not None:
+                    number = number_string.group(1)
+                else:
+                    number = "1"
+                    number = number.zfill(number_len)
+                    last_folder = last_folder + "__" + number
+                    data_folder = data_folder + "__" + number
+
+                while os.path.exists(data_folder):
+                    last_number = number
+                    number = int(number) + 1
+                    number = str(number).zfill(number_len)
+                    new_folder = last_folder.replace("__"+last_number,
+                                                     "__"+number)
+                    data_folder = data_folder.replace(last_folder,
+                                                      new_folder)
+                    last_folder = new_folder
+                    # increase the number until the path does not exist
+                    # anymore
+
+                # else:
+                #     number = 1
+                #     number = str(number).zfill(number_len)
+                #     new_folder = last_folder + "__" + number
+                #     data_folder = data_folder.replace(last_folder, new_folder)
+
         if reset_folder:
             if os.path.exists(data_folder):
                 # delete all files except scripts
@@ -905,36 +1027,12 @@ class SSA():
                 time.sleep(0.1)
             # os.mkdir(data_folder)
 
-        # if data should not be overwritten, create a new datafolder
-        # by appending a "__number" (e.g. "__001") to it
-        if not overwrite:
-            if os.path.exists(data_folder):
-                last_folder = os.path.basename(os.path.normpath(data_folder))
-                number_finder = re.compile("__([\d]+)$")
-                number_string = number_finder.search(last_folder)
-                number_len = len(str(nb_simulations_same_name))
-                if number_string is not None:
-                    number = number_string.group(1)
-                    # increase the number until the path does not exist
-                    # anymore
-                    while os.path.exists(data_folder):
-                        last_number = number
-                        number = int(number) + 1
-                        number = str(number).zfill(number_len)
-                        new_folder = last_folder.replace("__"+last_number,
-                                                         "__"+number)
-                        data_folder = data_folder.replace(last_folder,
-                                                          new_folder)
-                        last_folder = new_folder
-
-                else:
-                    number = 1
-                    number = str(number).zfill(number_len)
-                    new_folder = last_folder + "__" + number
-                    data_folder = data_folder.replace(last_folder, new_folder)
-
         if not os.path.exists(data_folder):
             os.mkdir(data_folder)
+
+        # if the current experiments are a test, dont save the data
+        if os.path.basename(data_folder).find("___TEST") != -1:
+            save_results = False
 
         self.min_time = min_time
         self.data_extractions = data_extractions
@@ -1043,6 +1141,8 @@ class SSA():
         property_extreme_values = self._get_property_extreme_val_arrays()
 
         transition_parameters = self._get_transition_parameters()
+
+
         all_transition_states = self._get_transition_state_arrays()
         get_set_zero_array = self._get_transition_set_to_zero_properties()
         all_transition_set_to_zero_properties = get_set_zero_array
@@ -1236,6 +1336,7 @@ class SSA():
                 # for numberr in range(parameter_value_array.shape[0]):
                 #     print(parameter_value_array[numberr])
 
+
                 object_dependent_rates = np.zeros((nb_dependences,
                                                    max_number_objects,
                                                    *param_shape_batch
@@ -1348,10 +1449,14 @@ class SSA():
                                           *param_shape_batch),
                                          dtype=np.int32)
 
+                # the first index is the current object states
                 object_states[0] = self.object_states
 
+                # the second index is the transition number of the
+                # generating transition, that the object comes from
+
                 if save_initial_state:
-                    object_states[1] = self.object_states
+                    object_states[2] = self.object_states
 
                 # calculate number of objects for all states
                 nb_objects_all_states = np.zeros((2, max(len(self.transitions),
@@ -1380,9 +1485,11 @@ class SSA():
                 local_density = np.zeros((len(self.properties),
                                           local_density_size, nb_simulations,
                                           param_combinations_per_batch))
+                local_density = convert_array(local_density)
 
                 total_density = np.zeros(
-                    (nb_simulations, param_combinations_per_batch))
+                    (len(self.properties),
+                     nb_simulations, param_combinations_per_batch))
 
                 # first idx of first dimension is for constant term,
                 # second idx of first dimension is for second order term
@@ -1422,10 +1529,10 @@ class SSA():
                 first_last_idx_with_object
                 """
 
-                local_density_batch = cuda.to_device(
-                    convert_array(local_density))
-                total_density_batch = cuda.to_device(
-                    convert_array(total_density))
+                # local_density_batch = cuda.to_device(
+                #     convert_array(local_density))
+                # total_density_batch = cuda.to_device(
+                #     convert_array(total_density))
 
                 timepoint_array_batch = cuda.to_device(
                     convert_array(timepoint_array))
@@ -1460,6 +1567,7 @@ class SSA():
 
                 # print(params_prop_dependence)
                 # print(param_val_array_batch[:,0,0])
+
 
 
                 # print("Starting simulation batch...")
@@ -1527,8 +1635,9 @@ class SSA():
                             to_cuda(convert_array(thread_masks)),
                             to_cuda(convert_array(thread_to_sim_id)),
 
-                            local_density_batch, local_resolution,
-                        total_density_batch,
+                        cuda.to_device(local_density),
+                        local_resolution,
+                        cuda.to_device(convert_array(total_density)),
 
                            rng_states, simulation_factor, parameter_factor
                              )
@@ -1613,13 +1722,14 @@ class SSA():
                             if sub_name.find("_bins_") != -1:
                                 continue
                             all_axs = []
+                            all_figures = {}
                             max_y = 0
                             for timepoint in range(sub_data.shape[0]):
                                 # the first dimension is for the time
                                 # only plot data for the last timepoint
                                 plot_data = torch.mean(sub_data[timepoint].cpu(),
                                                        dim=(1))
-                                plt.figure()
+                                new_figure = plt.figure()
                                 found_param_change = False
                                 for param_nb in range(plot_data.shape[1]):
                                     plot_data_param = plot_data[:,param_nb].unsqueeze(1)
@@ -1655,14 +1765,68 @@ class SSA():
                                 # plt.ylim(0, max_y)
                                 if found_param_change:
                                     plt.legend()
-                                plt.title(data_name + "-" + sub_name +
-                                          "; Time: " + str(timepoint))
+                                figure_title = (data_name + "-" + sub_name +
+                                                "_time" + str(timepoint))
+                                all_figures[figure_title] = new_figure
+                                plt.title(figure_title)
                                 # to plot total values over time
                                 # print("Time ", timepoint, " : ", plot_data_param.sum())
                             for ax in all_axs:
                                 ax.set_ylim(0, max_y)
+
+                            if self.save_results:
+                                for figure_name, figure in all_figures.items():
+                                    # save figures in simulation path
+                                    figure.savefig(os.path.join(self.data_folder,
+                                                                figure_name+".png"))
+                                    # save figures in summary path
+                                    # where figures for all simulations are saved
+                                    # with a unique file name
+                                    # either sortable by the simulation
+                                    # (unique identifier first in file name)
+                                    identifier = os.path.basename(self.data_folder)
+                                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
+                                                                     "summary_sim")
+                                    figure.savefig(os.path.join(image_data_folder,
+                                                                identifier
+                                                                + "_" +
+                                                                figure_name+".png"),
+                                                   dpi = 400)
+
+                                    # or sortable by extracted data
+                                    # (unique identifier last in file name)
+                                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
+                                                                     "summary_data")
+                                    figure.savefig(os.path.join(image_data_folder,
+                                                                figure_name + "_" +
+                                                                identifier +
+                                                                ".png"),
+                                                   dpi = 400)
+
+                                    # or sortable by iterations (meaning same base
+                                    # file name), where only the number of
+                                    # the file name is last
+                                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
+                                                                     "summary_iters")
+                                    number_finder = re.compile("__([\d]+)$")
+                                    number_string = number_finder.search(self.data_folder)
+                                    if number_string is not None:
+                                        number_string = number_string.group(1)
+                                        identifier = identifier.replace("__" +
+                                                                        number_string,
+                                                                        "")
+                                        figure.savefig(os.path.join(image_data_folder,
+                                                                    identifier +
+                                                                    "_" +
+                                                                    figure_name +
+                                                                    "__" +
+                                                                    number_string +
+                                                                    ".png"),
+                                                       dpi = 400)
+
                         if not print_data:
                             continue
+
                         for sub_name, sub_data in all_data[
                             data_name].items():
                             if ((sub_name.find("mean") == -1) &
@@ -1675,9 +1839,10 @@ class SSA():
                                 continue
                             if np.isnan(mean):
                                 continue
+                            print(sub_name, mean)
 
-                print("Saving raw and analyzed data ...")
                 if self.save_results:
+                    print("Saving raw and analyzed data ...")
                     self._save_times_and_object_states(batch_nb)
                     self._save_data(all_data, batch_nb)
 
@@ -1784,10 +1949,11 @@ class SSA():
             self.times = (torch.Tensor(np.copy(timepoint_array)).unsqueeze(1)
                           * time_resolution)
 
-        self._save_all_metadata(nb_simulations, max_number_objects)
-        print("Finished saving all data.")
-        # self.all_data = all_data
-        # self.times = times
+        if self.save_results:
+            self._save_all_metadata(nb_simulations, max_number_objects)
+            print("Finished saving all data.")
+            # self.all_data = all_data
+            # self.times = times
 
     def _get_all_parameters(self):
         # get different parameters from all events#, so that no parameter is
@@ -1932,8 +2098,8 @@ class SSA():
             metadata[parameter.name] = str(list(np.unique(parameter.values)))
             new_parameter_names.append(parameter.name)
 
-        if parameter.switch_timepoints is not None:
-            metadata["time_switch_"+parameter.name] = str(parameter.switch_timepoints)
+            if parameter.switch_timepoints is not None:
+                metadata["time_switch_"+parameter.name] = str(parameter.switch_timepoints)
 
         date_time = datetime.datetime.now()
         date_string = date_time.strftime("%Y%m%d-%H%M")
@@ -1950,11 +2116,18 @@ class SSA():
                                        for property in self.properties])]
         metadata["nb_of_actions"] = [len(self.actions)]
         metadata["actions"] = [str([action.name for action in self.actions])]
-        for property in self.properties:
+        for property_nb, property in enumerate(self.properties):
             if hasattr(property._max_value, "cpu"):
                property._max_value = property._max_value.cpu()
             if hasattr(property._min_value, "cpu"):
                property._max_value = property._min_value.cpu()
+
+            if property_nb == 0:
+                if type(property._max_value) in (int, float):
+                    metadata["position_max"] = str(property._max_value)
+                if type(property._min_value) in (int, float):
+                    metadata["position_min"] = str(property._min_value)
+
             metadata[property.name+"_max"] = [str(property._max_value)]
             metadata[property.name+"_min"] = [str(property._min_value)]
         for name, data_extractor in self.data_extractions.items():
@@ -1999,18 +2172,19 @@ class SSA():
             simulations_summary.drop("index", axis=1, inplace=True)
 
             # resort columns to first have rate columns
-            rate_columns = []
+            first_columns = []
             non_rate_columns = []
             for column in simulations_summary:
                 if (column.startswith("k_") | column.startswith("v_") |
-                        (column in new_parameter_names)):
-                    rate_columns.append(column)
+                        (column in new_parameter_names) |
+                        (column in ["position_max", "position_min"])):
+                    first_columns.append(column)
                 else:
                     if column not in ["folder", "nb_simulations", "datetime"]:
                         non_rate_columns.append(column)
 
             simulations_summary = simulations_summary[["folder", "datetime",
-                                                       *rate_columns,
+                                                       *first_columns,
                                                        "nb_simulations",
                                                        *non_rate_columns]]
 

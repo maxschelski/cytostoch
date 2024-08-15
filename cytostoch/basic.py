@@ -1503,6 +1503,7 @@ class ChangedStartValue():
         self.object_property = object_property
         self.new_start_values = new_start_values
 
+
 class ObjectCreation(StateTransition):
     """
     Special class to create new objects.
@@ -1518,7 +1519,11 @@ class ObjectCreation(StateTransition):
             parameter:
             changed_start_values: List or tuple of ChangedStartValue objects
             time_dependency:
-
+            creation_on_objects (Bool): Whether objects are created dependent
+                on other objects/object properties.
+            properties_for_creation (List): List of Property objects on which
+                the creation of objects depend on (if creation_on_objects is
+                True)
             resources (int): How many active transitions are allowed. This is
                 only implemented for generating new objects. The generation
                 process they originate from will be tracked in the object_state
@@ -1535,3 +1540,59 @@ class ObjectCreation(StateTransition):
         self.creation_on_objects = creation_on_objects
         self.properties_for_creation = properties_for_creation
         self.resources = resources
+
+class ObjectCutting(ObjectCreation):
+    """
+    Special class to cut objects, based on object creation since it
+    should depend on the total density of specific properties and not only on
+    the state of objects or the number of objects in a state.
+    """
+    def __init__(self, states_before_cut, states_after_cut,
+                 parameter,  property_to_cut,
+                 time_dependency=None, resources = None, name=""):
+        """
+
+        Args:
+            states_before_cut (Tuple of tuples, or State object):  Determines
+                which state the object after the cut will have, depending on the
+                state of the object that was cut. If not a tuple (or list),
+                but a State object, all states are mapped to this defined state.
+                First elements in nested tuples are State objects of the cut
+                object, second elements are corresponding State objects of the
+                object after the cut.
+                (e.g. ((stable_growing_state, stable_state),
+                        (stable_pausing_state, stable_state)) will lead to
+                        objects before the cut to be in the stable_state if
+                        the cut object was in the stable_pausing_state or
+                        stable_growing_state)
+                By default (if there is no entry for the cut object in the
+                dictionary), the object after the cut will have the same state
+                as the cut object.
+            states_after_cut (Tuple of tuples, or State object): Determines
+                which state the object after the cut will have, depending on the
+                state of the object that was cut. For details see
+                states_before_cut.
+            parameter:
+            property_to_cut (State object): Property where cutting can happen
+            time_dependency:
+            resources (int): How many active transitions are allowed. This is
+                only implemented for generating new objects. The generation
+                process they originate from will be tracked in the object_state
+                array at an additional index that will track the generation
+                process as transition number. Additionally, the current number
+                of objects generated from a specific transition is saved in the
+                nb_objects_all_states array as additional dimension with one
+                entry per transition. But only generating transitions with
+                defined resources will be tracked.
+            name:
+        """
+
+        super().__init__(state=None, parameter=parameter,
+                         changed_start_values = None,
+                         creation_on_objects=True,
+                         properties_for_creation=[property_to_cut],
+                         resources = resources,
+                         time_dependency=time_dependency, name=name)
+
+        self.states_before_cut = states_before_cut
+        self.states_after_cut = states_after_cut
