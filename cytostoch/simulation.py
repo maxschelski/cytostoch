@@ -52,54 +52,6 @@ What classes?
 - Parameter class for each value of transition or action
 """
 
-class tRSSA():
-
-    def __init__(self):
-        pass
-
-    def start(self, time_step_size_simulation, time_depency_step_size=0.001):
-
-        self.time_dependency_step_size = time_depency_step_size
-        # create bounds (upper and lower) for objects
-
-        # for time dependency get min and max points of time dependent function
-        # first numerically simulate time dependent function over whole interval
-        self.timesteps = torch.arange(0, self.max_time, self.time_depency_step_size)
-        for transition in self.transitions:
-            if transition.time_dependency is None:
-                continue
-            time_data = transition.time_dependency(self.timesteps)
-            transition.time_depency_data = time_data
-
-        for action in self.actions:
-            if action.time_dependency is None:
-                continue
-            time_data = transition.time_dependency(self.timesteps)
-            # multiplay by step size to get actual values and not rates/speeds
-            time_data *= self.time_dependency_step_size
-            action.time_dependency_data = time_data
-
-        # get min and max for first time range
-        index = torch.where((self.timesteps >= 0) &
-                            (self.timesteps < time_step_size_simulation))
-
-        # create bounds for propensities
-
-        # draw random numbers with lambda = upper bound
-
-        # check if random number is below lower bound
-
-        # check for remaining positions, whether actual propensity at time
-        # is higher than random number
-        # for all where not the case, add one to counter
-
-        # check whether object bounds hold, otherwise increase or decrease
-        # bounds
-
-    def run_iteration(self):
-        pass
-
-
 class SSA():
 
     def __init__(self, states, transitions, properties, actions,
@@ -210,13 +162,15 @@ class SSA():
               max_number_objects=None,
                single_parameter_changes=True, nb_parallel_cores=1,
               all_parameter_combinations=False,
+              comment="", initial_state_folder="",
               seed=42,
               ignore_errors=False, print_update_time_step=1,
                nb_objects_added_per_step=10,
               max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=False,
               remove_finished_sims=False, save_states=False,
-              save_results=True, print_times=True,
+              save_results=True, print_times=True, show_data=True,
+              always_add_number_to_path=False, nb_simulations_same_name=999,
               use_assertion_checks=True, reset_folder=True, bug_fixing=False,
               choose_gpu=False, gpu_number=0):
         """
@@ -298,6 +252,10 @@ class SSA():
         else:
             cuda.select_device(gpu_number)
 
+        self.comment = comment
+        self.always_add_number_to_path = always_add_number_to_path
+        self.initial_state_folder = initial_state_folder
+
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
                         time_resolution, start_save_time, save_initial_state,
@@ -312,8 +270,10 @@ class SSA():
                         remove_finished_sims=remove_finished_sims,
                         save_states=save_states,
                         save_results=save_results, print_times=print_times,
+                        show_data=show_data,
                         use_assertion_checks=use_assertion_checks,
                         reset_folder=reset_folder,
+                        nb_simulations_same_name=nb_simulations_same_name,
                         bug_fixing = bug_fixing)
 
     def save(self, time_resolution, max_time):
@@ -938,7 +898,7 @@ class SSA():
                 max_iters_no_data_extraction=2000,
                dynamically_increase_nb_objects=False,
                remove_finished_sims=False, save_states=False,
-               save_results=True, print_times=True,
+               save_results=True, print_times=True, show_data=True,
                use_assertion_checks=True, reset_folder=True, overwrite=False,
                nb_simulations_same_name=999,
                bug_fixing=False):
@@ -979,7 +939,7 @@ class SSA():
         # if data should not be overwritten, create a new datafolder
         # by appending a "__number" (e.g. "__001") to it
         if not overwrite:
-            if os.path.exists(data_folder):
+            if os.path.exists(data_folder) | self.always_add_number_to_path:
                 last_folder = os.path.basename(os.path.normpath(data_folder))
                 number_finder = re.compile("__([\d]+)$")
                 number_string = number_finder.search(last_folder)
@@ -1027,6 +987,7 @@ class SSA():
                 time.sleep(0.1)
             # os.mkdir(data_folder)
 
+
         if not os.path.exists(data_folder):
             os.mkdir(data_folder)
 
@@ -1043,6 +1004,7 @@ class SSA():
         self.save_states = save_states
         self.save_results = save_results
         self.print_times = print_times
+        self.show_data = show_data
         self.max_number_objects = max_number_objects
         self.use_assertion_checks = use_assertion_checks
         self.max_iters_no_data_extraction = max_iters_no_data_extraction
@@ -1059,6 +1021,52 @@ class SSA():
                   "no parameters will be combined, also if "
                   "all_parameter_combinations is True.")
 
+        self.object_states_file_name = "object_states.pt"
+        self.property_array_file_name = "property_array.pt"
+        self.first_last_idx_with_object_file_name = (
+            "first_last_idx_with_object.pt")
+        self.nb_obj_all_states_file_name = "nb_obj_all_states.pt"
+
+        # if an initial state is defined, load it first
+        if self.initial_state_folder != "":
+            # if the initial state folder is not an absolute path
+            # but rather a relative path, starting from the general data folder
+            # add the initial state folder to the data folder
+            if self.initial_state_folder.find(":") == -1:
+                self.initial_state_folder = os.path.join(os.path.dirname(
+                    self.data_folder), self.initial_state_folder)
+
+            # Load data
+            # Use the first parameter combination from each array
+            # (parameter is the last dimension of each array)
+
+            path = os.path.join(self.initial_state_folder,
+                                self.object_states_file_name)
+            self.initial_object_states = torch.select(torch.load(path),
+                                                      dim=-1, index=0)
+            self.initial_object_states = self.initial_object_states.to(
+                torch.int32)
+
+            path = os.path.join(self.initial_state_folder,
+                                self.property_array_file_name)
+            self.initial_properties_array = torch.select(torch.load(path),
+                                                       dim=-1, index=0)
+
+            path = os.path.join(self.initial_state_folder,
+                                self.first_last_idx_with_object_file_name)
+            self.initial_first_last_idx_with_object = torch.select(
+                torch.load(path), dim=-1, index=0).to(torch.int32)
+
+            path = os.path.join(self.initial_state_folder,
+                                self.nb_obj_all_states_file_name)
+            self.initial_nb_obj_all_states = torch.select(torch.load(path),
+                                                          dim=-1, index=0)
+
+        else:
+            self.initial_object_states = torch.Tensor([])
+            self.initial_properties_array = torch.Tensor([])
+            self.initial_first_last_idx_with_object = torch.Tensor([])
+            self.initial_nb_obj_all_states = torch.Tensor([])
 
         self.all_data = []
         self.all_times = []
@@ -1119,7 +1127,6 @@ class SSA():
         #
         # self._save_data(data, 0)
 
-
         # self._add_data_to_buffer()
         self._save_simulation_parameters()
 
@@ -1141,7 +1148,6 @@ class SSA():
         property_extreme_values = self._get_property_extreme_val_arrays()
 
         transition_parameters = self._get_transition_parameters()
-
 
         all_transition_states = self._get_transition_state_arrays()
         get_set_zero_array = self._get_transition_set_to_zero_properties()
@@ -1197,17 +1203,14 @@ class SSA():
          position_dependence,
          nb_dependences) = self._get_param_prop_dependence_array()
 
-
-        print(0, numba.cuda.current_context().get_memory_info()[
-            0] / 1024 / 1024 / 1024)
+        # print gpu memory
+        # print(0, numba.cuda.current_context().get_memory_info()[
+        #     0] / 1024 / 1024 / 1024)
         if self.device.find("cuda") != -1:
 
             start = time.time()
 
             to_cuda = cuda.to_device
-
-            # get number of cuda stream managers and cores per stream manager
-            nb_SM, nb_cc = self._get_number_of_cuda_cores()
 
             (rng_states,
              simulation_factor,
@@ -1312,6 +1315,58 @@ class SSA():
             # param_combinations_per_batch = 500
 
             nb_parallel_cores = to_cuda(convert_array(nb_parallel_cores))
+            if len(self.initial_object_states) > 0:
+                # initial states might have to get reshaped, since number of parameters
+                # or number of simulations might be different
+                # For that use the first parameter combination
+                # use as many simulations from it, as needed for the new simulation
+                # if there are not enough simulations, copy the simulation data
+                nb_initial_simulations = self.initial_object_states.shape[-2]
+                if nb_simulations <= nb_initial_simulations:
+                    indices = torch.Tensor(range(nb_simulations)).to(torch.int32)
+                else:
+                    # copy simulation data by selecting the same index more
+                    # than once
+                    indices = list(range(nb_initial_simulations))
+                    nb_of_repeats = math.ceil(nb_simulations /
+                                              nb_initial_simulations)
+                    indices = indices * nb_of_repeats
+                    indices = torch.Tensor(indices[:nb_simulations]).to(torch.int32)
+
+                # also repeat tensor in parameter dimension, as much as
+                # needed for one batch simulation
+                nb_repeats = param_combinations_per_batch
+
+                repeats = [1 for _ in
+                           range(len(self.initial_object_states.shape)+1)]
+                repeats[-1] = nb_repeats
+                self.initial_object_states = torch.index_select(
+                    self.initial_object_states, dim=-1,
+                    index=indices).unsqueeze(-1).repeat(repeats)
+
+                repeats = [1 for _ in
+                           range(len(self.initial_properties_array.shape)+1)]
+                repeats[-1] = nb_repeats
+                self.initial_properties_array = torch.index_select(
+                    self.initial_properties_array, dim=-1,
+                    index=indices).unsqueeze(-1).repeat(repeats)
+
+                repeats = [1 for _ in
+                           range(len(
+                               self.initial_first_last_idx_with_object.shape)+1)
+                           ]
+                repeats[-1] = nb_repeats
+                self.initial_first_last_idx_with_object = torch.index_select(
+                    self.initial_first_last_idx_with_object, dim=-1,
+                    index=indices).unsqueeze(-1).repeat(repeats)
+
+                repeats = [1 for _ in
+                           range(len(self.initial_nb_obj_all_states.shape)+1)]
+                repeats[-1] = nb_repeats
+                self.initial_nb_obj_all_states = torch.index_select(
+                    self.initial_nb_obj_all_states, dim=-1,
+                    index=indices).unsqueeze(-1).repeat(repeats)
+
 
             # are property arrays expanded upon definition?
             # are parameter value arrays expanded upon definition?
@@ -1319,556 +1374,86 @@ class SSA():
             param_shape_batch = (nb_simulations,
                                  param_combinations_per_batch)
 
-            print(f"Simulating {nb_batches} batches... \n")
+            print(f"Started simulating {nb_batches} batches on {datetime.datetime.now()}... \n")
             # print(1, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
+            complete_object_states = torch.Tensor([])
+            complete_property_array = torch.Tensor([])
+            complete_first_last_idx_with_object_batch = torch.Tensor([])
+            complete_nb_obj_all_states_batch = torch.Tensor([])
+
             for batch_nb in tqdm.tqdm(range(nb_batches)):
-
-                start_parameter_comb = (batch_nb *
-                                        param_combinations_per_batch)
-                end_parameter_comb = (start_parameter_comb +
-                                      param_combinations_per_batch)
-                param_slice = slice(start_parameter_comb, end_parameter_comb)
-
-                parameter_value_array = self._get_parameter_value_array(param_shape_batch,
-                                                                        nb_timepoints,
-                                                                        param_slice)
-
-                # for numberr in range(parameter_value_array.shape[0]):
-                #     print(parameter_value_array[numberr])
-
-
-                object_dependent_rates = np.zeros((nb_dependences,
-                                                   max_number_objects,
-                                                   *param_shape_batch
-                                                   ))
-
-                self._initialize_object_states(param_shape_batch)
-
-                self._initialize_object_properties(param_shape_batch)
-
-                self.object_states = self.object_states.reshape(
-                    (self.object_states.shape[0],
-                     self.object_states.shape[1],
-                     -1))
-
-                for property in self.properties:
-                    property.array = property.array.reshape(
-                        (property.array.shape[0],
-                         property.array.shape[1],
-                         -1))
-                    property.array = np.array(property.array)
-
-                self.times = torch.zeros((1, *param_shape_batch))
-
-                # reshape to have all different parameter values in one axis
-                # with the first axis being the number of objects
-                self.times = np.array(self.times.reshape((self.times.shape[0],
-                                                          self.times.shape[1],
-                                                          -1)))
-
-                # all parameters for nucleation on objects
-                nb_properties = len(self.properties)
-                end_position_tmax_array = np.zeros((32,
-                                                    nb_properties - 1,
-                                                    *param_shape_batch))
-                properties_tmax_array = np.zeros((32,
-                                                  nb_properties - 1,
-                                                  nb_properties,
-                                                  *param_shape_batch))
-                # first dimensions is unsorted and sorted
-                properties_tmax = np.full((2, 32,
-                                           nb_properties - 1,
-                                           *param_shape_batch),
-                                          math.nan)
-                # properties_tmax_sorted = np.full((32,
-                #                                   nb_properties-1,
-                #                                   *param_shape_batch),
-                #                                  math.nan)
-                current_sum_tmax = np.zeros((32,
-                                             nb_properties, *param_shape_batch))
-                property_changes_tminmax_array = np.zeros(
-                    (2, max_number_objects,
-                     nb_properties,
-                     *param_shape_batch),
-                    dtype=np.float32)
-
-                property_changes_per_state = np.zeros(
-                    (len(self.states), nb_properties,
-                     *param_shape_batch))
-                nucleation_changes_per_state = np.copy(
-                    property_changes_per_state)
-                total_property_changes = np.zeros(
-                    (len(self.states), *param_shape_batch))
-
-                density_threshold_boundaries = np.zeros((3, *param_shape_batch))
-
-                # -  current rates of all transitions (empty)
-                nb_transitions = len(self.transitions)
-                current_transition_rates = np.zeros((nb_transitions,
-                                                     *param_shape_batch))
-                # print(action_parameters, transition_parameters,
-                #       current_parameter_values.shape,
-                #       parameter_value_array.shape)
-
-                # - all total transition rates (empty)
-                total_rates = np.zeros(param_shape_batch)
-
-                # - current reaction times (empty)
-                reaction_times = np.zeros(param_shape_batch)
-
-                current_transitions = np.zeros(param_shape_batch)
-
-                all_transition_positions = np.zeros(param_shape_batch)
-
-                # subtract number of timepoints before determining the
-                # size of data arrays
-                nb_timepoints = (nb_timepoints -
-                                 max(0, (math.floor(start_save_time /
-                                            time_resolution) - 1)))
-
-                # set arrays for values over time
-                # the first index is the current timepoint with respect to
-                # time_resolution
-                # the second index with respect to the timestep for
-                # reassigning threads from the third idx the actual timepoints
-                # at the respective savepoint are saved
-                timepoint_array = np.full((nb_timepoints + 2,
-                                           *param_shape_batch),
-                                          math.nan)
-
-
-                timepoint_array[:1] = 0
-
-                if save_initial_state:
-                    timepoint_array[2] = 0
-
-                # create new object states object that includes data for
-                # all timepoints
-                object_states = np.zeros((nb_timepoints + 2,
-                                          self.object_states.shape[0],
-                                          *param_shape_batch),
-                                         dtype=np.int32)
-
-                # the first index is the current object states
-                object_states[0] = self.object_states
-
-                # the second index is the transition number of the
-                # generating transition, that the object comes from
-
-                if save_initial_state:
-                    object_states[2] = self.object_states
-
-                # calculate number of objects for all states
-                nb_objects_all_states = np.zeros((2, max(len(self.transitions),
-                                                      len(self.states)) + 1,
-                                                  *param_shape_batch))
-                nb_objects_all_states[0, 0] = self.object_states.shape[0]
-
-                for state_nb, state in enumerate(self.states):
-                    nb_objects_all_states[0, state_nb + 1] = np.sum(
-                        object_states[0] == state.number, axis=0)
-
-                nb_properties = len(self.properties)
-
-                properties_array = np.full((nb_timepoints + 1, nb_properties,
-                                            self.object_states.shape[0],
-                                            *param_shape_batch),
-                                           math.nan)
-
-                for property_nb, property in enumerate(self.properties):
-                    properties_array[0, property_nb] = property.array
-
-                if save_initial_state:
-                    for property_nb, property in enumerate(self.properties):
-                        properties_array[1, property_nb] = property.array
-
-                local_density = np.zeros((len(self.properties),
-                                          local_density_size, nb_simulations,
-                                          param_combinations_per_batch))
-                local_density = convert_array(local_density)
-
-                total_density = np.zeros(
-                    (len(self.properties),
-                     nb_simulations, param_combinations_per_batch))
-
-                # first idx of first dimension is for constant term,
-                # second idx of first dimension is for second order term
-                # first idx of second dimension is for base part, second idx is
-                # for variable part
-                tau_square_eq_terms = np.zeros(
-                    (2, 2, nb_simulations, param_combinations_per_batch))
-
-                thread_masks = np.zeros((4, *param_shape_batch), dtype=np.int64)
-
-
-                timepoint_array = convert_array(timepoint_array)
-                properties_array = convert_array(properties_array)
-                first_last_idx_with_object = self.get_first_last_idx_with_object(
-                    object_states)
-
-                size = min(nb_simulations * param_combinations_per_batch
-                           * start_nb_parallel_cores,
-                           int((nb_SM * nb_cc)))
-
-                thread_to_sim_id = np.zeros((size, 3))
-
-
-                """
-                Batched data:
-
-                Initial state dependent:
-                object_states
-                properties_array
-                nb_objects_all_states
-                all_transition_positions
-                # for batching don't allow initial states
-                
-                Should additionally be batched:
-                
-                initial cond dependent:
-                first_last_idx_with_object
-                """
-
-                # local_density_batch = cuda.to_device(
-                #     convert_array(local_density))
-                # total_density_batch = cuda.to_device(
-                #     convert_array(total_density))
-
-                timepoint_array_batch = cuda.to_device(
-                    convert_array(timepoint_array))
-                time_resolution = cuda.to_device(time_resolution)
-
-                sim = simulation_numba._execute_simulation_gpu
-
-                object_states_batch = convert_array(object_states)
-                object_states_batch = to_cuda(object_states_batch)
-
-                object_dependent_rates_batch = object_dependent_rates
-                object_dependent_rates_batch = convert_array(to_cuda(
-                    object_dependent_rates_batch))
-
-                property_array_batch = properties_array
-                property_array_batch = convert_array(property_array_batch)
-                property_array_batch = to_cuda(property_array_batch)
-
-
-                times_batch = self.times
-                param_val_array_batch = parameter_value_array
-                current_trans_rates = current_transition_rates
-                nb_obj_all_states_batch = nb_objects_all_states
-
-                total_rates_batch = total_rates
-                reaction_times_batch = reaction_times
-                current_transitions_batch = current_transitions
-                all_trans_pos_batch = all_transition_positions
-
-                first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
-                numba.cuda.profile_start()
-
-                # print(params_prop_dependence)
-                # print(param_val_array_batch[:,0,0])
-
-
-
-                # print("Starting simulation batch...")
-                sim[nb_SM,
-                 nb_cc](object_states_batch, #int32[:,:,:]
-                            property_array_batch, #float32[:,:,:,:]
-                            to_cuda(convert_array(times_batch)), #float32[:,:,:]
-                            nb_simulations, #int32
-                            param_combinations_per_batch, #int32
-                            to_cuda(convert_array(param_val_array_batch)), #float32[:,:,:]
-                            to_cuda(convert_array(params_prop_dependence)),
-                            position_dependence,
-                            object_dependent_rates_batch,
-                            to_cuda(convert_array(transition_parameters)), #int32[:]
-                            to_cuda(convert_array(all_transition_states)), #int32[:,:]
-                            to_cuda(convert_array(action_parameters)), #int32[:]
-                            to_cuda(convert_array(action_state_array)), #float32[:,:]
-                            to_cuda(convert_array(all_action_properties)), #float32[:,:]
-                            to_cuda(convert_array(action_operation_array)), #float32[:,:]
-                            to_cuda(convert_array(current_trans_rates)), #float32[:,:,:,:]
-                            to_cuda(convert_array(property_start_values)), #float32[:,:]
-                            to_cuda(convert_array(property_extreme_values)), #float32[:,:,:]
-                            to_cuda(convert_array(
-                                all_transition_tranferred_vals)), #float32[:,:]
-                            to_cuda(convert_array(
-                                all_transition_set_to_zero_properties)), #float32[
-                            to_cuda(convert_array(changed_start_values_array)),
-                            to_cuda(convert_array(creation_on_objects)),
-                            some_creation_on_objects,
-                            to_cuda(convert_array(
-                                all_object_removal_properties)),
-                            to_cuda(convert_array(object_removal_operations)),
-
-                            to_cuda(convert_array(nb_obj_all_states_batch)),
-
-                            # all arrays with one property per simulation
-                            # can be potentially combined, but at the cost
-                            # of less readable code
-                            to_cuda(convert_array(total_rates_batch)),
-                            to_cuda(convert_array(reaction_times_batch)),
-                            to_cuda(convert_array(current_transitions_batch)),
-                            to_cuda(convert_array(all_trans_pos_batch)),
-
-                            # all parameters for nucleation on objects
-                            to_cuda(convert_array(end_position_tmax_array)),
-                            to_cuda(convert_array(properties_tmax_array)),
-                            to_cuda(convert_array(properties_tmax)),
-                            to_cuda(convert_array(current_sum_tmax)),
-
-                            to_cuda(convert_array(property_changes_tminmax_array)),
-                            to_cuda(convert_array(property_changes_per_state)),
-                            to_cuda(convert_array(nucleation_changes_per_state)),
-                            to_cuda(convert_array(total_property_changes)),
-                            to_cuda(convert_array(density_threshold_boundaries)),
-
-                            to_cuda(convert_array(tau_square_eq_terms)),
-                            first_last_idx_with_object,
-
-                           timepoint_array_batch,
-                           time_resolution, min_time, start_save_time,
-                        save_initial_state,
-
-                            start_nb_parallel_cores,
-                            nb_parallel_cores,
-                            to_cuda(convert_array(thread_masks)),
-                            to_cuda(convert_array(thread_to_sim_id)),
-
-                        cuda.to_device(local_density),
-                        local_resolution,
-                        cuda.to_device(convert_array(total_density)),
-
-                           rng_states, simulation_factor, parameter_factor
-                             )
-                if self.print_times:
-                    print("Simulation time: ",
-                          np.round(time.time() - start, 2), "\n")
-
-                # nb_parallel_cores = nb_parallel_cores.copy_to_host()
-
-
-                numba.cuda.synchronize()
-                numba.cuda.profile_stop()
-
-                object_state_batch = torch.Tensor(
-                    object_states_batch.copy_to_host()[2:])
-                property_array_batch = torch.Tensor(
-                    property_array_batch.copy_to_host()[1:])
-                times_batch = torch.Tensor(timepoint_array_batch.copy_to_host()[2:])
-
-                first_last_idx_with_object = first_last_idx_with_object.copy_to_host()
-
-                del timepoint_array_batch
-                cuda.current_context().memory_manager.deallocations.clear()
-
-                # plt.figure()
-                # plt.plot(local_density_batches.mean(axis=1))
-
-                self.object_states = object_state_batch
-
-                self.times = (times_batch * time_resolution.copy_to_host())
-                self.times = self.times.unsqueeze(1).to(self.device)
-
-                for property_nb, property in enumerate(self.properties):
-                    property.array = property_array_batch[:, property_nb]
-                    property.array = property.array.to(self.device)
-
-                # self.object_states = object_states_batch#.to(self.device)
-
-                # print(111, self.object_states.shape)
-                # print(222, property_array_batch.shape)
-
-                # nb_objects_single = torch.count_nonzero(self.object_states,
-                #                                         dim=1).to(torch.float)
-                # nb_objects = nb_objects_single.mean(dim=-2)
-                # for parameter_nb in range(nb_objects.shape[-1]):
-                #     print("Parameters: ")
-                #     for parameter in self.parameters:
-                        # standard_param_val = parameter.value_array[0, 0].item()
-                        # param_val = parameter.value_array[
-                        #     0, parameter_nb].item()
-                        # param_val_string = ""
-                        # if standard_param_val != param_val:
-                        #     param_val_string += "!! "
-                        # param_val_string += parameter.name
-                        # param_val_string += ": "
-                        # param_val_string += str(param_val)
-                        # param_val_string += "; "
-                        # print(param_val_string)
-                    # print("\n")
-
-                all_data = {}
-                for data_name, data_extraction in self.data_extractions.items():
-                    start = time.time()
-                    all_data[data_name] = data_extraction.extract(self,
-                                                                  first_last_idx_with_object=
-                                                                  first_last_idx_with_object)
-                    if self.print_times:
-                        print(data_name, "extraction time: ",
-                              np.round(time.time() - start, 2))
-
-                    if data_extraction.show_data:
-                        print_data = False
-                        for sub_name, sub_data in all_data[
-                            data_name].items():
-                            if sub_data.sum() == 0:
-                                continue
-                            if sub_data.shape[1] == 1:
-                                print_data = True
-                                break
-                            if sub_name.endswith("_position"):
-                                continue
-                            if sub_name.find("_bins_") != -1:
-                                continue
-                            all_axs = []
-                            all_figures = {}
-                            max_y = 0
-                            for timepoint in range(sub_data.shape[0]):
-                                # the first dimension is for the time
-                                # only plot data for the last timepoint
-                                plot_data = torch.mean(sub_data[timepoint].cpu(),
-                                                       dim=(1))
-                                new_figure = plt.figure()
-                                found_param_change = False
-                                for param_nb in range(plot_data.shape[1]):
-                                    plot_data_param = plot_data[:,param_nb].unsqueeze(1)
-                                    param_val_string = ""
-                                    for parameter in self.parameters:
-                                        standard_param_val = parameter.value_array[0, 0].item()
-                                        param_val = parameter.value_array[0, param_nb].item()
-                                        if standard_param_val != param_val:
-                                            param_val_string = (parameter.name +
-                                                                ": " +
-                                                                str(round(param_val,3)))
-                                            found_param_change = True
-                                            break
-                                    # if (len(plot_data.shape) == 1):
-                                    #     plot_data = plot_data.unsqueeze(1)
-                                    # if plot_data.shape[1] > 1:
-                                    #     plot_data = plot_data[:, 0]
-                                    torch.set_printoptions(precision=3,
-                                                           sci_mode=False)
-                                    # if len(plot_data) < 30:
-                                    #     print(plot_data)
-                                    #     print(plot_data[:-1] / plot_data[1:])
-                                    #     print("\n")
-
-                                    plt.plot(plot_data_param,
-                                             label=param_val_string)
-
-                                    max_y = max(max_y, plt.ylim()[1])
-                                    all_axs.append(plt.gca())
-                                    # plt.figure()
-                                    # plt.plot(torch.mean(sub_data[-1],dim=(1)))
-                                    # plt.ylim(0,3.5)
-                                # plt.ylim(0, max_y)
-                                if found_param_change:
-                                    plt.legend()
-                                figure_title = (data_name + "-" + sub_name +
-                                                "_time" + str(timepoint))
-                                all_figures[figure_title] = new_figure
-                                plt.title(figure_title)
-                                # to plot total values over time
-                                # print("Time ", timepoint, " : ", plot_data_param.sum())
-                            for ax in all_axs:
-                                ax.set_ylim(0, max_y)
-
-                            if self.save_results:
-                                for figure_name, figure in all_figures.items():
-                                    # save figures in simulation path
-                                    figure.savefig(os.path.join(self.data_folder,
-                                                                figure_name+".png"))
-                                    # save figures in summary path
-                                    # where figures for all simulations are saved
-                                    # with a unique file name
-                                    # either sortable by the simulation
-                                    # (unique identifier first in file name)
-                                    identifier = os.path.basename(self.data_folder)
-                                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
-                                                                     "summary_sim")
-                                    figure.savefig(os.path.join(image_data_folder,
-                                                                identifier
-                                                                + "_" +
-                                                                figure_name+".png"),
-                                                   dpi = 400)
-
-                                    # or sortable by extracted data
-                                    # (unique identifier last in file name)
-                                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
-                                                                     "summary_data")
-                                    figure.savefig(os.path.join(image_data_folder,
-                                                                figure_name + "_" +
-                                                                identifier +
-                                                                ".png"),
-                                                   dpi = 400)
-
-                                    # or sortable by iterations (meaning same base
-                                    # file name), where only the number of
-                                    # the file name is last
-                                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
-                                                                     "summary_iters")
-                                    number_finder = re.compile("__([\d]+)$")
-                                    number_string = number_finder.search(self.data_folder)
-                                    if number_string is not None:
-                                        number_string = number_string.group(1)
-                                        identifier = identifier.replace("__" +
-                                                                        number_string,
-                                                                        "")
-                                        figure.savefig(os.path.join(image_data_folder,
-                                                                    identifier +
-                                                                    "_" +
-                                                                    figure_name +
-                                                                    "__" +
-                                                                    number_string +
-                                                                    ".png"),
-                                                       dpi = 400)
-
-                        if not print_data:
-                            continue
-
-                        for sub_name, sub_data in all_data[
-                            data_name].items():
-                            if ((sub_name.find("mean") == -1) &
-                                    (sub_name.find("number") == -1)):
-                                continue
-                            # if sub_name.find("inside") == -1:
-                            #     continue
-                            mean = np.nanmean(sub_data[-1].cpu())
-                            if mean == 0:
-                                continue
-                            if np.isnan(mean):
-                                continue
-                            print(sub_name, mean)
-
-                if self.save_results:
-                    print("Saving raw and analyzed data ...")
-                    self._save_times_and_object_states(batch_nb)
-                    self._save_data(all_data, batch_nb)
-
-                # print(2, numba.cuda.current_context().get_memory_info()[0]
-                # /1024/1024/1024)
-                if nb_batches > 1:
-                    self.data_buffer = []
-                    del self.times
-                    del self.object_states
-                    del self.object_states_buffer
-
-                    for property in self.properties:
-                        property.array = []
-                    # del all_data
-
-                    del object_dependent_rates_batch
-                    del property_array_batch
-                    del object_states_batch
-                    del local_density_batch
-                    del total_density_batch
-                else:
-                    self.all_data = all_data
-                cuda.current_context().memory_manager.deallocations.clear()
-                torch.cuda.empty_cache()
-                print(3, numba.cuda.current_context().get_memory_info()[0]
-                      /1024/1024/1024)
+                (object_states_batch,
+                 property_array_batch,
+                 first_last_idx_with_object_batch,
+                 nb_obj_all_states_batch) =  self._execute_batch(
+                                        batch_nb, param_shape_batch,
+                                        params_prop_dependence,
+                                        position_dependence,
+                                        transition_parameters,
+                                        all_transition_states,
+                                        action_parameters,
+                                        action_state_array,
+                                        all_action_properties,
+                                        action_operation_array,
+                                        property_start_values,
+                                        property_extreme_values,
+                                        all_transition_tranferred_vals,
+                                        all_transition_set_to_zero_properties,
+                                        changed_start_values_array,
+                                        creation_on_objects,
+                                        some_creation_on_objects,
+                                        all_object_removal_properties,
+                                        object_removal_operations,
+                                        nb_timepoints,
+                                       nb_dependences, max_number_objects,
+                                       start_save_time, start,
+                                        time_resolution, min_time,
+                                        local_resolution,
+                                       local_density_size, nb_simulations,
+                                       param_combinations_per_batch,
+                                        save_initial_state,
+                                        nb_batches,
+                                        convert_array, to_cuda,rng_states,
+                                        simulation_factor,
+                                        parameter_factor,
+                                        nb_parallel_cores,
+                                        start_nb_parallel_cores)
+
+                # to save the complete state of the simulation
+                # reassemble the following entire arrays:
+                # - object_states, properties_array, nb_obj_all_states_batch
+                #   first_last_idx_with_object
+
+                complete_object_states = torch.concatenate([
+                    complete_object_states, object_states_batch])
+
+                complete_property_array = torch.concatenate([
+                    complete_property_array, property_array_batch])
+
+                complete_first_last_idx_with_object_batch = torch.concatenate([
+                    complete_first_last_idx_with_object_batch,
+                    first_last_idx_with_object_batch])
+
+                complete_nb_obj_all_states_batch = torch.concatenate([
+                    complete_nb_obj_all_states_batch, nb_obj_all_states_batch])
+
+            # save all files
+            file_path = os.path.join(self.data_folder,
+                                     self.object_states_file_name)
+            torch.save(complete_object_states, file_path)
+
+            file_path = os.path.join(self.data_folder,
+                                     self.property_array_file_name)
+            torch.save(complete_property_array, file_path)
+
+            file_path = os.path.join(self.data_folder,
+                                     self.first_last_idx_with_object_file_name
+                                     )
+            torch.save(complete_first_last_idx_with_object_batch, file_path)
+
+            file_path = os.path.join(self.data_folder,
+                                     self.nb_obj_all_states_file_name)
+            torch.save(complete_nb_obj_all_states_batch, file_path)
 
             del rng_states
             cuda.current_context().memory_manager.deallocations.clear()
@@ -1954,6 +1539,468 @@ class SSA():
             print("Finished saving all data.")
             # self.all_data = all_data
             # self.times = times
+
+    def _execute_batch(self, batch_nb, param_shape_batch,
+                       params_prop_dependence, position_dependence,
+                       transition_parameters,all_transition_states,
+                       action_parameters,action_state_array,
+                       all_action_properties,action_operation_array,
+                       property_start_values, property_extreme_values,
+                       all_transition_tranferred_vals,
+                       all_transition_set_to_zero_properties,
+                       changed_start_values_array, creation_on_objects,
+                       some_creation_on_objects,all_object_removal_properties,
+                       object_removal_operations,
+                       nb_timepoints, nb_dependences,
+                       max_number_objects, start_save_time, start,
+                       time_resolution, min_time, local_resolution,
+                       local_density_size, nb_simulations,
+                       param_combinations_per_batch,
+                       save_initial_state, nb_batches,
+                       convert_array, to_cuda, rng_states,
+                       simulation_factor, parameter_factor,
+                       nb_parallel_cores,
+                       start_nb_parallel_cores):
+
+        start_parameter_comb = (batch_nb *
+                                param_combinations_per_batch)
+        end_parameter_comb = (start_parameter_comb +
+                              param_combinations_per_batch)
+        param_slice = slice(start_parameter_comb, end_parameter_comb)
+
+
+        parameter_value_array = self._get_parameter_value_array(param_shape_batch,
+                                                                nb_timepoints,
+                                                                param_slice)
+
+        # for numberr in range(parameter_value_array.shape[0]):
+        #     print(parameter_value_array[numberr])
+
+        object_dependent_rates = np.zeros((nb_dependences,
+                                           max_number_objects,
+                                           *param_shape_batch
+                                           ))
+
+        self._initialize_object_states(param_shape_batch)
+
+        self._initialize_object_properties(param_shape_batch)
+
+        self.object_states = self.object_states.reshape(
+            (self.object_states.shape[0],
+             self.object_states.shape[1],
+             -1))
+
+        for property in self.properties:
+            property.array = property.array.reshape(
+                (property.array.shape[0],
+                 property.array.shape[1],
+                 -1))
+            property.array = np.array(property.array)
+
+        self.times = torch.zeros((1, *param_shape_batch))
+
+        # reshape to have all different parameter values in one axis
+        # with the first axis being the number of objects
+        self.times = np.array(self.times.reshape((self.times.shape[0],
+                                                  self.times.shape[1],
+                                                  -1)))
+
+        # all parameters for nucleation on objects
+        nb_properties = len(self.properties)
+        end_position_tmax_array = np.zeros((32,
+                                            nb_properties - 1,
+                                            *param_shape_batch))
+        properties_tmax_array = np.zeros((32,
+                                          nb_properties - 1,
+                                          nb_properties,
+                                          *param_shape_batch))
+        # first dimensions is unsorted and sorted
+        properties_tmax = np.full((2, 32,
+                                   nb_properties - 1,
+                                   *param_shape_batch),
+                                  math.nan)
+        # properties_tmax_sorted = np.full((32,
+        #                                   nb_properties-1,
+        #                                   *param_shape_batch),
+        #                                  math.nan)
+        current_sum_tmax = np.zeros((32,
+                                     nb_properties, *param_shape_batch))
+        property_changes_tminmax_array = np.zeros(
+            (2, max_number_objects,
+             nb_properties,
+             *param_shape_batch),
+            dtype=np.float32)
+
+        property_changes_per_state = np.zeros(
+            (len(self.states), nb_properties,
+             *param_shape_batch))
+        nucleation_changes_per_state = np.copy(
+            property_changes_per_state)
+        total_property_changes = np.zeros(
+            (len(self.states), *param_shape_batch))
+
+        density_threshold_boundaries = np.zeros((3, *param_shape_batch))
+
+        # -  current rates of all transitions (empty)
+        nb_transitions = len(self.transitions)
+        current_transition_rates = np.zeros((nb_transitions,
+                                             *param_shape_batch))
+        # print(action_parameters, transition_parameters,
+        #       current_parameter_values.shape,
+        #       parameter_value_array.shape)
+
+        # - all total transition rates (empty)
+        total_rates = np.zeros(param_shape_batch)
+
+        # - current reaction times (empty)
+        reaction_times = np.zeros(param_shape_batch)
+
+        current_transitions = np.zeros(param_shape_batch)
+
+        all_transition_positions = np.zeros(param_shape_batch)
+
+        # subtract number of timepoints before determining the
+        # size of data arrays
+        nb_timepoints = (nb_timepoints -
+                         max(0, (math.floor(start_save_time /
+                                    time_resolution) - 1)))
+
+        # set arrays for values over time
+        # the first index is the current timepoint with respect to
+        # time_resolution
+        # the second index with respect to the timestep for
+        # reassigning threads from the third idx the actual timepoints
+        # at the respective savepoint are saved
+
+        timepoint_array = np.full((nb_timepoints + 2,
+                                   *param_shape_batch),
+                                  math.nan)
+
+        timepoint_array[:1] = 0
+
+        if save_initial_state:
+            timepoint_array[2] = 0
+
+        # if no initial state is defined, create a new one from scratch
+        if len(self.initial_object_states) == 0:
+            # create new object states object that includes data for
+            # all timepoints
+            object_states = np.zeros((nb_timepoints + 2,
+                                      self.object_states.shape[0],
+                                      *param_shape_batch),
+                                     dtype=np.int32)
+
+            # the first index is the current object states
+            object_states[0] = self.object_states
+
+            # the second index is the transition number of the
+            # generating transition, that the object comes from
+
+            if save_initial_state:
+                object_states[2] = self.object_states
+
+            # calculate number of objects for all states
+            nb_objects_all_states = np.zeros((2, max(len(self.transitions),
+                                                  len(self.states)) + 1,
+                                              *param_shape_batch))
+            nb_objects_all_states[0, 0] = self.object_states.shape[0]
+
+            for state_nb, state in enumerate(self.states):
+                nb_objects_all_states[0, state_nb + 1] = np.sum(
+                    object_states[0] == state.number, axis=0)
+
+            nb_properties = len(self.properties)
+
+            properties_array = np.full((nb_timepoints + 1, nb_properties,
+                                        self.object_states.shape[0],
+                                        *param_shape_batch),
+                                       math.nan)
+
+            for property_nb, property in enumerate(self.properties):
+                properties_array[0, property_nb] = property.array
+
+            if save_initial_state:
+                for property_nb, property in enumerate(self.properties):
+                    properties_array[1, property_nb] = property.array
+
+            first_last_idx_with_object = self.get_first_last_idx_with_object(
+                object_states)
+
+        else:
+            object_states = self.initial_object_states.clone()
+            properties_array = self.initial_properties_array.clone()
+            nb_objects_all_states = self.initial_nb_obj_all_states.clone()
+            first_last_idx_with_object = (
+                self.initial_first_last_idx_with_object.clone())
+
+        local_density = np.zeros((len(self.properties),
+                                  local_density_size, nb_simulations,
+                                  param_combinations_per_batch))
+        local_density = convert_array(local_density)
+
+        total_density = np.zeros(
+            (len(self.properties),
+             nb_simulations, param_combinations_per_batch))
+
+        # first idx of first dimension is for constant term,
+        # second idx of first dimension is for second order term
+        # first idx of second dimension is for base part, second idx is
+        # for variable part
+        tau_square_eq_terms = np.zeros(
+            (2, 2, nb_simulations, param_combinations_per_batch))
+
+        thread_masks = np.zeros((4, *param_shape_batch), dtype=np.int64)
+
+
+        timepoint_array = convert_array(timepoint_array)
+        properties_array = convert_array(properties_array)
+
+        # get number of cuda stream managers and cores per stream manager
+        nb_SM, nb_cc = self._get_number_of_cuda_cores()
+
+        size = min(nb_simulations * param_combinations_per_batch
+                   * start_nb_parallel_cores,
+                   int((nb_SM * nb_cc)))
+
+        thread_to_sim_id = np.zeros((size, 3))
+
+        # local_density_batch = cuda.to_device(
+        #     convert_array(local_density))
+        # total_density_batch = cuda.to_device(
+        #     convert_array(total_density))
+
+        timepoint_array_batch = cuda.to_device(
+            convert_array(timepoint_array))
+        time_resolution = cuda.to_device(time_resolution)
+
+        sim = simulation_numba._execute_simulation_gpu
+
+        object_states_batch = convert_array(object_states)
+        object_states_batch = to_cuda(object_states_batch)
+
+        object_dependent_rates_batch = object_dependent_rates
+        object_dependent_rates_batch = convert_array(to_cuda(
+            object_dependent_rates_batch))
+
+        property_array_batch = properties_array
+        property_array_batch = convert_array(property_array_batch)
+        property_array_batch = to_cuda(property_array_batch)
+
+        times_batch = self.times
+        param_val_array_batch = parameter_value_array
+        current_trans_rates = current_transition_rates
+        nb_obj_all_states_batch = nb_objects_all_states
+        nb_obj_all_states_batch = to_cuda(convert_array(nb_obj_all_states_batch))
+
+        total_rates_batch = total_rates
+        reaction_times_batch = reaction_times
+        current_transitions_batch = current_transitions
+        all_trans_pos_batch = all_transition_positions
+
+        first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
+        numba.cuda.profile_start()
+
+        # print(params_prop_dependence)
+        # print(param_val_array_batch[:,0,0])
+
+        # print("Starting simulation batch...")
+        sim[nb_SM,
+         nb_cc](object_states_batch, #int32[:,:,:]
+                property_array_batch, #float32[:,:,:,:]
+                to_cuda(convert_array(times_batch)), #float32[:,:,:]
+                nb_simulations, #int32
+                param_combinations_per_batch, #int32
+                to_cuda(convert_array(param_val_array_batch)), #float32[:,:,:]
+                to_cuda(convert_array(params_prop_dependence)),
+                position_dependence,
+                object_dependent_rates_batch,
+                to_cuda(convert_array(transition_parameters)), #int32[:]
+                to_cuda(convert_array(all_transition_states)), #int32[:,:]
+                to_cuda(convert_array(action_parameters)), #int32[:]
+                to_cuda(convert_array(action_state_array)), #float32[:,:]
+                to_cuda(convert_array(all_action_properties)), #float32[:,:]
+                to_cuda(convert_array(action_operation_array)), #float32[:,:]
+                to_cuda(convert_array(current_trans_rates)), #float32[:,:,:,:]
+                to_cuda(convert_array(property_start_values)), #float32[:,:]
+                to_cuda(convert_array(property_extreme_values)), #float32[:,:,:]
+                to_cuda(convert_array(all_transition_tranferred_vals)), #float32[:,:]
+                to_cuda(convert_array(all_transition_set_to_zero_properties)), #float32[
+                to_cuda(convert_array(changed_start_values_array)),
+                to_cuda(convert_array(creation_on_objects)),
+                some_creation_on_objects,
+                to_cuda(convert_array(all_object_removal_properties)),
+                to_cuda(convert_array(object_removal_operations)),
+
+                nb_obj_all_states_batch,
+
+                # all arrays with one property per simulation
+                # can be potentially combined, but at the cost
+                # of less readable code
+                to_cuda(convert_array(total_rates_batch)),
+                to_cuda(convert_array(reaction_times_batch)),
+                to_cuda(convert_array(current_transitions_batch)),
+                to_cuda(convert_array(all_trans_pos_batch)),
+
+                # all parameters for nucleation on objects
+                to_cuda(convert_array(end_position_tmax_array)),
+                to_cuda(convert_array(properties_tmax_array)),
+                to_cuda(convert_array(properties_tmax)),
+                to_cuda(convert_array(current_sum_tmax)),
+
+                to_cuda(convert_array(property_changes_tminmax_array)),
+                to_cuda(convert_array(property_changes_per_state)),
+                to_cuda(convert_array(nucleation_changes_per_state)),
+                to_cuda(convert_array(total_property_changes)),
+                to_cuda(convert_array(density_threshold_boundaries)),
+
+                to_cuda(convert_array(tau_square_eq_terms)),
+                first_last_idx_with_object,
+
+               timepoint_array_batch,
+               time_resolution, min_time, start_save_time,
+                save_initial_state,
+
+                start_nb_parallel_cores,
+                nb_parallel_cores,
+                to_cuda(convert_array(thread_masks)),
+                to_cuda(convert_array(thread_to_sim_id)),
+
+                cuda.to_device(local_density),
+                local_resolution,
+                cuda.to_device(convert_array(total_density)),
+
+                rng_states, simulation_factor, parameter_factor
+                )
+        if self.print_times:
+            print("Simulation time: ",
+                  np.round(time.time() - start, 2), "\n")
+
+        # nb_parallel_cores = nb_parallel_cores.copy_to_host()
+
+        numba.cuda.synchronize()
+        numba.cuda.profile_stop()
+
+        object_states_batch = torch.Tensor(
+            object_states_batch.copy_to_host())
+        property_array_batch = torch.Tensor(
+            property_array_batch.copy_to_host())
+        times_batch = torch.Tensor(timepoint_array_batch.copy_to_host()[2:])
+
+        first_last_idx_with_object = first_last_idx_with_object.copy_to_host()
+
+        del timepoint_array_batch
+        cuda.current_context().memory_manager.deallocations.clear()
+
+        # plt.figure()
+        # plt.plot(local_density_batches.mean(axis=1))
+
+        self.object_states = object_states_batch[2:]
+
+        self.times = (times_batch * time_resolution.copy_to_host())
+        self.times = self.times.unsqueeze(1).to(self.device)
+
+        for property_nb, property in enumerate(self.properties):
+            property.array = property_array_batch[1:][:, property_nb]
+            property.array = property.array.to(self.device)
+
+        # self.object_states = object_states_batch#.to(self.device)
+
+        # print(111, self.object_states.shape)
+        # print(222, property_array_batch.shape)
+
+        # nb_objects_single = torch.count_nonzero(self.object_states,
+        #                                         dim=1).to(torch.float)
+        # nb_objects = nb_objects_single.mean(dim=-2)
+        # for parameter_nb in range(nb_objects.shape[-1]):
+        #     print("Parameters: ")
+        #     for parameter in self.parameters:
+                # standard_param_val = parameter.value_array[0, 0].item()
+                # param_val = parameter.value_array[
+                #     0, parameter_nb].item()
+                # param_val_string = ""
+                # if standard_param_val != param_val:
+                #     param_val_string += "!! "
+                # param_val_string += parameter.name
+                # param_val_string += ": "
+                # param_val_string += str(param_val)
+                # param_val_string += "; "
+                # print(param_val_string)
+            # print("\n")
+
+        all_data = {}
+        for data_name, data_extraction in self.data_extractions.items():
+            start = time.time()
+            all_data[data_name] = data_extraction.extract(self,
+                                                          first_last_idx_with_object=
+                                                          first_last_idx_with_object)
+            if self.print_times:
+                print(data_name, "extraction time: ",
+                      np.round(time.time() - start, 2))
+            if data_extraction.show_data & self.show_data:
+                self._plot_data(all_data, data_name)
+
+                # if not print_data:
+                #     continue
+
+                # for sub_name, sub_data in all_data[
+                #     data_name].items():
+                #     if ((sub_name.find("mean") == -1) &
+                #             (sub_name.find("number") == -1)):
+                #         continue
+                #     # if sub_name.find("inside") == -1:
+                #     #     continue
+                #     mean = np.nanmean(sub_data[-1].cpu())
+                #     if mean == 0:
+                #         continue
+                #     if np.isnan(mean):
+                #         continue
+                #     print(sub_name, mean)
+
+        if self.save_results:
+            print("Saving raw and analyzed data ...")
+            self._save_times_and_object_states(batch_nb)
+            self._save_data(all_data, batch_nb)
+
+        # print(2, numba.cuda.current_context().get_memory_info()[0]
+        # /1024/1024/1024)
+
+        cuda.current_context().memory_manager.deallocations.clear()
+        torch.cuda.empty_cache()
+        print(3, numba.cuda.current_context().get_memory_info()[0]
+              /1024/1024/1024)
+
+        # to save the complete state of the simulation
+        # reassemble the following entire arrays:
+        # - object_states, properties_array, nb_obj_all_states_batch
+        #   first_last_idx_with_object
+        object_states = torch.Tensor(object_states_batch)
+        property_array = torch.Tensor(property_array_batch)
+        nb_obj_all_states_batch = torch.Tensor(
+            nb_obj_all_states_batch.copy_to_host())
+        first_last_idx_with_object = torch.Tensor(
+            first_last_idx_with_object)
+
+        if nb_batches > 1:
+            self.data_buffer = []
+            del self.times
+            del self.object_states
+            del self.object_states_buffer
+
+            for property in self.properties:
+                property.array = []
+            # del all_data
+
+            del object_dependent_rates_batch
+            del property_array_batch
+            del object_states_batch
+            del local_density_batch
+            del total_density_batch
+        else:
+            self.all_data = all_data
+
+        return (object_states, property_array,
+                first_last_idx_with_object,
+                nb_obj_all_states_batch)
 
     def _get_all_parameters(self):
         # get different parameters from all events#, so that no parameter is
@@ -2104,6 +2151,7 @@ class SSA():
         date_time = datetime.datetime.now()
         date_string = date_time.strftime("%Y%m%d-%H%M")
         metadata["datetime"] = date_string
+        metadata["comment"] = self.comment
 
         metadata["all_param_combinations"] = str(self.all_parameter_combinations)
         metadata["nb_of_states"] = [len(self.states)]
@@ -2180,15 +2228,24 @@ class SSA():
                         (column in ["position_max", "position_min"])):
                     first_columns.append(column)
                 else:
-                    if column not in ["folder", "nb_simulations", "datetime"]:
+                    if column not in ["folder", "nb_simulations", "datetime",
+                                      "comment"]:
                         non_rate_columns.append(column)
 
             simulations_summary = simulations_summary[["folder", "datetime",
+                                                       "comment",
                                                        *first_columns,
                                                        "nb_simulations",
                                                        *non_rate_columns]]
 
             simulations_summary.to_csv(simulations_summary_path)
+
+            # save comment in separate txt file for quick and easy access
+            if self.comment != "":
+                file_path = os.path.join(self.data_folder, "comment.txt")
+
+                with open(file_path, "w") as text_file:
+                    text_file.write(self.comment)
 
         print("Saving simulation object...")
         # pickle the entire simulation object
@@ -2253,6 +2310,145 @@ class SSA():
         random_number_func = numba.cuda.random.create_xoroshiro128p_states
         rng_states = random_number_func(int(nb_states), seed=int(seed))
         return rng_states, simulation_factor, parameter_factor
+
+    def _plot_data(self, all_data, data_name):
+        print_data = False
+        for sub_name, sub_data in all_data[
+            data_name].items():
+            global_data = False
+            if not ((sub_name.find("mean") == -1) &
+                    (sub_name.find("number") == -1)):
+                global_data = True
+                print_data = True
+            if sub_data.sum() == 0:
+                continue
+            if (sub_data.shape[1] == 1) & (not global_data):
+                print_data = True
+                if (sub_name.find("mass") == -1):
+                    break
+                else:
+                    continue
+            if sub_name.endswith("_position"):
+                continue
+            if sub_name.find("_bins_") != -1:
+                continue
+            all_axs = []
+            all_figures = {}
+            max_y = 0
+            for timepoint in range(sub_data.shape[0]):
+                # the first dimension is for the time
+                # only plot data for the last timepoint
+                plot_data = torch.Tensor(np.nanmean(sub_data[timepoint].cpu(),
+                                       axis=1))
+                if not global_data:
+                    new_figure = plt.figure()
+                if global_data:
+                    print_str = "\n" + sub_name
+                    if sub_data.shape[0] > 1:
+                        print_str += ("Time " +
+                                      str(timepoint))
+                    print(print_str)
+                found_param_change = False
+                for param_nb in range(plot_data.shape[1]):
+                    plot_data_param = plot_data[:,param_nb].unsqueeze(1)
+                    param_val_string = ""
+                    for parameter in self.parameters:
+                        standard_param_val = parameter.value_array[0, 0].item()
+                        param_val = parameter.value_array[0, param_nb].item()
+                        if standard_param_val != param_val:
+                            param_val_string = (parameter.name +
+                                                " = " +
+                                                str(round(param_val,3)))
+                            found_param_change = True
+                            break
+                    # if (len(plot_data.shape) == 1):
+                    #     plot_data = plot_data.unsqueeze(1)
+                    # if plot_data.shape[1] > 1:
+                    #     plot_data = plot_data[:, 0]
+                    torch.set_printoptions(precision=3,
+                                           sci_mode=False)
+                    # if len(plot_data) < 30:
+                    #     print(plot_data)
+                    #     print(plot_data[:-1] / plot_data[1:])
+                    #     print("\n")
+                    if not global_data:
+                        plt.plot(plot_data_param,
+                                 label=param_val_string)
+                        plt.grid(visible=True)
+                        max_y = max(max_y, plt.ylim()[1])
+                        all_axs.append(plt.gca())
+                    else:
+                        mean = np.nanmean(plot_data_param.cpu())
+                        print_str = str(mean)
+                        print_str += " ("+param_val_string+")"
+                        print(print_str)
+                    print(plot_data.mean())
+                    # plt.figure()
+                    # plt.plot(torch.mean(sub_data[-1],dim=(1)))
+                    # plt.ylim(0,3.5)
+                # plt.ylim(0, max_y)
+                if found_param_change & (not global_data):
+                    plt.legend()
+                if not global_data:
+                    figure_title = (data_name + "-" + sub_name +
+                                    "_time" + str(timepoint))
+                    all_figures[figure_title] = new_figure
+                    plt.title(figure_title)
+                # to plot total values over time
+                # print("Time ", timepoint, " : ", plot_data_param.sum())
+            if not global_data:
+                for ax in all_axs:
+                    ax.set_ylim(0, max_y)
+
+            if self.save_results & (not global_data):
+                for figure_name, figure in all_figures.items():
+                    # save figures in simulation path
+                    figure.savefig(os.path.join(self.data_folder,
+                                                figure_name+".png"))
+                    # save figures in summary path
+                    # where figures for all simulations are saved
+                    # with a unique file name
+                    # either sortable by the simulation
+                    # (unique identifier first in file name)
+                    identifier = os.path.basename(self.data_folder)
+                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
+                                                     "summary_sim")
+                    figure.savefig(os.path.join(image_data_folder,
+                                                identifier
+                                                + "_" +
+                                                figure_name+".png"),
+                                   dpi = 400)
+
+                    # or sortable by extracted data
+                    # (unique identifier last in file name)
+                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
+                                                     "summary_data")
+                    figure.savefig(os.path.join(image_data_folder,
+                                                figure_name + "_" +
+                                                identifier +
+                                                ".png"),
+                                   dpi = 400)
+
+                    # or sortable by iterations (meaning same base
+                    # file name), where only the number of
+                    # the file name is last
+                    image_data_folder = os.path.join(os.path.dirname(self.data_folder),
+                                                     "summary_iters")
+                    number_finder = re.compile("__([\d]+)$")
+                    number_string = number_finder.search(self.data_folder)
+                    if number_string is not None:
+                        number_string = number_string.group(1)
+                        identifier = identifier.replace("__" +
+                                                        number_string,
+                                                        "")
+                        figure.savefig(os.path.join(image_data_folder,
+                                                    identifier +
+                                                    "_" +
+                                                    figure_name +
+                                                    "__" +
+                                                    number_string +
+                                                    ".png"),
+                                       dpi = 400)
 
     def _empty_buffers(self):
         for property in self.properties:

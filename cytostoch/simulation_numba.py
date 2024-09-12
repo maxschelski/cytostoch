@@ -1929,9 +1929,13 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                         # if not math.isnan(property_extreme_values[1, 0, 0]):
                         #     end = min(property_extreme_values[1, 0, 0], end)
                         start = max(start, -local_resolution)
-                        if (start != end) & (end > 0):
-                            x_start = int(math.ceil(start / local_resolution))
+                        x_start = int(math.ceil(start / local_resolution))
+                        if ((start != end) & (end > 0) &
+                                (x_start <= local_density.shape[1] - 1)):
                             x_end = int(math.ceil(end / local_resolution))
+                            # for MTs going beyond the end (in the case of an open end)
+                            # take the last position possible as the end position
+                            x_end = min(x_end, local_density.shape[1] - 1)
                             x_pos = max(x_start, 0)
                             first_x = True
                             # track the cumulative density of this object
@@ -2192,6 +2196,7 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                         transition_parameters[
                                                             transition_nb, 0])],
                                                       parameter_value_array,
+                                                       transition_parameters,
                                                       object_dependent_rates,
                                                       transition_nb,
                                                       current_transition_rates,
@@ -2297,6 +2302,7 @@ def _get_rate_of_density_dependent_transition(param_prop_dependence,
 
 def _get_rate_of_prop_dependent_transition(param_prop_dependence,
                                           parameter_value_array,
+                                           transition_parameters,
                                           object_dependent_rates,
                                          transition_nb,
                                          current_transition_rates,
@@ -2421,25 +2427,79 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
             # value. Such a reduction should be implemented through a reduced
             # separately defined baseline value of the parameter and a steeper
             # change of the position dependence.
+            # For the case where a rate should be constant in most position
+            # but then reduced at the beginning or end, a reduction through a
+            # separate value should still be possible. In that case the
+            # mininmum allowed value is the negative rate of the transition
+            # (for one object). In that case the base_value has to be < 0.
             # The maximum final rate allowed is the maximum of the value in the
             # start and end, don't allow values at positions in between the
             # start and the end to be higher than the maximum of both.
 
             final_rate = cuda.selp(param_prop_dependence[6] == 0,
 
-                                   min(max(param_prop_dependence[0],
-                                           param_prop_dependence[1]),
-                                       max(0, base_value + rate_diff)),
+                                    cuda.selp(base_value < 0,
+
+                                    max(- parameter_value_array[int(
+                                        transition_parameters[transition_nb,0]),
+                                                                int(
+                                        timepoint_array[0, sim_id,param_id]),
+                                                                param_id],
+
+                                        max(min(parameter_value_array[int(
+                                            param_prop_dependence[0]),int(
+                                            timepoint_array[0, sim_id,param_id]),
+                                                                      param_id],
+                                                      parameter_value_array[int(
+                                                          param_prop_dependence[
+                                                              1]),
+                                                            int(
+                                                              timepoint_array[
+                                                                  0, sim_id,
+                                                                  param_id]),
+                                                          param_id],),
+                                            min(0, base_value + rate_diff))),
+
+                                  min(max(parameter_value_array[int(
+                                      param_prop_dependence[0]), int(
+                                      timepoint_array[0, sim_id, param_id]),
+                                                                param_id],
+
+                                          parameter_value_array[int(
+                                              param_prop_dependence[1]),
+                                                          int(timepoint_array[
+                                                                  0, sim_id,
+                                                                  param_id]),
+                                                                param_id],),
+
+                                      max(0, base_value + rate_diff))
+                                    ),
 
                                    rate_diff)
 
-            # # if (transition_nb == 4) | (transition_nb == 10):
-            # print(final_rate, rate_diff, base_value,
-            #       end_position, max_position, position_diff,
-            #       # param_prop_dependence[6], # 0 for linear
-            #       # param_prop_dependence[2], # 0 for absolute change
-            #       # param_prop_dependence[4] # change value, nan for none defined
-            #       )
+
+            # final_rate = cuda.selp(param_prop_dependence[6] == 0,
+            #
+            #                                   min(max(param_prop_dependence[0],
+            #                                           param_prop_dependence[1]),
+            #                                       max(0,
+            #                                           base_value + rate_diff)),
+            #
+            #                                 rate_diff)
+
+            # if (transition_nb == 6):
+            #     print(final_rate, rate_diff, base_value,
+            #           end_position, max_position, position_diff,
+            #           param_prop_dependence[0], param_prop_dependence[1],
+            #           - parameter_value_array[int(transition_parameters[
+            #                                           transition_nb, 0]),
+            #                                   int(timepoint_array[0, sim_id,
+            #                                                       param_id]),
+            #                                   param_id],
+            #           # param_prop_dependence[6], # 0 for linear
+            #           # param_prop_dependence[2], # 0 for absolute change
+            #           # param_prop_dependence[4] # change value, nan for none defined
+            #           )
 
             object_dependent_rates[int(param_prop_dependence[5]),
                                    object_nb, sim_id, param_id] = final_rate
