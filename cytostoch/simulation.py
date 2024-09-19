@@ -394,9 +394,11 @@ class SSA():
                 property_extreme_values[1, property_nb, 1] = 1
             else:
                 property_extreme_values[1, property_nb, 1] = 0
+
             # print(type(max_value) in [Parameter])
             # print(max_value)
-            if type(max_value) in [Parameter]:
+
+            if type(max_value) == type(Parameter(values=[0])):
                 property_extreme_values[1, property_nb, 0] = max_value.number
             elif max_value is not None:
                 if max_value.properties[0].closed_max:
@@ -841,11 +843,28 @@ class SSA():
             position_dependence = True
             # so far only linear dependence on space are allowed
             dependence = parameter.dependence
+
             if type(dependence.start_val) == type(self.parameters[0]):
                 start_val_param_nb = dependence.start_val.number
+                # if the start parameter is the target value and not the actual
+                # start value of the dependence, subtract the actual parameter
+                # value to arrive in sum at the desired target value
+                if hasattr(dependence.start_val,"is_target_value"):
+                    if dependence.start_val.is_target_value:
+                        dependence.start_val.values -= parameter.values
+                dependence_start_end_param = dependence.start_val
+
                 params_prop_dependence[param_nb, 0] = start_val_param_nb
             if type(dependence.end_val) == type(self.parameters[0]):
                 end_val_param_nb = dependence.end_val.number
+                # if the end parameter is the target value and not the actual
+                # end value of the dependence, subtract the actual parameter
+                # value to arrive in sum at the desired target value
+                if hasattr(dependence.end_val,"is_target_value"):
+                    if dependence.end_val.is_target_value:
+                        dependence.end_val.values -= parameter.values
+                dependence_start_end_param = dependence.end_val
+
                 params_prop_dependence[param_nb, 1] = end_val_param_nb
             # if the start and end values are defined but no change
             # calculate the linear change from the start to the end val
@@ -880,6 +899,16 @@ class SSA():
             params_prop_dependence[param_nb, 3] = rel_length_change
 
             change_param = dependence.param_change
+            # if the change param indicates the max property change for which
+            # there should be a dependence, map this max property change
+            # linearly to the starting value so that the param change
+            # goes to zero until the max_property_change
+            # (e.g. for 2 and a position dependence, the param change would go
+            #  to 0 at a position change of 2.)
+            if hasattr(change_param, "is_max_property_change"):
+                if change_param.is_max_property_change:
+                    change.param.values = - (dependence_start_end_param.values /
+                                             change.param.values)
             params_prop_dependence[param_nb, 4] = change_param.number
 
             params_prop_dependence[param_nb, 5] = dependence_nb
@@ -1966,7 +1995,8 @@ class SSA():
             if self.print_times:
                 print(data_name, "extraction time: ",
                       np.round(time.time() - start, 2))
-            if data_extraction.show_data & self.show_data:
+            if (data_extraction.show_data & self.show_data &
+                    data_extraction.show_data):
                 self._plot_data(all_data, data_name)
 
                 # if not print_data:
@@ -2102,6 +2132,16 @@ class SSA():
                         potential_param.number = param_nb
                         self.parameters.append(potential_param)
                         param_nb += 1
+                    else:
+                        print("WARNING: A parameter should only be used in "
+                             "one dependence. Otherwise, "
+                             "is_target_value might not work "
+                             "anymore, since it would overwrite the "
+                             "value for the second dependence, thereby "
+                              "changing the actual target value for previous "
+                              "dependencies that used the parameter. "
+                              f"The parameter {potential_param.name} is used "
+                              f"in at least two dependencies.")
 
     def _get_simulation_parameter_lengths(self):
         # create list of length of all model parameters
