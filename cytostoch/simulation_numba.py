@@ -17,11 +17,15 @@ from matplotlib import pyplot as plt
 def _execute_simulation_gpu(object_states, properties_array, times,
                             nb_simulations, nb_parameter_combinations,
                             parameter_value_array,
-                            params_prop_dependence, position_dependence,
+                            params_prop_dependence,
+                            position_dependence,
                             object_dependent_rates,
-                            transition_parameters, all_transition_states,
-                            action_parameters, action_state_array,
-                            all_action_properties, action_operation_array,
+                            transition_parameters,
+                            all_transition_states,
+                            action_parameters,
+                            action_state_array,
+                            all_action_properties,
+                            action_operation_array,
                             current_transition_rates,
                             property_start_values,
                             property_extreme_values,
@@ -66,6 +70,25 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                         ):
     # np.random.seed(seed)
     iteration_nb = 0
+
+    parameter_value_array = cuda.const.array_like(parameter_value_array)
+    params_prop_dependence = cuda.const.array_like(params_prop_dependence)
+    transition_parameters = cuda.const.array_like(transition_parameters)
+    all_transition_states = cuda.const.array_like(all_transition_states)
+    action_parameters = cuda.const.array_like(action_parameters)
+    action_state_array = cuda.const.array_like(action_state_array)
+    all_action_properties = cuda.const.array_like(all_action_properties)
+    action_operation_array = cuda.const.array_like(action_operation_array)
+    property_start_values = cuda.const.array_like(property_start_values)
+    property_extreme_values = cuda.const.array_like(property_extreme_values)
+    all_transition_tranferred_vals = cuda.const.array_like(all_transition_tranferred_vals)
+    all_transition_set_to_zero_properties = cuda.const.array_like(all_transition_set_to_zero_properties)
+    changed_start_values_array = cuda.const.array_like(changed_start_values_array)
+    creation_on_objects = cuda.const.array_like(creation_on_objects)
+    all_object_removal_properties = cuda.const.array_like(all_object_removal_properties)
+    object_removal_operations = cuda.const.array_like(object_removal_operations)
+
+    # local_density = cuda.shared.array((1,201,1,1), numba.float32)
 
     # for multiprocessing,
     # have one array with the current status of each sim_id, param_id
@@ -917,6 +940,7 @@ def _run_iteration(object_states, properties_array , times,
     # print(4567, total_rates[sim_id, param_id])
 
     if some_creation_on_objects:
+    # if False:
         # nucleation rates for nucleation on objects are time-dependent
         # since objects might increase or decrease in size and might move out
         # of the compartment. This will change density, independent of
@@ -938,6 +962,7 @@ def _run_iteration(object_states, properties_array , times,
                                              property_changes_tminmax_array,
                                              property_changes_per_state,
                                              total_property_changes,
+                                            parameter_value_array,
                                             property_extreme_values,
                                                current_sum_tmax,
 
@@ -1142,7 +1167,7 @@ def _run_iteration(object_states, properties_array , times,
                                             params_prop_dependence,
                                             object_dependent_rates,
                                             parameter_value_array,
-                                        transition_parameters,
+                                            transition_parameters,
                                             current_transition_rates,
                                             timepoint_array,
                                             object_states, core_id,
@@ -1364,103 +1389,118 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_random_number = numba.cuda.jit(_get_random_number_gpu, debug=debug,
                                             opt=opt, fastmath=fastmath,
-                                            lineinfo=lineinfo)
+                                            lineinfo=lineinfo,
+                                            device=True)
 
     global _run_iteration
     if not isinstance(_run_iteration,
                       numba.cuda.dispatcher.CUDADispatcher):
         _run_iteration = numba.cuda.jit(_run_iteration, debug=debug, opt=opt,
-                                        fastmath=fastmath, lineinfo=lineinfo)
+                                        fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_rate_of_density_dependent_transition
     if not isinstance(_get_rate_of_density_dependent_transition,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_rate_of_density_dependent_transition = numba.cuda.jit(
             _get_rate_of_density_dependent_transition, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_rate_of_prop_dependent_transition
     if not isinstance(_get_rate_of_prop_dependent_transition,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_rate_of_prop_dependent_transition = numba.cuda.jit(
             _get_rate_of_prop_dependent_transition, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _reassign_thread
     if not isinstance(_reassign_thread,
                       numba.cuda.dispatcher.CUDADispatcher):
         _reassign_thread = numba.cuda.jit(
             _reassign_thread, debug=debug, opt=opt, fastmath=fastmath,
-            lineinfo=lineinfo)
+            lineinfo=lineinfo,
+                                            device=True)
 
     global get_slowest_simulation_in_warp
     if not isinstance(get_slowest_simulation_in_warp,
                       numba.cuda.dispatcher.CUDADispatcher):
         get_slowest_simulation_in_warp = numba.cuda.jit(
             get_slowest_simulation_in_warp, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _check_whether_reassignment_is_allowed
     if not isinstance(_check_whether_reassignment_is_allowed,
                       numba.cuda.dispatcher.CUDADispatcher):
         _check_whether_reassignment_is_allowed = numba.cuda.jit(
             _check_whether_reassignment_is_allowed, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_incrementing_core_ids_for_reassigned_thread
     if not isinstance(_get_incrementing_core_ids_for_reassigned_thread,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_incrementing_core_ids_for_reassigned_thread = numba.cuda.jit(
             _get_incrementing_core_ids_for_reassigned_thread, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_nucleation_on_objects_rate
     if not isinstance(_get_nucleation_on_objects_rate,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_nucleation_on_objects_rate = numba.cuda.jit(
             _get_nucleation_on_objects_rate, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_nucleation_changes_per_state
     if not isinstance(_get_nucleation_changes_per_state,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_nucleation_changes_per_state = numba.cuda.jit(
             _get_nucleation_changes_per_state, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_first_and_last_object_pos
     if not isinstance(_get_first_and_last_object_pos,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_first_and_last_object_pos = numba.cuda.jit(
             _get_first_and_last_object_pos, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_tau
     if not isinstance(_get_tau,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_tau = numba.cuda.jit(_get_tau, debug=debug, opt=opt,
-                                  fastmath=fastmath, lineinfo=lineinfo)
+                                  fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _reset_local_density
     if not isinstance(_reset_local_density,
                       numba.cuda.dispatcher.CUDADispatcher):
         _reset_local_density = numba.cuda.jit(
         _reset_local_density, debug=debug, opt=opt, fastmath=fastmath,
-            lineinfo=lineinfo)
+            lineinfo=lineinfo,
+                                            device=True)
 
     global _get_local_and_total_density
     if not isinstance(_get_local_and_total_density,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_local_and_total_density = numba.cuda.jit(
         _get_local_and_total_density, debug=debug, opt=opt, fastmath=fastmath,
-            lineinfo=lineinfo)
+            lineinfo=lineinfo,
+                                            device=True)
 
     global _get_total_and_single_rates_for_state_transitions
     if not isinstance(_get_total_and_single_rates_for_state_transitions,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_total_and_single_rates_for_state_transitions = numba.cuda.jit(
         _get_total_and_single_rates_for_state_transitions, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
 
     global _get_property_action_changes
@@ -1468,21 +1508,24 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_property_action_changes = numba.cuda.jit(
         _get_property_action_changes, debug=debug, opt=opt, fastmath=fastmath,
-            lineinfo=lineinfo)
+            lineinfo=lineinfo,
+                                            device=True)
 
     global _get_tmin_tmax_for_property_changes
     if not isinstance(_get_tmin_tmax_for_property_changes,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_tmin_tmax_for_property_changes = numba.cuda.jit(
             _get_tmin_tmax_for_property_changes, debug=debug,
-            opt=opt, fastmath=fastmath, lineinfo=lineinfo)
+            opt=opt, fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _get_times_of_next_transition
     if not isinstance(_get_times_of_next_transition,
                       numba.cuda.dispatcher.CUDADispatcher):
         _get_times_of_next_transition = numba.cuda.jit(
             _get_times_of_next_transition, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _determine_next_transition
     if not isinstance(_determine_next_transition,
@@ -1490,28 +1533,32 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
         _determine_next_transition = numba.cuda.jit(_determine_next_transition,
                                                     debug=debug, opt=opt,
                                                     fastmath=fastmath,
-                                                    lineinfo=lineinfo)
+                                                    lineinfo=lineinfo,
+                                            device=True)
 
     global _determine_positions_of_transitions
     if not isinstance(_determine_positions_of_transitions,
                       numba.cuda.dispatcher.CUDADispatcher):
         _determine_positions_of_transitions = numba.cuda.jit(
             _determine_positions_of_transitions, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _execute_actions_on_objects
     if not isinstance(_execute_actions_on_objects,
                       numba.cuda.dispatcher.CUDADispatcher):
         _execute_actions_on_objects = numba.cuda.jit(
             _execute_actions_on_objects, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _increase_lowest_no_object_idx
     if not isinstance(_increase_lowest_no_object_idx,
                       numba.cuda.dispatcher.CUDADispatcher):
         _increase_lowest_no_object_idx = numba.cuda.jit(
             _increase_lowest_no_object_idx, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _reduce_highest_object_idx
     if not isinstance(_reduce_highest_object_idx,
@@ -1519,7 +1566,8 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
         _reduce_highest_object_idx = numba.cuda.jit(_reduce_highest_object_idx,
                                                debug=debug, opt=opt,
                                                     fastmath=fastmath,
-                                                 lineinfo=lineinfo)
+                                                 lineinfo=lineinfo,
+                                            device=True)
 
     global _get_density_dependent_position
     if not isinstance(_get_density_dependent_position,
@@ -1528,7 +1576,8 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
             _get_density_dependent_position,
             debug=debug, opt=opt,
             fastmath=fastmath,
-            lineinfo=lineinfo)
+            lineinfo=lineinfo,
+                                            device=True)
 
     global _update_object_states
     if not isinstance(_update_object_states,
@@ -1536,20 +1585,23 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
         _update_object_states = numba.cuda.jit(_update_object_states,
                                                debug=debug, opt=opt,
                                                fastmath=fastmath,
-                                                 lineinfo=lineinfo)
+                                                 lineinfo=lineinfo,
+                                            device=True)
 
     global _save_values_with_temporal_resolution
     if not isinstance(_save_values_with_temporal_resolution,
                       numba.cuda.dispatcher.CUDADispatcher):
         _save_values_with_temporal_resolution = numba.cuda.jit(
             _save_values_with_temporal_resolution, debug=debug, opt=opt,
-            fastmath=fastmath, lineinfo=lineinfo)
+            fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _remove_objects
     if not isinstance(_remove_objects,
                       numba.cuda.dispatcher.CUDADispatcher):
         _remove_objects = numba.cuda.jit(_remove_objects, debug=debug, opt=opt,
-                                         fastmath=fastmath, lineinfo=lineinfo)
+                                         fastmath=fastmath, lineinfo=lineinfo,
+                                            device=True)
 
     global _execute_simulation_gpu
     if not isinstance(_execute_simulation_gpu,
@@ -1799,245 +1851,312 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                                  object_states, nb_parallel_cores,
                                  thread_masks,
                                  core_id, sim_id, param_id):
-        # get density of MTs at timepoint
-        if core_id == 0:
-            property_nb = 0
-            while property_nb <= total_density.shape[0]:
-                total_density[property_nb, sim_id, param_id] = 0
-                property_nb += 1
+    # get density of MTs at timepoint
+    if core_id == 0:
+        property_nb = 0
+        while property_nb <= total_density.shape[0]:
+            total_density[property_nb, sim_id, param_id] = 0
+            property_nb += 1
 
-        if nb_parallel_cores[sim_id, param_id] > 1:
-            cuda.syncwarp(thread_masks[0,sim_id, param_id])
+    if nb_parallel_cores[sim_id, param_id] > 1:
+        cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
-        nb_objects = first_last_idx_with_object[1,sim_id, param_id] + 1
-        (object_pos,
-         last_object_pos) = _get_first_and_last_object_pos(
-            nb_objects, nb_parallel_cores[sim_id, param_id], core_id)
-        # if sim_id == 356:
-        #     print(1111, core_id, object_pos, last_object_pos)
-        #
-        # cuda.syncwarp(thread_masks[0,sim_id, param_id])
-        # if sim_id == 356:
-        #     print(2222, core_id, object_pos, last_object_pos)
+    nb_objects = first_last_idx_with_object[1,sim_id, param_id] + 1
+    (object_pos,
+     last_object_pos) = _get_first_and_last_object_pos(
+        nb_objects, nb_parallel_cores[sim_id, param_id], core_id)
+    # if sim_id == 356:
+    #     print(1111, core_id, object_pos, last_object_pos)
+    #
+    # cuda.syncwarp(thread_masks[0,sim_id, param_id])
+    # if sim_id == 356:
+    #     print(2222, core_id, object_pos, last_object_pos)
 
-        while object_pos < last_object_pos:
-            if object_states[0, object_pos, sim_id, param_id] > 0:
+    while object_pos < last_object_pos:
+        if object_states[0, object_pos, sim_id, param_id] > 0:
 
-                creation_property = 0
-                end = 0
-                while creation_property < creation_on_objects.shape[2]:
-                    # stop calculation of densities of individual properties
-                    # once there is a nan in creation on objects
-                    # in the case of only nans, only the total density is needed
-                    if ((creation_property > 0) &
-                            (math.isnan(creation_on_objects[
-                                            -1, 0, creation_property]))):
-                        break
+            creation_property = 0
+            end = 0
+            while creation_property < creation_on_objects.shape[2]:
+                # stop calculation of densities of individual properties
+                # once there is a nan in creation on objects
+                # in the case of only nans, only the total density is needed
+                if ((creation_property > 0) &
+                        (math.isnan(creation_on_objects[
+                                        -1, 0, creation_property]))):
+                    break
 
-                    # don't perform calculations if object has zero value of
-                    # needed property
-                    # but only for the last property of the array since
-                    # calculations depend on calculations of previous properties
-                    # since calculations are started from end point of last
-                    # calculation
-                    last_idx = cuda.selp(creation_property ==
-                                         (creation_on_objects.shape[0] -1),
+                # don't perform calculations if object has zero value of
+                # needed property
+                # but only for the last property of the array since
+                # calculations depend on calculations of previous properties
+                # since calculations are started from end point of last
+                # calculation
+                if creation_property == (creation_on_objects.shape[0] -1):
+                    last_idx = 1
+                else:
+                    last_idx = int(math.isnan(creation_on_objects[
+                                                    -1, 0,
+                                                    creation_property + 1]))
 
-                                         1,
-                                         int(math.isnan(creation_on_objects[
-                                                        -1, 0,
-                                                        creation_property + 1]))
-                                         )
-                    # print(222)
-                    if (((math.isnan(creation_on_objects[-1, 0, 0])) |
-                            (properties_array[0, int(creation_on_objects[
-                                                         -1, 0,
-                                                         creation_property]),
-                                            object_pos, sim_id, param_id] > 0))
-                        | (last_idx == 0)):
-                        # creation_on_objects defines which property is actually
-                        # used while the start property defines the end of which
-                        # property defines the start position
+                # last_idx = cuda.selp(creation_property ==
+                #                      (creation_on_objects.shape[0] -1),
+                #
+                #                      1,
+                #                      int(math.isnan(creation_on_objects[
+                #                                     -1, 0,
+                #                                     creation_property + 1]))
+                #                      )
+                # print(222)
+                if (((math.isnan(creation_on_objects[-1, 0, 0])) |
+                        (properties_array[0, int(creation_on_objects[
+                                                     -1, 0,
+                                                     creation_property]),
+                                        object_pos, sim_id, param_id] > 0))
+                    | (last_idx == 0)):
+                    # creation_on_objects defines which property is actually
+                    # used while the start property defines the end of which
+                    # property defines the start position
 
-                        # if only the total local density is needed,
-                        # the start property is 0
+                    # if only the total local density is needed,
+                    # the start property is 0
 
-                        # Due to property numbers in creation_on_objects[-1
-                        # being sorted ascendingly, the last end can be used as
-                        # new start. Then all properties from the
-                        # last end property + 1 to the new start property
-                        # have to still be added.
+                    # Due to property numbers in creation_on_objects[-1
+                    # being sorted ascendingly, the last end can be used as
+                    # new start. Then all properties from the
+                    # last end property + 1 to the new start property
+                    # have to still be added.
 
-                        target_property = cuda.selp(
-                            math.isnan(creation_on_objects[-1, 0, 0]),
+                    if math.isnan(creation_on_objects[-1, 0, 0]):
+                        target_property = 0
+                    else:
+                        target_property = int(creation_on_objects[-1, 0, creation_property])
 
-                            0,
-                            int(creation_on_objects[-1, 0, creation_property]))
-                        # start either at property_nb of 0
-                        # or start at one after the last quantified
-                        # property_nb + 1
-                        property_nb = cuda.selp(creation_property == 0,
+                    # target_property = cuda.selp(
+                    #     math.isnan(creation_on_objects[-1, 0, 0]),
+                    #
+                    #     0,
+                    #     int(creation_on_objects[-1, 0, creation_property]))
 
-                                                0,
-                                                int(creation_on_objects[
-                                                        -1, 0, creation_property
-                                                        - 1] + 1)
-                                                )
-                        # use last end as new start
-                        start = end
-                        while property_nb <= max(0, target_property-1):
-                            start += properties_array[0, property_nb,
-                                                      object_pos,
-                                                      sim_id, param_id]
-                            property_nb += 1
+                    # start either at property_nb of 0
+                    # or start at one after the last quantified
+                    # property_nb + 1
+                    if creation_property == 0:
+                        property_nb = 0
+                    else:
+                        property_nb = int(creation_on_objects[
+                                                    -1, 0, creation_property
+                                                    - 1] + 1)
+                    # property_nb = cuda.selp(creation_property == 0,
+                    #
+                    #                         0,
+                    #                         int(creation_on_objects[
+                    #                                 -1, 0, creation_property
+                    #                                 - 1] + 1)
+                    #                         )
+                    # use last end as new start
+                    start = end
+                    while property_nb <= max(0, target_property-1):
+                        start += properties_array[0, property_nb,
+                                                  object_pos,
+                                                  sim_id, param_id]
+                        property_nb += 1
 
-                        # print(1, property_nb, target_property, start, end)
-                        # to get the end value of the property add all
-                        # properties until the defined property value that should
-                        # be quantified - this is always just one property
-                        # further, except for calculating the combined density
-                        # of all properties only. In that case, it is all the
-                        # properties
-                        end = start
-                        # the end property number is the last property number
-                        # if the combined local density should be calculated
-                        # and otherwise the  property number defined in
-                        # creation_on_objects
-                        max_property = cuda.selp(math.isnan(
-                                creation_on_objects[-1, 0, creation_property]),
+                    # print(1, property_nb, target_property, start, end)
+                    # to get the end value of the property add all
+                    # properties until the defined property value that should
+                    # be quantified - this is always just one property
+                    # further, except for calculating the combined density
+                    # of all properties only. In that case, it is all the
+                    # properties
+                    end = start
+                    # the end property number is the last property number
+                    # if the combined local density should be calculated
+                    # and otherwise the  property number defined in
+                    # creation_on_objects
+                    if math.isnan(creation_on_objects[-1, 0,
+                                                      creation_property]):
+                        max_property = properties_array.shape[1] - 1
+                    else:
+                        max_property = int(creation_on_objects[-1, 0,
+                                                    creation_property])
+                    # max_property = cuda.selp(math.isnan(
+                    #         creation_on_objects[-1, 0, creation_property]),
+                    #
+                    #         properties_array.shape[1] - 1,
+                    #
+                    #         int(creation_on_objects[-1, 0,
+                    #                                 creation_property]))
 
-                                properties_array.shape[1] - 1,
+                    while property_nb <= max_property:
+                        end += properties_array[0, property_nb,
+                                                object_pos,
+                                                sim_id, param_id]
+                        property_nb += 1
 
-                                int(creation_on_objects[-1, 0,
-                                                        creation_property]))
+                    # print(2, max_property, end)
+                    # minimum allowed start position is negative local_resolution
+                    # since position 0 is the amount of MTs from
+                    # - local_resolution to 0
+                    # while the last position, is the amount of MTs from
+                    # x_max to local_resolution to x_max
+                    # start += properties_array[0, 1,object_pos,sim_id, param_id]
+                    # end = start + properties_array[0, 1,object_pos,sim_id, param_id]
+                    # end += properties_array[0, 2,object_pos,sim_id, param_id]
+                    # if not math.isnan(property_extreme_values[1, 0, 0]):
+                    #     end = min(property_extreme_values[1, 0, 0], end)
+                    # start = max(start, -local_resolution)
+                    start = max(start, 0)
+                    # x_start = int(math.ceil(start / local_resolution))
+                    x_start = int(math.floor(start / local_resolution))
+                    if ((start != end) & (end > 0) &
+                            (x_start <= local_density.shape[1] - 1)):
+                        # x_end = int(math.ceil(end / local_resolution))
+                        x_end = int(math.floor(end / local_resolution))
+                        # for MTs going beyond the end (in the case of an open end)
+                        # take the last position possible as the end position
+                        x_end = min(x_end, local_density.shape[1] - 1)
+                        x_pos = max(x_start, 0)
+                        first_x = True
+                        # track the cumulative density of this object
+                        # to get the cumulative local density
+                        # density_from_object = 0
+                        while x_pos <= x_end:
+                            density = 1
 
-                        while property_nb <= max_property:
-                            end += properties_array[0, property_nb,
-                                                    object_pos,
-                                                    sim_id, param_id]
-                            property_nb += 1
+                            # density -= cuda.selp(first_x,
+                            #
+                            #                      (1 -
+                            #                       (x_pos * local_resolution - start)
+                            #                       / local_resolution),
+                            #
+                            #                      0.0
+                            #                      )
+                            #
+                            # density -= cuda.selp((x_pos == x_end),
+                            #
+                            #                      ((x_pos * local_resolution - end) / local_resolution),
+                            #
+                            #                      0.0
+                            #                      )
+                            if first_x:
+                                # the start point is not actually at the very
+                                # beginning of the resolution but after that
+                                # therefore the added density is below 1 for the
+                                # first position. Subtract the relative amount of
+                                # the local resolution that the object starts
+                                # after the x_pos
+                                first_x = False
+                                # x_um = x_pos * local_resolution
+                                density -= ((start -
+                                            x_pos * local_resolution) /
+                                            local_resolution)
+                                # density -= ( 1 -
+                                #              (x_pos * local_resolution - start)
+                                #              / local_resolution)
+                            if (x_pos == x_end):
+                                # for the x bin in which the MT ended, don't add a
+                                # full MT but just the relative amount of the bin
+                                # crossed by the MT
+                                # x_um = x_pos * local_resolution
+                                # density -= ((x_pos * local_resolution - end) / local_resolution)
+                                density -= (1 - ((end - x_pos *
+                                                  local_resolution) /
+                                                 local_resolution))
+                            # multiply by local_resolution to get the actual
+                            # density in objects/um
+                            density *= local_resolution
+                            # first_x = False
+                            # if density > 1:
+                            #     print(1111111, x_pos, density)
 
-                        # print(2, max_property, end)
-                        # minimum allowed start position is negative local_resolution
-                        # since position 0 is the amount of MTs from
-                        # - local_resolution to 0
-                        # while the last position, is the amount of MTs from
-                        # x_max to local_resolution to x_max
-                        # start += properties_array[0, 1,object_pos,sim_id, param_id]
-                        # end = start + properties_array[0, 1,object_pos,sim_id, param_id]
-                        # end += properties_array[0, 2,object_pos,sim_id, param_id]
-                        # if not math.isnan(property_extreme_values[1, 0, 0]):
-                        #     end = min(property_extreme_values[1, 0, 0], end)
-                        start = max(start, -local_resolution)
-                        x_start = int(math.ceil(start / local_resolution))
-                        if ((start != end) & (end > 0) &
-                                (x_start <= local_density.shape[1] - 1)):
-                            x_end = int(math.ceil(end / local_resolution))
-                            # for MTs going beyond the end (in the case of an open end)
-                            # take the last position possible as the end position
-                            x_end = min(x_end, local_density.shape[1] - 1)
-                            x_pos = max(x_start, 0)
-                            first_x = True
-                            # track the cumulative density of this object
-                            # to get the cumulative local density
-                            density_from_object = 0
-                            while x_pos <= x_end:
-                                density = 1
-                                if first_x:
-                                    # the start point is not actually at the very
-                                    # beginning of the resolution but after that
-                                    # therefore the added density is below 1 for the
-                                    # first position. Subtract the relative amount of
-                                    # the local resolution that the object starts
-                                    # after the x_pos
-                                    first_x = False
-                                    x_um = x_pos * local_resolution
-                                    density -= ( 1 -
-                                                 (x_um - start)
-                                                 / local_resolution)
-                                if (x_pos == x_end):
-                                    # for the x bin in which the MT ended, don't add a
-                                    # full MT but just the relative amount of the bin
-                                    # crossed by the MT
-                                    x_um = x_pos * local_resolution
-                                    density -= ((x_um - end) / local_resolution)
-                                # multiply by local_resolution to get the actual
-                                # density in objects/um
-                                density *= local_resolution
-                                cuda.atomic.add(local_density,
-                                                (target_property, x_pos,
-                                                 sim_id, param_id), density)
+                            cuda.atomic.add(local_density,
+                                            (target_property, x_pos,
+                                             sim_id, param_id), density)
+                            # check whether x pos is not higher than
+                            # local density size (still within neurite)
+                            # if x_pos > local_density.shape[1]:
+                            #     print(1111111, x_pos, local_density.shape[1],
+                            #           properties_array[0, 0,
+                            #                            object_pos,
+                            #                            sim_id, param_id],
+                            #           properties_array[0, 1,
+                            #                            object_pos,
+                            #                            sim_id, param_id],
+                            #           properties_array[0, 2,
+                            #                            object_pos,
+                            #                            sim_id, param_id]
+                            #           )
+                            #
+                            # # check whether density is always above 0
+                            # if (density < 0):
+                            #     print(7777777, density, object_pos,
+                            #           x_um, start, end
+                            #           )
+                            # # check whether end is never lower than start
+                            # # (which would indicate negative properties)
+                            # if end < start:
+                            #     print(666666, start, end, density)
 
-                                # check whether x pos is not higher than
-                                # local density size (still within neurite)
-                                if x_pos > local_density.shape[1]:
-                                    print(1111111, x_pos, local_density.shape[1],
-                                          properties_array[0, 0,
-                                                           object_pos,
-                                                           sim_id, param_id],
-                                          properties_array[0, 1,
-                                                           object_pos,
-                                                           sim_id, param_id],
-                                          properties_array[0, 2,
-                                                           object_pos,
-                                                           sim_id, param_id]
-                                          )
-                                #
-                                # # check whether density is always above 0
-                                # if (density < 0):
-                                #     print(7777777, density, object_pos,
-                                #           x_um, start, end
-                                #           )
-                                # # check whether end is never lower than start
-                                # # (which would indicate negative properties)
-                                # if end < start:
-                                #     print(666666, start, end, density)
+                            # density_from_object += density
+                            x_pos += 1
 
-                                density_from_object += density
-                                x_pos += 1
+                        # cuda.atomic.add(total_density,
+                        #                 (target_property, sim_id, param_id),
+                        #                 density_from_object)
+                creation_property += 1
+        object_pos += 1
 
-                            cuda.atomic.add(total_density,
-                                            (target_property, sim_id, param_id),
-                                            density_from_object)
-                    creation_property += 1
-            object_pos += 1
+    if nb_parallel_cores[sim_id, param_id] > 1:
+        cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
+    # summing local density up afterwards for total_density
+    # is faster then adding to total_density
+    # while filling the local density above
+    nb_pos = local_density.shape[1]
+    (x_pos, last_x_pos) = _get_first_and_last_object_pos(
+        nb_pos, nb_parallel_cores[sim_id, param_id], core_id)
 
-        # # Test whether all values in local density together sum up to total
-        # # density
-        # if nb_parallel_cores[sim_id, param_id] > 1:
-        #     cuda.syncwarp(thread_masks[0,sim_id, param_id])
-        #
-        # if core_id == 0:
-        #     property_nb = 0
-        #     while property_nb < total_density.shape[0]:
-        #         density_sum = 0
-        #         x_pos = 0
-        #         while x_pos < local_density.shape[1]:
-        #             density_sum += local_density[property_nb, x_pos,
-        #                                          sim_id, param_id]
-        #             x_pos += 1
-        #
-        #         if round(density_sum, 4) < round(total_density[property_nb,
-        #                                                        sim_id,
-        #                                                        param_id],4):
-        #
-        #             print(9999999, density_sum, total_density[property_nb,
-        #                                                       sim_id, param_id],
-        #                   sim_id, property_nb, target_property)
-        #
-        #         if round(density_sum, 4) < round(total_density[property_nb,
-        #                                                        sim_id,
-        #                                                        param_id],
-        #                                          4):
-        #             print(8888888, density_sum, total_density[property_nb,
-        #                                                       sim_id, param_id],
-        #                   sim_id, property_nb, target_property)
-        #         property_nb += 1
+    while x_pos < last_x_pos:
+        property_nb = 0
+        while property_nb < local_density.shape[0]:
+            cuda.atomic.add(total_density,
+                            (property_nb, sim_id, param_id),
+                            local_density[property_nb, x_pos,
+                                          sim_id, param_id])
+            property_nb += 1
+        x_pos += 1
 
-
-
-
+    # # Test whether all values in local density together sum up to total
+    # # density
+    # if nb_parallel_cores[sim_id, param_id] > 1:
+    #     cuda.syncwarp(thread_masks[0,sim_id, param_id])
+    #
+    # if core_id == 0:
+    #     property_nb = 0
+    #     while property_nb < total_density.shape[0]:
+    #         density_sum = 0
+    #         x_pos = 0
+    #         while x_pos < local_density.shape[1]:
+    #             density_sum += local_density[property_nb, x_pos,
+    #                                          sim_id, param_id]
+    #             x_pos += 1
+    #
+    #         if round(density_sum, 4) < round(total_density[property_nb,
+    #                                                        sim_id,
+    #                                                        param_id],4):
+    #             print(9999999, density_sum, total_density[property_nb,
+    #                                                       sim_id, param_id],
+    #                   sim_id, property_nb, target_property)
+    #
+    #         if round(density_sum, 4) > round(total_density[property_nb,
+    #                                                        sim_id,
+    #                                                        param_id],
+    #                                          4):
+    #             print(8888888, density_sum, total_density[property_nb,
+    #                                                       sim_id, param_id],
+    #                   sim_id, property_nb, target_property)
+    #         property_nb += 1
 
 def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                       params_prop_dependence,
@@ -2235,7 +2354,7 @@ def _get_rate_of_density_dependent_transition(param_prop_dependence,
                                                     nb_parallel_cores[sim_id,
                                                                       param_id],
                                                     core_id)
-    max_position = property_extreme_values[1, 0, 0]
+    # max_position = property_extreme_values[1, 0, 0]
 
     while object_nb < last_object_pos:
         if object_states[0, object_nb, sim_id, param_id] == start_state:
@@ -2244,19 +2363,34 @@ def _get_rate_of_density_dependent_transition(param_prop_dependence,
             # calculate the change from the start position value
             # otherwise take the end value as the starting state
 
-            base_value = cuda.selp(math.isnan(param_prop_dependence[0]),
-                                   parameter_value_array[int(
+            if math.isnan(param_prop_dependence[0]):
+                base_value = parameter_value_array[int(
                                        param_prop_dependence[1]),
                                                          int(timepoint_array[
                                                                  0, sim_id,
                                                                  param_id]),
-                                                         param_id],
-                                   parameter_value_array[int(
+                                                         param_id]
+            else:
+                base_value = parameter_value_array[int(
                                        param_prop_dependence[0]),
                                                          int(timepoint_array[
                                                                  0, sim_id,
                                                                  param_id]),
-                                                         param_id])
+                                                         param_id]
+
+            # base_value = cuda.selp(math.isnan(param_prop_dependence[0]),
+            #                        parameter_value_array[int(
+            #                            param_prop_dependence[1]),
+            #                                              int(timepoint_array[
+            #                                                      0, sim_id,
+            #                                                      param_id]),
+            #                                              param_id],
+            #                        parameter_value_array[int(
+            #                            param_prop_dependence[0]),
+            #                                              int(timepoint_array[
+            #                                                      0, sim_id,
+            #                                                      param_id]),
+            #                                              param_id])
 
             # add all defined properties to get the total property value
             # that the parameter value depends on
@@ -2322,7 +2456,8 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
                                                     nb_parallel_cores[sim_id,
                                                                       param_id],
                                                     core_id)
-    max_position = property_extreme_values[1, 0, 0]
+    max_position = parameter_value_array[int(property_extreme_values[1, 0, 0]),
+                                         sim_id, param_id]
 
     while object_nb < last_object_pos:
         if object_states[0, object_nb, sim_id, param_id] == start_state:
@@ -2331,19 +2466,34 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
             # calculate the change from the start position value
             # otherwise take the end value as the starting state
 
-            base_value = cuda.selp(math.isnan(param_prop_dependence[0]),
-                                   parameter_value_array[int(
+            if math.isnan(param_prop_dependence[0]):
+                base_value =  parameter_value_array[int(
                                        param_prop_dependence[1]),
                                                          int(timepoint_array[
                                                                  0, sim_id,
                                                                  param_id]),
-                                                         param_id],
-                                   parameter_value_array[int(
+                                                         param_id]
+            else:
+                base_value = parameter_value_array[int(
                                        param_prop_dependence[0]),
                                                          int(timepoint_array[
                                                                  0, sim_id,
                                                                  param_id]),
-                                                         param_id])
+                                                         param_id]
+
+            # base_value = cuda.selp(math.isnan(param_prop_dependence[0]),
+            #                        parameter_value_array[int(
+            #                            param_prop_dependence[1]),
+            #                                              int(timepoint_array[
+            #                                                      0, sim_id,
+            #                                                      param_id]),
+            #                                              param_id],
+            #                        parameter_value_array[int(
+            #                            param_prop_dependence[0]),
+            #                                              int(timepoint_array[
+            #                                                      0, sim_id,
+            #                                                      param_id]),
+            #                                              param_id])
 
             # add all defined properties to get the total property value
             # that the parameter value depends on
@@ -2371,24 +2521,29 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
                 #                                  sim_id, param_id])
                 dependence_prop_nb += 1
 
-            position_diff = cuda.selp(math.isnan(param_prop_dependence[0]),
-                                      max_position - end_position,
-                                      end_position)
+            if math.isnan(param_prop_dependence[0]):
+                position_diff = max_position - end_position
+            else:
+                position_diff = end_position
+            # position_diff = cuda.selp(math.isnan(param_prop_dependence[0]),
+            #                           max_position - end_position,
+            #                           end_position)
 
             # if the change is per absolute position diff (0) or relative
             # position difference (1)
-            position_diff = cuda.selp(param_prop_dependence[3] == 0,
-                                      position_diff,
-                                      position_diff/max_position)
+            if param_prop_dependence[3] != 0:
+                position_diff = position_diff/max_position
+            # position_diff = cuda.selp(param_prop_dependence[3] == 0,
+            #                           position_diff,
+            #                           position_diff/max_position)
 
             # position_diff = min(position_diff, 10)
 
             # if change is not defined, get it from difference between
             # end and start value, divided by either absolute length in um
             # or relative length (1, unchanged value)
-            rate_diff = cuda.selp(math.isnan(param_prop_dependence[4]),
-
-                                 (parameter_value_array[int(
+            if math.isnan(param_prop_dependence[4]):
+                rate_diff = (parameter_value_array[int(
                                      param_prop_dependence[1]),
                                                         int(timepoint_array[
                                                                 0, sim_id,
@@ -2400,26 +2555,56 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
                                                                 0, sim_id,
                                                                 param_id]),
                                                         param_id])
-                                  / cuda.selp(param_prop_dependence[3] == 0,
-                                              max_position, float(1)),
-
-                                  parameter_value_array[int(
+                if param_prop_dependence[3] == 0:
+                    rate_diff /= max_position
+            else:
+                rate_diff = parameter_value_array[int(
                                       param_prop_dependence[4]),
                                                         int(timepoint_array[
                                                                 0, sim_id,
                                                                 param_id]),
-                                                        param_id])
+                                                        param_id]
+            # rate_diff = cuda.selp(math.isnan(param_prop_dependence[4]),
+            #
+            #                      (parameter_value_array[int(
+            #                          param_prop_dependence[1]),
+            #                                             int(timepoint_array[
+            #                                                     0, sim_id,
+            #                                                     param_id]),
+            #                                             param_id] -
+            #                       parameter_value_array[int(
+            #                           param_prop_dependence[0]),
+            #                                             int(timepoint_array[
+            #                                                     0, sim_id,
+            #                                                     param_id]),
+            #                                             param_id])
+            #                       / cuda.selp(param_prop_dependence[3] == 0,
+            #                                   max_position, float(1)),
+            #
+            #                       parameter_value_array[int(
+            #                           param_prop_dependence[4]),
+            #                                             int(timepoint_array[
+            #                                                     0, sim_id,
+            #                                                     param_id]),
+            #                                             param_id])
 
+            if param_prop_dependence[6] == 0:
+                if param_prop_dependence[2] == 0:
+                    rate_diff *= position_diff
+                else:
+                    rate_diff *= base_value * position_diff
+            else:
+                rate_diff = base_value * math.exp(- rate_diff * position_diff)
             # 0 for linear, 1 for exponential property dependence
-            rate_diff = cuda.selp(param_prop_dependence[6] == 0,
-
-                                  cuda.selp(param_prop_dependence[2] == 0,
-                                            rate_diff * position_diff,
-                                            rate_diff * base_value
-                                            * position_diff),
-
-                                  base_value *
-                                  math.exp(- rate_diff * position_diff))
+            # rate_diff = cuda.selp(param_prop_dependence[6] == 0,
+            #
+            #                       cuda.selp(param_prop_dependence[2] == 0,
+            #                                 rate_diff * position_diff,
+            #                                 rate_diff * base_value
+            #                                 * position_diff),
+            #
+            #                       base_value *
+            #                       math.exp(- rate_diff * position_diff))
 
             # for linear parameter dependence:
             # Prevent changes through parameter dependence smaller than 0
@@ -2436,31 +2621,30 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
             # start and end, don't allow values at positions in between the
             # start and the end to be higher than the maximum of both.
 
-            final_rate = cuda.selp(param_prop_dependence[6] == 0,
+            if param_prop_dependence[6] == 0:
+                if base_value < 0:
+                    final_rate = max(- parameter_value_array[int(
+                        transition_parameters[transition_nb, 0]),
+                                                int(
+                                                    timepoint_array[
+                                                        0, sim_id, param_id]),
+                                                param_id],
 
-                                    cuda.selp(base_value < 0,
-
-                                    max(- parameter_value_array[int(
-                                        transition_parameters[transition_nb,0]),
-                                                                int(
-                                        timepoint_array[0, sim_id,param_id]),
-                                                                param_id],
-
-                                        max(min(parameter_value_array[int(
-                                            param_prop_dependence[0]),int(
-                                            timepoint_array[0, sim_id,param_id]),
-                                                                      param_id],
-                                                      parameter_value_array[int(
-                                                          param_prop_dependence[
-                                                              1]),
-                                                            int(
-                                                              timepoint_array[
-                                                                  0, sim_id,
-                                                                  param_id]),
-                                                          param_id],),
-                                            min(0, base_value + rate_diff))),
-
-                                  min(max(parameter_value_array[int(
+                        max(min(parameter_value_array[int(
+                            param_prop_dependence[0]), int(
+                            timepoint_array[0, sim_id, param_id]),
+                                                      param_id],
+                                parameter_value_array[int(
+                                    param_prop_dependence[
+                                        1]),
+                                                      int(
+                                                          timepoint_array[
+                                                              0, sim_id,
+                                                              param_id]),
+                                                      param_id], ),
+                            min(0, base_value + rate_diff)))
+                else:
+                    final_rate = min(max(parameter_value_array[int(
                                       param_prop_dependence[0]), int(
                                       timepoint_array[0, sim_id, param_id]),
                                                                 param_id],
@@ -2473,9 +2657,49 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
                                                                 param_id],),
 
                                       max(0, base_value + rate_diff))
-                                    ),
+            else:
+                final_rate = rate_diff
 
-                                   rate_diff)
+            # final_rate = cuda.selp(param_prop_dependence[6] == 0,
+            #
+            #                         cuda.selp(base_value < 0,
+            #
+            #                         max(- parameter_value_array[int(
+            #                             transition_parameters[transition_nb,0]),
+            #                                                     int(
+            #                             timepoint_array[0, sim_id,param_id]),
+            #                                                     param_id],
+            #
+            #                             max(min(parameter_value_array[int(
+            #                                 param_prop_dependence[0]),int(
+            #                                 timepoint_array[0, sim_id,param_id]),
+            #                                                           param_id],
+            #                                           parameter_value_array[int(
+            #                                               param_prop_dependence[
+            #                                                   1]),
+            #                                                 int(
+            #                                                   timepoint_array[
+            #                                                       0, sim_id,
+            #                                                       param_id]),
+            #                                               param_id],),
+            #                                 min(0, base_value + rate_diff))),
+            #
+            #                       min(max(parameter_value_array[int(
+            #                           param_prop_dependence[0]), int(
+            #                           timepoint_array[0, sim_id, param_id]),
+            #                                                     param_id],
+            #
+            #                               parameter_value_array[int(
+            #                                   param_prop_dependence[1]),
+            #                                               int(timepoint_array[
+            #                                                       0, sim_id,
+            #                                                       param_id]),
+            #                                                     param_id],),
+            #
+            #                           max(0, base_value + rate_diff))
+            #                         ),
+            #
+            #                        rate_diff)
 
 
             # final_rate = cuda.selp(param_prop_dependence[6] == 0,
@@ -2516,6 +2740,7 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
 def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                                        property_changes_per_state,
                                        total_property_changes,
+                                        parameter_value_array,
                                         property_extreme_values,
                                        current_sum_tmax,
 
@@ -2686,7 +2911,8 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                     # get the time of object removal as
                     # the difference of the end_position to the max position
                     # divided by the total net change
-                    position_diff = end_position - property_extreme_values[1, 0,0]
+                    position_diff = end_position - parameter_value_array[int(
+                        property_extreme_values[1, 0, 0]), sim_id, param_id]
                     tmax_object_removal = (position_diff /
                                            current_sum_tmax[core_id,
                                                             tmax_idx,
@@ -2697,13 +2923,16 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                 # get time at which end_position reaches the max position
                 # don't allow the tmax_end_position to be overwritten once
                 # defined
-                if ((end_position > property_extreme_values[1, 0,0]) &
+                if ((end_position > parameter_value_array[int(
+                        property_extreme_values[1, 0, 0]), sim_id, param_id]) &
                         (math.isnan(tmax_end_position))):
                     if current_sum_tmax[core_id,tmax_idx, sim_id, param_id] > 0:
                         # the difference from the current tmax is
                         # the difference of the end_position minus the
                         # max position, divided by the current sum
-                        position_diff = end_position - property_extreme_values[1, 0,0]
+                        position_diff = end_position - parameter_value_array[
+                            int(property_extreme_values[1, 0, 0]),
+                            sim_id, param_id]
                         tmax_diff = position_diff / current_sum_tmax[core_id,
                                                                      tmax_idx,
                                                                      sim_id,
@@ -2749,8 +2978,9 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                 if math.isnan(tmax_end_position):
                     # calculate tmax_end_position
                     if current_sum_tmax[core_id,tmax_idx, sim_id, param_id] > 0:
-                        position_diff = (property_extreme_values[1, 0,0] -
-                                         end_position)
+                        position_diff = (parameter_value_array[int(
+                            property_extreme_values[1, 0, 0]), sim_id, param_id]
+                                         - end_position)
                         tmax_end_position = (position_diff /
                                              current_sum_tmax[core_id,
                                                               tmax_idx,
@@ -3313,7 +3543,8 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     #  and +1 for adding other property values to the current
                     #  property, before comparing to the threshold)
                     min_value = property_extreme_values[0, int(property_nb)]
-                    threshold = min_value[0]
+                    threshold = parameter_value_array[int(min_value[0]),
+                                                      sim_id, param_id]
                     # if the second index is 0, then the threshold is not closed
                     # therefore it just defines geometry and is not enforced
                     if min_value[1] == 0:
@@ -3352,7 +3583,8 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     # check whether the property value is above the max val
                     # similarly as for the min val condition
                     max_value = property_extreme_values[1, int(property_nb)]
-                    threshold = max_value[0]
+                    threshold = parameter_value_array[int(max_value[0]),
+                                                      sim_id, param_id]
 
                     # the first index is the actual threshold value in any case
                     # if the second index is not nan, then follows the operation

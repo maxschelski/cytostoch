@@ -109,7 +109,8 @@ def _get_local_and_total_density(local_density,
                                  local_resolution,
                                  start_nb_object, end_nb_object,
                                  position_array, length_array,
-                                 timepoint, nb_parallel_cores):
+                                 timepoint, nb_parallel_cores,
+                                 end_density):
 
     nb_processes = numba.cuda.gridsize(1)
     thread_id = numba.cuda.grid(1)
@@ -160,10 +161,15 @@ def _get_local_and_total_density(local_density,
                                            sim_id, param_id]
                 # if not math.isnan(property_extreme_values[1, 0, 0]):
                 #     end = min(property_extreme_values[1, 0, 0], end)
-                start = max(start, 0)#-local_resolution)
-                if (start != end) & (end >= 0):
-                    x_start = int(math.floor(start / local_resolution))
+                start = max(start, 0)
+                # start = max(start, 0)
+                x_start = int(math.floor(start / local_resolution))
+                if ((start != end) & (end >= 0) &
+                        (x_start <= local_density.shape[1] - 1)):
                     x_end = int(math.floor(end / local_resolution))
+                    # for MTs going beyond the end (in the case of an open end)
+                    # take the last position possible as the end position
+                    x_end = min(x_end, local_density.shape[1] - 1)
                     x_pos = max(x_start, 0)
                     first_x = True
                     # track the cumulative density of this object
@@ -171,25 +177,33 @@ def _get_local_and_total_density(local_density,
                     while x_pos <= x_end:
 
                         density = 1
-                        # if first_x:
-                        #     # the start point is not actually at the very
-                        #     # beginning of the resolution but after that
-                        #     # therefore the added density is below 1 for the
-                        #     # first position. Subtract the relative amount of
-                        #     # the local resolution that the object starts
-                        #     # after the x_pos
-                        #     first_x = False
-                        #     x_um = x_pos * local_resolution
-                        #     density -= ((start - x_um) / local_resolution)
-                        # if (x_pos == x_end):
-                        #     # for the x bin in which the MT ended, don't add a
-                        #     # full MT but just the relative amount of the bin
-                        #     # crossed by the MT
-                        #     x_um = x_pos * local_resolution
-                        #     density -= ((x_um - end) / local_resolution)
+                        # if only polymer end density should be measured,
+                        # do not take the length into account (which was set
+                        # to 1/1000 of the spatial resolution)
+                        # instead, always add 1 to the density
+                        if first_x & (not end_density):
+                            # the start point is not actually at the very
+                            # beginning of the resolution but after that
+                            # therefore the added density is below 1 for the
+                            # first position. Subtract the relative amount of
+                            # the local resolution that the object starts
+                            # after the x_pos
+                            first_x = False
+                            # x_um = x_pos * local_resolution
+                            density -= (start - x_pos * local_resolution) / local_resolution
+                            # density -= ( 1 -
+                            #              (x_pos * local_resolution - start)
+                            #              / local_resolution)
+                        if (x_pos == x_end) & (not end_density):
+                            # for the x bin in which the MT ended, don't add a
+                            # full MT but just the relative amount of the bin
+                            # crossed by the MT
+                            # x_um = x_pos * local_resolution
+                            density -= 1 - ((end - x_pos * local_resolution) / local_resolution)
 
                         cuda.atomic.add(local_density,
-                                        (timepoint, x_pos, sim_id, param_id), density)
+                                        (timepoint, x_pos, sim_id, param_id),
+                                        density)
                         # density = 1
                         # if first_x | (x_pos == x_end):
                         #     # the start point is not actually at the very
@@ -452,25 +466,30 @@ class PropertyGeometry():
         #                      f"one 'ObjectProperty' object in the 'properties' "
         #                      f"parameter. Instead {len(properties)} were "
         #                      f"supplied.")
-        if type(properties[0].max_value) not in [float, int]:
+        if type(properties[0].max_value) not in [float, int, Parameter]:
             raise ValueError(f"For the PropertyGeometry operation "
                              f"'same_dimension_forward', only an ObjectProperty"
                              f" in the parameter 'properties' that has the "
                              f"max_value defined as float or int is allowed. "
                              f"Instead the max_value is "
                              f"{properties[0].max_value}.")
-        if properties[0].closed_max:
-            max_values = properties[0].max_value - properties[0].array
-
-            # subtract values of each property in the same dimension from max value
-            # to get
-            if len(properties) > 1:
-                for property in properties[1:]:
-                    max_values -= property.array
+        if type(properties[0].max_value) in [Parameter]:
+            max_value = properties[0].max_value
         else:
-            max_values = math.nan
+            max_value = properties[0].max_value
 
-        return max_values
+        if not properties[0].closed_max:
+        #     max_values = max_value - properties[0].array
+        #
+        #     # subtract values of each property in the same dimension from max value
+        #     # to get
+        #     if len(properties) > 1:
+        #         for property in properties[1:]:
+        #             max_values -= property.array
+        # else:
+            max_value = math.nan
+
+        return max_value
         # else:
         #     return None
 
@@ -620,7 +639,8 @@ class DataExtraction():
         return all_data
 
 
-    def _length_distribution(self, dimensions, simulation_object, properties, state_numbers, max_length,
+    def _length_distribution(self, dimensions, simulation_object, properties, state_numbers,
+                             max_length,
                              first_last_idx_with_object,
                              bin_size=None, nb_bins=None,
                              **kwargs):
@@ -677,8 +697,10 @@ class DataExtraction():
 
         data_dict = {}
         if nb_bins is None:
-            nb_bins = int(np.ceil(max_length / bin_size)) + 1
-        bins = np.linspace(0, max_length, nb_bins).astype(np.float32)
+            bins = np.arange(0, max_length + bin_size*0.99, bin_size).astype(np.float32)
+            nb_bins = len(bins)
+        else:
+            bins = np.linspace(0, max_length, nb_bins).astype(np.float32)
 
         # bins_torch = torch.linspace(0, max_length, nb_bins).to(torch.float32).to(simulation_object.device)
 
@@ -879,7 +901,7 @@ class DataExtraction():
                 length_array = length_array + new_length_array
         else:
             length_array = position_array.clone()
-            length_array[:] = resolution/100
+            length_array[:] = resolution/1000
 
         if state_numbers is not None:
             # get mask for all objects in defined state
@@ -921,6 +943,8 @@ class DataExtraction():
             length_array = torch.gather(length_array, dim=1, index=idx)
             length_array = length_array[:, :max_nb_objects]
 
+        positions = np.array(position_array.cpu())
+        lengths = np.array(length_array.cpu())
         # only if at least one element is True, analyze the data
         if mask.sum() > 0:
 
@@ -930,10 +954,13 @@ class DataExtraction():
             min_position = dimensions[0].positions[0].min_value
             if min_position is None:
                 min_position = 0
-            max_position = dimensions[0].positions[0].max_value
+            else:
+                min_position = np.min(dimensions[0].positions[0].min_value.values)
+
+            max_position = np.max(dimensions[0].positions[0].max_value.values)
 
             position_dimension = int(round((max_position - min_position)
-                                           / resolution,5)) + 1
+                                           / resolution,5)) #+ 1
 
             positions = torch.arange(min_position,
                                      max_position + resolution * 0.9,
@@ -972,6 +999,7 @@ class DataExtraction():
 
                 nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
 
+
                 for timepoint in range(object_states.shape[0]):
                     _get_local_and_total_density[nb_SM, nb_cc](local_density,
                                                                resolution,
@@ -980,7 +1008,8 @@ class DataExtraction():
                                                                position_array_cuda,
                                                                length_array_cuda,
                                                                timepoint,
-                                                               nb_parallel_cores)
+                                                               nb_parallel_cores,
+                                                               end_density)
 
                 local_density = local_density.copy_to_host()
                 data_array_sum = local_density
@@ -1321,7 +1350,7 @@ class ObjectRemovalCondition():
 class Parameter():
 
     def __init__(self, values, scale="rates", convert_half_lifes=True,
-                 dependence=None, switch_timepoints=None,
+                 dependence=None, per_um=False, switch_timepoints=None,
                  name=""):
         """
 
@@ -1357,14 +1386,16 @@ class Parameter():
 
         if (scale == "half-lifes") & (convert_half_lifes):
             lifetime_to_rates_factor = np.log(np.array([2]))
-            self.values = torch.DoubleTensor(lifetime_to_rates_factor / values)
+            self.values = torch.DoubleTensor(np.array(lifetime_to_rates_factor / 
+                                                      values))
         else:
-            self.values = torch.DoubleTensor(values)
+            self.values = torch.DoubleTensor(np.array(values))
 
         self.name = name
         self.number = None
         self.value_array = torch.DoubleTensor([])
         self.dependence = dependence
+        self.per_um = per_um
         self.switch_timepoints = None
         if switch_timepoints is not None:
             self.switch_timepoints = np.array(switch_timepoints)

@@ -15,6 +15,7 @@ import dill
 import re
 import socket
 import datetime
+import itertools
 
 # NUMBA_DEBUG=1
 # NUMBA_DEVELOPER_MODE = 1
@@ -30,6 +31,7 @@ from . import analyzer
 from .basic import PropertyGeometry
 from . import simulation_numba
 from .basic import ObjectPosition
+from .basic import Parameter
 import tqdm
 
 """
@@ -158,9 +160,12 @@ class SSA():
                                "to" + str(end_state))
 
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
-              time_resolution, start_save_time=None, save_initial_state=False,
+              time_resolution, local_resolution=0.02,
+              start_save_time=None, save_initial_state=False,
               max_number_objects=None,
-               single_parameter_changes=True, nb_parallel_cores=1,
+               single_parameter_changes=True,
+              two_combined_parameter_changes = False,
+              nb_parallel_cores=1,
               all_parameter_combinations=False,
               comment="", initial_state_folder="",
               seed=42,
@@ -255,6 +260,8 @@ class SSA():
         self.comment = comment
         self.always_add_number_to_path = always_add_number_to_path
         self.initial_state_folder = initial_state_folder
+        self.local_resolution = local_resolution
+        self.two_combined_parameter_changes = two_combined_parameter_changes
 
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
@@ -363,12 +370,12 @@ class SSA():
                 property_extreme_values[0, property_nb, 1] = 1
             else:
                 property_extreme_values[0, property_nb, 1] = 0
-            if type(min_value) in [float, int]:
-                property_extreme_values[0, property_nb, 0] = min_value
+            if type(min_value) in [Parameter]:
+                property_extreme_values[0, property_nb, 0] = min_value.number
             elif min_value is not None:
                 if min_value.properties[0].closed_min:
                     property_extreme_values[0, property_nb, 0] = \
-                        min_value.properties[0].min_value
+                        min_value.properties[0].min_value.number
                 else:
                     property_extreme_values[0, property_nb, 0] = math.nan
                 operation = min_value._operation
@@ -387,12 +394,14 @@ class SSA():
                 property_extreme_values[1, property_nb, 1] = 1
             else:
                 property_extreme_values[1, property_nb, 1] = 0
-            if type(max_value) in [float, int]:
-                property_extreme_values[1, property_nb, 0] = max_value
+            # print(type(max_value) in [Parameter])
+            # print(max_value)
+            if type(max_value) in [Parameter]:
+                property_extreme_values[1, property_nb, 0] = max_value.number
             elif max_value is not None:
                 if max_value.properties[0].closed_max:
                     property_extreme_values[1, property_nb, 0] = \
-                        max_value.properties[0].max_value
+                        max_value.properties[0].max_value.number
                 else:
                     property_extreme_values[1, property_nb, 0] = math.nan
                 operation = max_value._operation
@@ -414,6 +423,13 @@ class SSA():
                                           param_shape_batch[1]))
         for nb, parameter in enumerate(self.parameters):
             array = torch.Tensor(parameter.value_array[:,param_slice])
+            # if parameter is per_um, multiply the parameter value with the
+            # max value of position (neurite length)
+            if parameter.per_um:
+                lengths = self.properties[0].max_value.value_array[:,
+                                                                    param_slice]
+                array *= lengths
+
             # array = array.unsqueeze(1)
             # array = array.expand((nb_timepoints, param_shape_batch[1]))
             array = np.array(array.reshape((nb_timepoints, -1)))
@@ -424,6 +440,8 @@ class SSA():
     def _get_transition_parameters(self):
         # - all transition rates
         nb_transitions = len(self.transitions)
+        # the first dimension is the number of the parameter for the rate
+        # the second dimensions is the number of the parameter for resources
         transition_parameters = np.full((nb_transitions, 2), np.nan)
         for nb, transition in enumerate(self.transitions):
             transition_parameters[nb, 0] = transition.parameter.number
@@ -987,13 +1005,10 @@ class SSA():
                 time.sleep(0.1)
             # os.mkdir(data_folder)
 
-
-        if not os.path.exists(data_folder):
-            os.mkdir(data_folder)
-
         # if the current experiments are a test, dont save the data
         if os.path.basename(data_folder).find("___TEST") != -1:
             save_results = False
+
 
         self.min_time = min_time
         self.data_extractions = data_extractions
@@ -1015,6 +1030,9 @@ class SSA():
         if start_save_time is None:
             start_save_time = 0
         self.start_save_time = start_save_time
+
+        if (not os.path.exists(data_folder)) & self.save_results:
+            os.mkdir(data_folder)
 
         if (not single_parameter_changes) & self.all_parameter_combinations:
             print("If the parameters single_parameter_changes is False, "
@@ -1128,7 +1146,8 @@ class SSA():
         # self._save_data(data, 0)
 
         # self._add_data_to_buffer()
-        self._save_simulation_parameters()
+        if self.save_results:
+            self._save_simulation_parameters()
 
         self.data_buffer = []
         self.last_data_extraction = 0
@@ -1183,9 +1202,11 @@ class SSA():
 
         nb_parameter_combinations = np.sum(simulation_parameter_lengths)
 
-        local_resolution = 0.02
-        local_density_size = int(self.properties[0].max_value /
-                                 local_resolution) + 1
+        highest_max_value = self.properties[0].max_value.values.max()
+
+        local_resolution = self.local_resolution
+        local_density_size = int(highest_max_value /
+                                 local_resolution) #+ 1
 
         if np.nansum(creation_on_objects) > 0:
             some_creation_on_objects = True
@@ -1342,14 +1363,14 @@ class SSA():
                 repeats[-1] = nb_repeats
                 self.initial_object_states = torch.index_select(
                     self.initial_object_states, dim=-1,
-                    index=indices).unsqueeze(-1).repeat(repeats)
+                    index=indices).unsqueeze(-1).repeat(repeats)[:3]
 
                 repeats = [1 for _ in
                            range(len(self.initial_properties_array.shape)+1)]
                 repeats[-1] = nb_repeats
                 self.initial_properties_array = torch.index_select(
                     self.initial_properties_array, dim=-1,
-                    index=indices).unsqueeze(-1).repeat(repeats)
+                    index=indices).unsqueeze(-1).repeat(repeats)[:1]
 
                 repeats = [1 for _ in
                            range(len(
@@ -1681,14 +1702,29 @@ class SSA():
         if save_initial_state:
             timepoint_array[2] = 0
 
+        # create new object states object that includes data for
+        # all timepoints
+        object_states = np.zeros((nb_timepoints + 2,
+                                  self.object_states.shape[0],
+                                  *param_shape_batch),
+                                 dtype=np.int32)
+
+        nb_properties = len(self.properties)
+
+        properties_array = np.full((nb_timepoints + 1, nb_properties,
+                                    self.object_states.shape[0],
+                                    *param_shape_batch),
+                                   math.nan)
+
+        # print(object_states.shape)
+        # object_states = self.initial_object_states.clone()
+        # print(object_states.shape)
+        # print(properties_array.shape)
+        # properties_array = self.initial_properties_array.clone()
+        # print(properties_array.shape)
+
         # if no initial state is defined, create a new one from scratch
         if len(self.initial_object_states) == 0:
-            # create new object states object that includes data for
-            # all timepoints
-            object_states = np.zeros((nb_timepoints + 2,
-                                      self.object_states.shape[0],
-                                      *param_shape_batch),
-                                     dtype=np.int32)
 
             # the first index is the current object states
             object_states[0] = self.object_states
@@ -1709,13 +1745,6 @@ class SSA():
                 nb_objects_all_states[0, state_nb + 1] = np.sum(
                     object_states[0] == state.number, axis=0)
 
-            nb_properties = len(self.properties)
-
-            properties_array = np.full((nb_timepoints + 1, nb_properties,
-                                        self.object_states.shape[0],
-                                        *param_shape_batch),
-                                       math.nan)
-
             for property_nb, property in enumerate(self.properties):
                 properties_array[0, property_nb] = property.array
 
@@ -1727,8 +1756,13 @@ class SSA():
                 object_states)
 
         else:
-            object_states = self.initial_object_states.clone()
-            properties_array = self.initial_properties_array.clone()
+            object_states[0] = self.initial_object_states[0].clone()
+            object_states[1] = self.initial_object_states[1].clone()
+            properties_array[0] = self.initial_properties_array[0].clone()
+            if save_initial_state:
+                object_states[2] = self.initial_object_states[0].clone()
+                properties_array[1] = self.initial_properties_array[0].clone()
+
             nb_objects_all_states = self.initial_nb_obj_all_states.clone()
             first_last_idx_with_object = (
                 self.initial_first_last_idx_with_object.clone())
@@ -1800,10 +1834,6 @@ class SSA():
         first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
         numba.cuda.profile_start()
 
-        # print(params_prop_dependence)
-        # print(param_val_array_batch[:,0,0])
-
-        # print("Starting simulation batch...")
         sim[nb_SM,
          nb_cc](object_states_batch, #int32[:,:,:]
                 property_array_batch, #float32[:,:,:,:]
@@ -1966,8 +1996,8 @@ class SSA():
 
         cuda.current_context().memory_manager.deallocations.clear()
         torch.cuda.empty_cache()
-        print(3, numba.cuda.current_context().get_memory_info()[0]
-              /1024/1024/1024)
+        # print(3, numba.cuda.current_context().get_memory_info()[0]
+        #       /1024/1024/1024)
 
         # to save the complete state of the simulation
         # reassemble the following entire arrays:
@@ -2027,6 +2057,22 @@ class SSA():
                 param_nb += 1
                 self.parameters.append(parameter)
 
+        # add parameters from max and min property values
+        for property in self.properties:
+            if type(property.max_value) == type(self.parameters[0]):
+                property.max_value.number = param_nb
+                if property.max_value.name == "":
+                    property.max_value.name = str(property.max_value.number)
+                param_nb += 1
+                self.parameters.append(property.max_value)
+
+            if type(property.min_value) == type(self.parameters[0]):
+                property.min_value.number = param_nb
+                if property.min_value.name == "":
+                    property.min_value.name = str(property.min_value.number)
+                param_nb += 1
+                self.parameters.append(property.min_value)
+
         # first get all unique dependencies
         self.dependencies = []
         dependence_nb = 0
@@ -2074,7 +2120,8 @@ class SSA():
         # or has a length that is similar between all parameters with more than
         # one value
         if ((not self.single_parameter_changes) &
-                (not self.all_parameter_combinations)):
+                (not self.all_parameter_combinations) &
+                (not self.two_combined_parameter_changes)):
             unique_param_lengths = set(simulation_parameter_lengths)
             param_lengths = unique_param_lengths - set([1])
             if len(param_lengths) > 1:
@@ -2085,7 +2132,27 @@ class SSA():
                                  "defined. However, at least one parameter "
                                  "has a different number of values defined.")
 
-        if not self.single_parameter_changes:
+        if self.two_combined_parameter_changes:
+            """
+            This means that not only one parameter is changed but two parameters 
+            are changed together. Thus, every parameter change is combined with 
+            every other parameter change, in addition to just changing a single 
+            parameter.
+             To get the number of combinations for each parameter, sum the 
+             products of the number of current parameter changes with the number 
+             of each other parameter changes. Then sum all sums.
+            """
+            sim_param_comb_lengths = []
+            for param_nb, param_length in enumerate(simulation_parameter_lengths):
+                total_param_length = param_length - 1
+                for (second_param_nb,
+                     second_param_length) in enumerate(simulation_parameter_lengths[param_nb+1:]):
+                    total_param_length += ((param_length - 1) *
+                                           (second_param_length - 1))
+                sim_param_comb_lengths.append(total_param_length)
+            simulation_parameter_lengths = [np.sum(sim_param_comb_lengths) + 1]
+
+        elif not self.single_parameter_changes:
             simulation_parameter_lengths = [nb
                                               for nb
                                               in simulation_parameter_lengths
@@ -2340,6 +2407,7 @@ class SSA():
                 # only plot data for the last timepoint
                 plot_data = torch.Tensor(np.nanmean(sub_data[timepoint].cpu(),
                                        axis=1))
+
                 if not global_data:
                     new_figure = plt.figure()
                 if global_data:
@@ -2356,11 +2424,10 @@ class SSA():
                         standard_param_val = parameter.value_array[0, 0].item()
                         param_val = parameter.value_array[0, param_nb].item()
                         if standard_param_val != param_val:
-                            param_val_string = (parameter.name +
+                            param_val_string += (parameter.name +
                                                 " = " +
-                                                str(round(param_val,3)))
+                                                str(round(param_val,3)) + ", ")
                             found_param_change = True
-                            break
                     # if (len(plot_data.shape) == 1):
                     #     plot_data = plot_data.unsqueeze(1)
                     # if plot_data.shape[1] > 1:
@@ -2382,7 +2449,6 @@ class SSA():
                         print_str = str(mean)
                         print_str += " ("+param_val_string+")"
                         print(print_str)
-                    print(plot_data.mean())
                     # plt.figure()
                     # plt.plot(torch.mean(sub_data[-1],dim=(1)))
                     # plt.ylim(0,3.5)
@@ -2543,13 +2609,77 @@ class SSA():
         # specific size
         all_dimensions = [dim for dim
                           in range(len(simulation_parameter_lengths) + 2)]
+
+        # get number of timepoint for parameter switches
+        nb_timepoints = 1
+        for dimension, model_parameters in enumerate(all_simulation_parameters):
+            all_timepoints_param_vals = model_parameters.values
+            if (len(all_timepoints_param_vals) == 1):
+                continue
+            if ((nb_timepoints > 1) &
+                    (len(all_timepoints_param_vals) != nb_timepoints)):
+                raise ValueError("If switch timepoints for parameter values"
+                                 "are included, the number of switch timepoints"
+                                 " have to be the same for all parameters.")
+            nb_timepoints = len(all_timepoints_param_vals)
+
+        if self.two_combined_parameter_changes:
+            all_parameter_arrays = []
+            for timepoint in range(nb_timepoints):
+                timepoint_param_vals = []
+                # for each timepoint first get all param values in a nested list
+                for dimension, model_parameters in enumerate(all_simulation_parameters):
+                    all_timepoints_param_vals = model_parameters.values
+                    if len(all_timepoints_param_vals) == 1:
+                        param_vals = all_timepoints_param_vals[0]
+                    else:
+                        param_vals = all_timepoints_param_vals[timepoint]
+                    timepoint_param_vals.append(param_vals.tolist())
+                # to get all combinations of parameter values at that timepoint
+                # go through the list and combine with all downstream params
+                all_combinations = []
+                for param_nb, param_vals in enumerate(timepoint_param_vals):
+                    # for each combination go through all parameters that come
+                    # later in the list
+                    if len(param_vals) == 1:
+                        continue
+                    for sub_param_nb in range(param_nb,
+                                              len(timepoint_param_vals)):
+                        # if only one param value, there is no need to combine
+                        # values
+                        if len(timepoint_param_vals[sub_param_nb]) == 1:
+                            continue
+                        # if sub_param_nb and param_nb are the same,
+                        # single parameter changes will be added
+                        list_for_combination = []
+                        for (current_param_nb,
+                             current_param_vals) in enumerate(timepoint_param_vals):
+                            # before or after the target param val to combine
+                            # values with, just add the first value
+                            if current_param_nb not in [param_nb, sub_param_nb]:
+                                list_for_combination.append([current_param_vals[0]])
+                                continue
+                            list_for_combination.append(current_param_vals[1:])
+                        combinations = itertools.product(*list_for_combination)
+                        combinations = list(combinations)
+                        # print("\n", list(combinations))
+                        all_combinations.extend(combinations)
+                # the parameter combinations without any changes is still
+                # missing from the list
+                last_combination = [param_vals[0]
+                                    for param_vals in timepoint_param_vals]
+                all_combinations.append(last_combination)
+                all_combinations = np.array(all_combinations)
+                all_parameter_arrays.append(all_combinations)
+
         nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
             all_timepoints_param_vals = model_parameters.values
             param_switch_timepoints = model_parameters.switch_timepoints
             if param_switch_timepoints is not None:
                 param_switch_timepoints = np.floor(param_switch_timepoints /
-                                                   self.time_resolution).astype(np.int32)
+                                                   self.time_resolution
+                                                   ).astype(np.int32)
             all_timepoints_array = None
             # go through parameter values for all timepoints
             # each sublist of parameter values represents the values until
@@ -2571,7 +2701,18 @@ class SSA():
                 else:
                     switch_timepoint = nb_timepoints
 
-                if not single_parameter_changes:
+                if  self.two_combined_parameter_changes:
+                    """
+                    To get the parameter value array for each parameter,
+                    get all parameter value combinations for each two-way 
+                    parameter combination. Make sure, to do this separately
+                    for each timepoint.
+                    """
+                    array = all_parameter_arrays[param_timepoint_nb][:,
+                            dimension]
+                    array = torch.Tensor(array)
+
+                elif not single_parameter_changes:
                     if len(param_vals) == 1:
                         array = param_vals.repeat(
                             (simulation_parameter_lengths))
@@ -2594,7 +2735,8 @@ class SSA():
                     standard_value = param_vals[0]
                     standard_value = torch.Tensor([standard_value])
                     # use standard value across entire array
-                    array = standard_value.repeat((simulation_parameter_lengths))
+                    array = standard_value.repeat((simulation_parameter_lengths
+                                                   ))
                     # then get the position/s at which the values
                     # should be changed which is starting at the number
                     # of previously changed positions (for other parameters)
