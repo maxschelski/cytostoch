@@ -963,6 +963,7 @@ def _run_iteration(object_states, properties_array , times,
                                              property_changes_per_state,
                                              total_property_changes,
                                             parameter_value_array,
+                                            timepoint_array,
                                             property_extreme_values,
                                                current_sum_tmax,
 
@@ -2457,7 +2458,9 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
                                                                       param_id],
                                                     core_id)
     max_position = parameter_value_array[int(property_extreme_values[1, 0, 0]),
-                                         sim_id, param_id]
+                                         int(timepoint_array[
+                                                 0, sim_id, param_id]),
+                                         param_id]
 
     while object_nb < last_object_pos:
         if object_states[0, object_nb, sim_id, param_id] == start_state:
@@ -2741,6 +2744,7 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                                        property_changes_per_state,
                                        total_property_changes,
                                         parameter_value_array,
+                                        timepoint_array,
                                         property_extreme_values,
                                        current_sum_tmax,
 
@@ -2912,7 +2916,8 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                     # the difference of the end_position to the max position
                     # divided by the total net change
                     position_diff = end_position - parameter_value_array[int(
-                        property_extreme_values[1, 0, 0]), sim_id, param_id]
+                        property_extreme_values[1, 0, 0]),
+                        int(timepoint_array[0, sim_id, param_id]), param_id]
                     tmax_object_removal = (position_diff /
                                            current_sum_tmax[core_id,
                                                             tmax_idx,
@@ -2924,7 +2929,8 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                 # don't allow the tmax_end_position to be overwritten once
                 # defined
                 if ((end_position > parameter_value_array[int(
-                        property_extreme_values[1, 0, 0]), sim_id, param_id]) &
+                        property_extreme_values[1, 0, 0]),
+                        int(timepoint_array[0, sim_id, param_id]), param_id]) &
                         (math.isnan(tmax_end_position))):
                     if current_sum_tmax[core_id,tmax_idx, sim_id, param_id] > 0:
                         # the difference from the current tmax is
@@ -2932,7 +2938,7 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                         # max position, divided by the current sum
                         position_diff = end_position - parameter_value_array[
                             int(property_extreme_values[1, 0, 0]),
-                            sim_id, param_id]
+                            int(timepoint_array[0, sim_id, param_id]), param_id]
                         tmax_diff = position_diff / current_sum_tmax[core_id,
                                                                      tmax_idx,
                                                                      sim_id,
@@ -2979,7 +2985,8 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                     # calculate tmax_end_position
                     if current_sum_tmax[core_id,tmax_idx, sim_id, param_id] > 0:
                         position_diff = (parameter_value_array[int(
-                            property_extreme_values[1, 0, 0]), sim_id, param_id]
+                            property_extreme_values[1, 0, 0]),
+                            int(timepoint_array[0, sim_id, param_id]), param_id]
                                          - end_position)
                         tmax_end_position = (position_diff /
                                              current_sum_tmax[core_id,
@@ -3544,7 +3551,10 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     #  property, before comparing to the threshold)
                     min_value = property_extreme_values[0, int(property_nb)]
                     threshold = parameter_value_array[int(min_value[0]),
-                                                      sim_id, param_id]
+                                                      int(timepoint_array[
+                                                        0, sim_id, param_id]),
+                                                      param_id]
+
                     # if the second index is 0, then the threshold is not closed
                     # therefore it just defines geometry and is not enforced
                     if min_value[1] == 0:
@@ -3584,7 +3594,9 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     # similarly as for the min val condition
                     max_value = property_extreme_values[1, int(property_nb)]
                     threshold = parameter_value_array[int(max_value[0]),
-                                                      sim_id, param_id]
+                                                      int(timepoint_array[
+                                                        0, sim_id, param_id]),
+                                                      param_id]
 
                     # the first index is the actual threshold value in any case
                     # if the second index is not nan, then follows the operation

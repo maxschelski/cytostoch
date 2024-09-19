@@ -395,9 +395,6 @@ class SSA():
             else:
                 property_extreme_values[1, property_nb, 1] = 0
 
-            # print(type(max_value) in [Parameter])
-            # print(max_value)
-
             if type(max_value) == type(Parameter(values=[0])):
                 property_extreme_values[1, property_nb, 0] = max_value.number
             elif max_value is not None:
@@ -431,7 +428,6 @@ class SSA():
                 lengths = self.properties[0].max_value.value_array[:,
                                                                     param_slice]
                 array *= lengths
-
             # array = array.unsqueeze(1)
             # array = array.expand((nb_timepoints, param_shape_batch[1]))
             array = np.array(array.reshape((nb_timepoints, -1)))
@@ -866,6 +862,7 @@ class SSA():
                 dependence_start_end_param = dependence.end_val
 
                 params_prop_dependence[param_nb, 1] = end_val_param_nb
+
             # if the start and end values are defined but no change
             # calculate the linear change from the start to the end val
             if ((dependence.start_val is not None) &
@@ -1863,6 +1860,8 @@ class SSA():
         first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
         numba.cuda.profile_start()
 
+        # dasd
+
         sim[nb_SM,
          nb_cc](object_states_batch, #int32[:,:,:]
                 property_array_batch, #float32[:,:,:,:]
@@ -2090,18 +2089,20 @@ class SSA():
         # add parameters from max and min property values
         for property in self.properties:
             if type(property.max_value) == type(self.parameters[0]):
-                property.max_value.number = param_nb
-                if property.max_value.name == "":
-                    property.max_value.name = str(property.max_value.number)
-                param_nb += 1
-                self.parameters.append(property.max_value)
+                if property.max_value.number is None:
+                    property.max_value.number = param_nb
+                    if property.max_value.name == "":
+                        property.max_value.name = str(property.max_value.number)
+                    param_nb += 1
+                    self.parameters.append(property.max_value)
 
             if type(property.min_value) == type(self.parameters[0]):
-                property.min_value.number = param_nb
-                if property.min_value.name == "":
-                    property.min_value.name = str(property.min_value.number)
-                param_nb += 1
-                self.parameters.append(property.min_value)
+                if property.min_value.number is None:
+                    property.min_value.number = param_nb
+                    if property.min_value.name == "":
+                        property.min_value.name = str(property.min_value.number)
+                    param_nb += 1
+                    self.parameters.append(property.min_value)
 
         # first get all unique dependencies
         self.dependencies = []
