@@ -395,6 +395,10 @@ class SSA():
             else:
                 property_extreme_values[1, property_nb, 1] = 0
 
+            # print(max_value)
+            # print(type(max_value), type(Parameter(values=[0])))
+            # print(type(max_value) == type(Parameter(values=[0])))
+
             if type(max_value) == type(Parameter(values=[0])):
                 property_extreme_values[1, property_nb, 0] = max_value.number
             elif max_value is not None:
@@ -424,6 +428,7 @@ class SSA():
             array = torch.Tensor(parameter.value_array[:,param_slice])
             # if parameter is per_um, multiply the parameter value with the
             # max value of position (neurite length)
+            print(nb, parameter.name, parameter.values)
             if parameter.per_um:
                 lengths = self.properties[0].max_value.value_array[:,
                                                                     param_slice]
@@ -1762,7 +1767,7 @@ class SSA():
                 object_states[2] = self.object_states
 
             # calculate number of objects for all states
-            nb_objects_all_states = np.zeros((2, max(len(self.transitions),
+            nb_objects_all_states = np.zeros((2, max(len(self.parameters),
                                                   len(self.states)) + 1,
                                               *param_shape_batch))
             nb_objects_all_states[0, 0] = self.object_states.shape[0]
@@ -1798,9 +1803,8 @@ class SSA():
                                   param_combinations_per_batch))
         local_density = convert_array(local_density)
 
-        total_density = np.zeros(
-            (len(self.properties),
-             nb_simulations, param_combinations_per_batch))
+        total_density = np.zeros((len(self.properties),
+                                  nb_simulations, param_combinations_per_batch))
 
         # first idx of first dimension is for constant term,
         # second idx of first dimension is for second order term
@@ -1859,7 +1863,8 @@ class SSA():
 
         first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
         numba.cuda.profile_start()
-
+        # print(parameter_value_array)
+        # print(parameter_value_array.shape)
         # dasd
 
         sim[nb_SM,
@@ -2651,18 +2656,18 @@ class SSA():
         all_dimensions = [dim for dim
                           in range(len(simulation_parameter_lengths) + 2)]
 
-        # get number of timepoint for parameter switches
-        nb_timepoints = 1
-        for dimension, model_parameters in enumerate(all_simulation_parameters):
-            all_timepoints_param_vals = model_parameters.values
-            if (len(all_timepoints_param_vals) == 1):
-                continue
-            if ((nb_timepoints > 1) &
-                    (len(all_timepoints_param_vals) != nb_timepoints)):
-                raise ValueError("If switch timepoints for parameter values"
-                                 "are included, the number of switch timepoints"
-                                 " have to be the same for all parameters.")
-            nb_timepoints = len(all_timepoints_param_vals)
+        # # get number of timepoint for parameter switches
+        # nb_timepoints = 1
+        # for dimension, model_parameters in enumerate(all_simulation_parameters):
+        #     all_timepoints_param_vals = model_parameters.values
+        #     if (len(all_timepoints_param_vals) == 1):
+        #         continue
+        #     if ((nb_timepoints > 1) &
+        #             (len(all_timepoints_param_vals) != nb_timepoints)):
+        #         raise ValueError("If switch timepoints for parameter values"
+        #                          "are included, the number of switch timepoints"
+        #                          " have to be the same for all parameters.")
+        #     nb_timepoints = len(all_timepoints_param_vals)
 
         if self.two_combined_parameter_changes:
             all_parameter_arrays = []

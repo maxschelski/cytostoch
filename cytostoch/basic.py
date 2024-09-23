@@ -954,16 +954,18 @@ class DataExtraction():
             min_position = dimensions[0].positions[0].min_value
             if min_position is None:
                 min_position = 0
-            else:
-                min_position = np.min(dimensions[0].positions[0].min_value.values)
+            elif type(min_position) in [Parameter]:
+                min_position = np.min(min_position.values)
 
-            max_position = np.max(dimensions[0].positions[0].max_value.values)
+            max_position = dimensions[0].positions[0].max_value
+            if type(max_position) in [Parameter]:
+                max_position = np.max(max_position.values.tolist())
 
             position_dimension = int(round((max_position - min_position)
                                            / resolution,5)) #+ 1
 
             positions = torch.arange(min_position,
-                                     max_position + resolution * 0.9,
+                                     max_position,# + resolution * 0.9,
                                      resolution)
 
             nb_objects = length_array.shape[1]
@@ -1069,7 +1071,18 @@ class ObjectProperty():
             name (String): Name of property, used for data export
                 and readability.
         """
+        if min_value is not None:
+            if type(min_value) in [float, int]:
+                min_value = Parameter(values=[min_value], name=name+"_max")
+            elif type(min_value) in [list, tuple]:
+                min_value = Parameter(values=min_value, name=name+"_max")
         self._min_value = min_value
+        # allow compatibility with older scripts by converting
+        # max values that are not Parameters to Parameters
+        if type(max_value) in [float, int]:
+            max_value = Parameter(values=[max_value], name=name+"_max")
+        elif type(max_value) in [list, tuple]:
+            max_value = Parameter(values=max_value, name=name+"_max")
         self._max_value = max_value
         self._start_value = start_value
         self.closed_min = True
@@ -1399,6 +1412,34 @@ class Parameter():
         self.switch_timepoints = None
         if switch_timepoints is not None:
             self.switch_timepoints = np.array(switch_timepoints)
+
+class DependenceParameter(Parameter):
+
+    def __init__(self, values, as_target_values=False,
+                 as_max_property_changes=False,
+                 scale="rates", convert_half_lifes=True,
+                 dependence=None, per_um=False, switch_timepoints=None,
+                 name=""):
+        """
+
+        Args:
+            as_target_values: Allows the definition of the total target value,
+                when considering the baseline value (e.g. if 0, then it will be
+                the negative baseline_value)
+            as_max_property_changes: Allows to define after which change in
+                property the property dependence should be 0. This only works
+                for a linear dependence. Will map a linear change depending
+                on the actual param change value of the dependence.
+        """
+        super().__init__(values, scale=scale,
+                         convert_half_lifes=convert_half_lifes,
+                         dependence=dependence, per_um=per_um,
+                         switch_timepoints=switch_timepoints,
+                         name=name)
+
+        self.as_target_values = as_target_values
+        self.as_max_property_changes = as_max_property_changes
+
 
 class PropertyDependence():
 

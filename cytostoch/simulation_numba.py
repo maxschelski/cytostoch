@@ -2247,7 +2247,8 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                int(timepoint_array[0, sim_id,
                                                                    param_id]),
                                                param_id] -
-                         nb_objects_all_states[1, transition_nb,
+                         nb_objects_all_states[1, int(transition_parameters[
+                                                         transition_nb, 1]),
                                                sim_id, param_id])
                         / parameter_value_array[int(transition_parameters[
                                                         transition_nb, 1]),
@@ -3749,7 +3750,7 @@ def _get_random_mt_at_position(position, object_states, properties_array,
     cuda.syncwarp(thread_masks[sim_id, param_id])
     return
 
-def _get_density_dependent_position(transition_number, creation_on_objects,
+def _get_density_dependent_position(transition_nb, creation_on_objects,
                                     local_density, total_density,
                                     local_resolution, rng_states,
                                     simulation_factor, parameter_factor,
@@ -3766,11 +3767,11 @@ def _get_density_dependent_position(transition_number, creation_on_objects,
             # the current transition dependes on
             property_nb = 0
             while property_nb < creation_on_objects.shape[2]:
-                if math.isnan(creation_on_objects[transition_number, 0,
+                if math.isnan(creation_on_objects[transition_nb, 0,
                                                   property_nb]):
                     break
                 all_density += total_density[int(creation_on_objects[
-                                                   transition_number, 0,
+                                                   transition_nb, 0,
                                                    property_nb]),
                                            sim_id, param_id]
                 property_nb += 1
@@ -3794,16 +3795,16 @@ def _get_density_dependent_position(transition_number, creation_on_objects,
             else:
                 property_nb = 0
                 while property_nb < creation_on_objects.shape[2]:
-                    if math.isnan(creation_on_objects[transition_number, 0,
+                    if math.isnan(creation_on_objects[transition_nb, 0,
                                                       property_nb]):
                         break
                     local_density_here += local_density[int(
-                        creation_on_objects[transition_number,
+                        creation_on_objects[transition_nb,
                                             0, property_nb]),
                                                         x_pos, sim_id, param_id]
 
                     if local_density[int(
-                        creation_on_objects[transition_number,
+                        creation_on_objects[transition_nb,
                                             0, property_nb]),
                                                         x_pos, sim_id, param_id] < 0:
                         print(345)
@@ -3857,10 +3858,10 @@ def _update_object_states(current_transitions, all_transition_states,
                           times):
 
     # update the simulations according to executed transitions
-    transition_number = current_transitions[sim_id, param_id]
-    if not math.isnan(transition_number):
-        transition_number = int(transition_number)
-        transition_states = all_transition_states[transition_number]
+    transition_nb = current_transitions[sim_id, param_id]
+    if not math.isnan(transition_nb):
+        transition_nb = int(transition_nb)
+        transition_states = all_transition_states[transition_nb]
         start_state = transition_states[0]
         end_state = transition_states[1]
         transition_position = int(all_transition_positions[sim_id, param_id])
@@ -3869,7 +3870,7 @@ def _update_object_states(current_transitions, all_transition_states,
         # don't apply standard changes for cutting (creation on object == 2)
         # since changes in object numbers are more complicated due to
         # different object states being differently affected by cutting
-        if (core_id == 0) & (math.isnan(creation_on_objects[transition_number,
+        if (core_id == 0) & (math.isnan(creation_on_objects[transition_nb,
                                                              1, 0])):
             if start_state != 0:
                 nb_objects_all_states[0, int(start_state),
@@ -3880,12 +3881,15 @@ def _update_object_states(current_transitions, all_transition_states,
                 # if resources for the object generation transition are defined,
                 # set generation method for object
                 if not math.isnan(
-                        transition_parameters[int(transition_number), 1]):
-                    # set as transition_number + 1 so that 0 indicates
-                    # not generated by a resource limited object generation
+                        transition_parameters[int(transition_nb), 1]):
+                    # set as parameter number of resource for transition + 1 so
+                    # that 0 indicates not generated by a resource limited
+                    # object generation
                     object_states[1, transition_position,
-                                  sim_id, param_id] = transition_number + 1
-                    nb_objects_all_states[1, int(transition_number),
+                                  sim_id, param_id] = int(transition_parameters[
+                                                     transition_nb, 1]) + 1
+                    nb_objects_all_states[1, int(transition_parameters[
+                                                     transition_nb, 1]),
                                           sim_id, param_id] += 1
 
             if end_state != 0:
@@ -3894,29 +3898,30 @@ def _update_object_states(current_transitions, all_transition_states,
                 nb_objects_all_states[0, 0, sim_id, param_id] += 1
                 # set generation method of object to 0 since the object is
                 # removed
+                # to get the generation method, use the object state in the
+                # second dimension
                 if object_states[1, transition_position,
                                  sim_id, param_id] != 0:
                     nb_objects_all_states[1,
-                                          object_states[1,
-                                                       transition_position,
-                                                       sim_id, param_id] - 1,
+                                          object_states[1, transition_position,
+                                                        sim_id, param_id] - 1,
                                           sim_id, param_id] -= 1
                     object_states[1, transition_position,
                                   sim_id, param_id] = 0
 
         # if objects are cut creation_on_objects for the transition is not
         # nan at idx 1 and 2 and contain transition maps at these indices
-        if not math.isnan(creation_on_objects[transition_number, 1, 0]):
+        if not math.isnan(creation_on_objects[transition_nb, 1, 0]):
             if core_id == 0:
                 # get the x position of the cut
                 x_pos, _, local_density_here = _get_density_dependent_position(
-                    transition_number, creation_on_objects,
+                    transition_nb, creation_on_objects,
                     local_density, total_density, local_resolution,
                     rng_states, simulation_factor, parameter_factor,
                     sim_id, param_id, core_id)
 
                 target_property_nb = int(creation_on_objects[
-                                             transition_number, 0, 0])
+                                             transition_nb, 0, 0])
 
                 # get the object that was cut at that position
                 # by first finding a random threshold, depending on the local
@@ -4026,7 +4031,7 @@ def _update_object_states(current_transitions, all_transition_states,
 
                 # cutting has to be done on one specific property
                 # reduce this property by cut_length
-                property_nb = int(creation_on_objects[transition_number, 0, 0])
+                property_nb = int(creation_on_objects[transition_nb, 0, 0])
 
                 # make sure cut length is not larger than the property value
                 if properties_array[0, property_nb,
@@ -4155,12 +4160,12 @@ def _update_object_states(current_transitions, all_transition_states,
 
                 # increase object number for target states of object
                 # Before cut is the new object (new tip position)
-                state_before_cut = creation_on_objects[transition_number, 1,
+                state_before_cut = creation_on_objects[transition_nb, 1,
                                                        object_states[
                                                            0, int(object_position),
                                                            sim_id, param_id]-1]
                 # After cut is the old object (same tip position)
-                state_after_cut = creation_on_objects[transition_number, 2,
+                state_after_cut = creation_on_objects[transition_nb, 2,
                                                        object_states[
                                                            0, int(object_position),
                                                            sim_id, param_id]-1]
@@ -4194,9 +4199,13 @@ def _update_object_states(current_transitions, all_transition_states,
                     nb_objects_all_states[0, int(state_after_cut),
                                           sim_id, param_id] += 1
 
+                    # object_states[1, transition_position,
+                    #               sim_id, param_id] = transition_nb + 1
                     object_states[1, transition_position,
-                                  sim_id, param_id] = transition_number + 1
-                    nb_objects_all_states[1, int(transition_number),
+                                  sim_id, param_id] = int(transition_parameters[
+                                                     transition_nb, 1]) + 1
+                    nb_objects_all_states[1, int(transition_parameters[
+                                                     transition_nb, 1]),
                                           sim_id, param_id] += 1
 
 
@@ -4256,13 +4265,13 @@ def _update_object_states(current_transitions, all_transition_states,
             while property_nb < last_property_nb:
 
                 if ((not math.isnan(creation_on_objects[
-                                        transition_number, 0, 0])) &
+                                        transition_nb, 0, 0])) &
                         (property_nb == 0)):
 
                     # One more arrays needed:
                     # density_threshold_boundaries (3, sim_id, param_id)
                     x_pos, property_val, _  = _get_density_dependent_position(
-                        transition_number, creation_on_objects,
+                        transition_nb, creation_on_objects,
                         local_density, total_density, local_resolution,
                         rng_states, simulation_factor, parameter_factor,
                         sim_id, param_id, core_id)
@@ -4277,11 +4286,11 @@ def _update_object_states(current_transitions, all_transition_states,
                 else:
                     # check whether the property start values are different for the
                     # current transition
-                    if math.isnan(changed_start_values_array[transition_number,
+                    if math.isnan(changed_start_values_array[transition_nb,
                                                              property_nb, 0]):
                         property_start_val = property_start_vals[property_nb]
                     else:
-                        property_start_val = changed_start_values_array[transition_number,
+                        property_start_val = changed_start_values_array[transition_nb,
                                                                         property_nb]
                     # if there is only one non-nan value or just one value in total
                     # then the first value is the actual value that the property
@@ -4345,7 +4354,7 @@ def _update_object_states(current_transitions, all_transition_states,
             # if property values are transfered, then the first number
             # is the property number source and the second is the target
             # if the value is nan then there is no transfer
-            transfered_vals = all_transition_tranferred_vals[int(transition_number)]
+            transfered_vals = all_transition_tranferred_vals[int(transition_nb)]
 
             if math.isnan(transfered_vals[0]) == False:
                 source_property_number = transfered_vals[0]
@@ -4367,7 +4376,7 @@ def _update_object_states(current_transitions, all_transition_states,
             # if properties should be set to zero for the current transition
             # do that at the current position
             set_to_zero_properties = all_transition_set_to_zero_properties[
-                int(transition_number)]
+                int(transition_nb)]
             if math.isnan(set_to_zero_properties[0]) == False:
                 zero_property_nb = 0
                 while zero_property_nb < len(set_to_zero_properties):
@@ -4492,6 +4501,7 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                                                             int(object_pos),
                                                             sim_id, param_id]-1,
                                               sim_id, param_id] -= 1
+
                         object_states[1, int(object_pos),
                                       sim_id, param_id] = 0
 
