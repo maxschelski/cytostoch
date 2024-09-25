@@ -1077,16 +1077,16 @@ class DataExtraction():
         return data_dict, ["1D_density"]
 
 
-
 class ObjectProperty():
 
-    def __init__(self, min_value=None, max_value=None,
+    def __init__(self, min_value=0, max_value=None,
                  start_value=[0,1],
                  initial_condition=None, name=""):
         """
         Args:
             min_value (float or PropertyGeometry): lower limit on property
-                value. Defines geometry of physical space.
+                value. Defines geometry of physical space. Standard is 0
+                to not allow negative properties.
             max_value (float or PropertyGeometry): upper limit on property
                 value. Deinfes geometry of physical space.
             start_value (float or PropertyGeometry or list of two values/
@@ -1107,6 +1107,20 @@ class ObjectProperty():
             name (String): Name of property, used for data export
                 and readability.
         """
+        if min_value is None:
+            # print("WARNING: No min_value was determined for the "
+            #       f"property {name}. Therefore, closed_min was set to False.")
+            self.closed_min = False
+        else:
+            self.closed_min = True
+
+        if max_value is None:
+            # print("WARNING: No max_value was determined for the "
+            #       f"property {name}. Therefore, closed_max was set to False.")
+            self.closed_max = False
+        else:
+            self.closed_max = True
+
         if min_value is not None:
             if type(min_value) in [float, int]:
                 min_value = Parameter(values=[min_value], name=name+"_max")
@@ -1121,8 +1135,6 @@ class ObjectProperty():
             max_value = Parameter(values=max_value, name=name+"_max")
         self._max_value = max_value
         self._start_value = start_value
-        self.closed_min = True
-        self.closed_max = True
         self._initial_condition = initial_condition
         self.name = "prop"
         if (name != "") & (name is not None):
@@ -1226,6 +1238,14 @@ class ObjectPosition(ObjectProperty):
         """
         super().__init__(min_value, max_value, start_value, initial_condition,
                          name)
+
+        if min_value is None:
+            # print("WARNING: No min_value was determined for the "
+            #       f"position {name}. Therefore, closed_min was set to False.")
+            self.closed_min = False
+        else:
+            self.closed_min = closed_min
+
         self.closed_min = closed_min
         self.closed_max = closed_max
 
@@ -1611,7 +1631,8 @@ class ObjectCreation(StateTransition):
     """
 
     def __init__(self, state, parameter, changed_start_values=None,
-                 creation_on_objects=False, properties_for_creation=None,
+                 creation_on_objects=False, inherit_orientation=None,
+                 properties_for_creation=None,
                  resources = None,
                  save_object_creation_source=False, name=""):
         """
@@ -1638,6 +1659,8 @@ class ObjectCreation(StateTransition):
         super().__init__(end_state=state, parameter=parameter)
         self.changed_start_values = changed_start_values
         self.creation_on_objects = creation_on_objects
+        if (inherit_orientation is None) & creation_on_objects:
+            self.inherit_orientation = True
         self.properties_for_creation = properties_for_creation
         self.resources = resources
         self.save_object_creation_source = save_object_creation_source

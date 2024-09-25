@@ -358,7 +358,7 @@ class SSA():
                 property_extreme_values[0, property_nb, 1] = 1
             else:
                 property_extreme_values[0, property_nb, 1] = 0
-            if type(min_value) in [Parameter]:
+            if isinstance(min_value, Parameter):
                 property_extreme_values[0, property_nb, 0] = min_value.number
             elif min_value is not None:
                 if min_value.properties[0].closed_min:
@@ -386,8 +386,7 @@ class SSA():
             # print(max_value)
             # print(type(max_value), type(Parameter(values=[0])))
             # print(type(max_value) == type(Parameter(values=[0])))
-
-            if type(max_value) == type(Parameter(values=[0])):
+            if isinstance(max_value, Parameter):
                 property_extreme_values[1, property_nb, 0] = max_value.number
             elif max_value is not None:
                 if max_value.properties[0].closed_max:
@@ -838,7 +837,8 @@ class SSA():
             # so far only linear dependence on space are allowed
             dependence = parameter.dependence
 
-            if type(dependence.start_val) in [Parameter, DependenceParameter]:
+            if (isinstance(dependence.start_val, Parameter) |
+                    isinstance(dependence.start_val, DependenceParameter)):
                 start_val_param_nb = dependence.start_val.number
                 # if the start parameter is the target value and not the actual
                 # start value of the dependence, subtract the actual parameter
@@ -850,7 +850,8 @@ class SSA():
 
                 params_prop_dependence[param_nb, 0] = start_val_param_nb
 
-            if type(dependence.end_val) in [Parameter, DependenceParameter]:
+            if (isinstance(dependence.end_val, Parameter) |
+                    isinstance(dependence.end_val, DependenceParameter)):
                 end_val_param_nb = dependence.end_val.number
                 # if the end parameter is the target value and not the actual
                 # end value of the dependence, subtract the actual parameter
@@ -1865,7 +1866,8 @@ class SSA():
         # for parameter in self.parameters:
         #     print(parameter.name, parameter.number)
         #     print(parameter.value_array)
-        # print(parameter_value_array)
+        #     print(parameter.value_array.shape)
+        print(total_density.shape)
 
         sim[nb_SM,
          nb_cc](object_states_batch, #int32[:,:,:]
@@ -1965,18 +1967,18 @@ class SSA():
         self.object_states = object_states_batch[3:]
         self.creation_source = object_states_batch[2]
 
-        # print(np.unique(object_states_batch[0]))
-        # print(len(np.where(object_states_batch[0,:,0] == 1)[0]),
-        #       len(np.where(object_states_batch[0,:,0] == 2)[0]),
-        #       len(np.where(object_states_batch[0,:,0] == 3)[0]),
-        #       len(np.where(object_states_batch[0,:,0] == 4)[0]),
-        #       len(np.where(object_states_batch[0,:,0] == 5)[0]))
-        # print(np.nanmax(np.array(property_array_batch[0,0])),
-        #       np.nanmin(np.array(property_array_batch[0,0])))
-        # print(np.nanmax(np.array(property_array_batch[0,1])),
-        #       np.nanmin(np.array(property_array_batch[0,1])))
-        # print(np.nanmax(np.array(property_array_batch[0,2])),
-        #       np.nanmin(np.array(property_array_batch[0,2])))
+        print(np.unique(object_states_batch[0]))
+        print(len(np.where(object_states_batch[0,:,0,0] == 1)[0]),
+              len(np.where(object_states_batch[0,:,0,0] == 2)[0]),
+              len(np.where(object_states_batch[0,:,0,0] == 3)[0]),
+              len(np.where(object_states_batch[0,:,0,0] == 4)[0]),
+              len(np.where(object_states_batch[0,:,0,0] == 5)[0]))
+        print(np.nanmax(np.array(property_array_batch[0,0,:,0,0])),
+              np.nanmin(np.array(property_array_batch[0,0,:,0,0])))
+        print(np.nanmax(np.array(property_array_batch[0,1,:,0,0])),
+              np.nanmin(np.array(property_array_batch[0,1,:,0,0])))
+        print(np.nanmax(np.array(property_array_batch[0,2,:,0,0])),
+              np.nanmin(np.array(property_array_batch[0,2,:,0,0])))
 
         self.times = (times_batch * time_resolution.copy_to_host())
         self.times = self.times.unsqueeze(1).to(self.device)
@@ -2095,7 +2097,7 @@ class SSA():
                 continue
             if transition.resources is None:
                 continue
-            if not type(transition.resources) == type(parameters[0]):
+            if not isinstance(transition.resources, Parameter):
                 raise ValueError("Resources have to be defined through a "
                                  "parameter.")
             parameters.append(transition.resources)
