@@ -31,7 +31,7 @@ from . import analyzer
 from .basic import PropertyGeometry
 from . import simulation_numba
 from .basic import ObjectPosition
-from .basic import Parameter
+from .basic import Parameter, DependenceParameter
 import tqdm
 
 """
@@ -288,18 +288,6 @@ class SSA():
         analysis.start(time_resolution, max_time,
                        use_assertion_checks=self.use_assertion_checks)
 
-    def _regularly_print_data(self):
-        # only print data if the current data was not yet printed
-        # and if there is data buffer to be printed
-        for keyword, data_extraction in self.data_extractions.items():
-            if not data_extraction.print_regularly:
-                continue
-            data = data_extraction.extract(self, regular_print=True)
-            for data_name, data_array in data.items():
-                mean = torch.nanmean(data_array.to(torch.float))
-                if (not np.isnan(mean.item())) & (mean.item() != 0):
-                    print(data_name," : ",mean.item())
-
     def _get_property_start_val_arrays(self):
         # - all object properties over time
         nb_properties = len(self.properties)
@@ -445,11 +433,16 @@ class SSA():
         nb_transitions = len(self.transitions)
         # the first dimension is the number of the parameter for the rate
         # the second dimensions is the number of the parameter for resources
-        transition_parameters = np.full((nb_transitions, 2), np.nan)
+        transition_parameters = np.full((nb_transitions, 3), np.nan)
         for nb, transition in enumerate(self.transitions):
             transition_parameters[nb, 0] = transition.parameter.number
             if transition.resources is not None:
                 transition_parameters[nb, 1] = transition.resources.number
+                transition_parameters[nb, 2] = 1
+            if (hasattr(transition, "save_object_creation_sources") & 
+                    (transition.start_state == 0)):
+                if transition.save_object_creation_source:
+                    transition_parameters[nb, 2] = 1
         return transition_parameters
 
     def _get_transition_state_arrays(self):
@@ -845,28 +838,30 @@ class SSA():
             # so far only linear dependence on space are allowed
             dependence = parameter.dependence
 
-            if type(dependence.start_val) == type(self.parameters[0]):
+            if type(dependence.start_val) in [Parameter, DependenceParameter]:
                 start_val_param_nb = dependence.start_val.number
                 # if the start parameter is the target value and not the actual
                 # start value of the dependence, subtract the actual parameter
                 # value to arrive in sum at the desired target value
-                if hasattr(dependence.start_val,"is_target_value"):
-                    if dependence.start_val.is_target_value:
-                        dependence.start_val.values -= parameter.values
+                if hasattr(dependence.start_val,"as_target_values"):
+                    if dependence.start_val.as_target_values:
+                        dependence.start_val.value_array -= parameter.value_array
                 dependence_start_end_param = dependence.start_val
 
                 params_prop_dependence[param_nb, 0] = start_val_param_nb
-            if type(dependence.end_val) == type(self.parameters[0]):
+
+            if type(dependence.end_val) in [Parameter, DependenceParameter]:
                 end_val_param_nb = dependence.end_val.number
                 # if the end parameter is the target value and not the actual
                 # end value of the dependence, subtract the actual parameter
                 # value to arrive in sum at the desired target value
-                if hasattr(dependence.end_val,"is_target_value"):
-                    if dependence.end_val.is_target_value:
-                        dependence.end_val.values -= parameter.values
+                if hasattr(dependence.end_val,"as_target_values"):
+                    if dependence.end_val.as_target_values:
+                        dependence.end_val.value_array -= parameter.value_array
                 dependence_start_end_param = dependence.end_val
 
                 params_prop_dependence[param_nb, 1] = end_val_param_nb
+
 
             # if the start and end values are defined but no change
             # calculate the linear change from the start to the end val
@@ -907,10 +902,10 @@ class SSA():
             # goes to zero until the max_property_change
             # (e.g. for 2 and a position dependence, the param change would go
             #  to 0 at a position change of 2.)
-            if hasattr(change_param, "is_max_property_change"):
-                if change_param.is_max_property_change:
-                    change.param.values = - (dependence_start_end_param.values /
-                                             change.param.values)
+            if hasattr(change_param, "as_max_property_changes"):
+                if change_param.as_max_property_changes:
+                    change_param.value_array = - (dependence_start_end_param.value_array /
+                                             change_param.value_array)
             params_prop_dependence[param_nb, 4] = change_param.number
 
             params_prop_dependence[param_nb, 5] = dependence_nb
@@ -1489,23 +1484,24 @@ class SSA():
                 complete_nb_obj_all_states_batch = torch.concatenate([
                     complete_nb_obj_all_states_batch, nb_obj_all_states_batch])
 
-            # save all files
-            file_path = os.path.join(self.data_folder,
-                                     self.object_states_file_name)
-            torch.save(complete_object_states, file_path)
+            if self.save_results:
+                # save all files
+                file_path = os.path.join(self.data_folder,
+                                         self.object_states_file_name)
+                torch.save(complete_object_states, file_path)
 
-            file_path = os.path.join(self.data_folder,
-                                     self.property_array_file_name)
-            torch.save(complete_property_array, file_path)
+                file_path = os.path.join(self.data_folder,
+                                         self.property_array_file_name)
+                torch.save(complete_property_array, file_path)
 
-            file_path = os.path.join(self.data_folder,
-                                     self.first_last_idx_with_object_file_name
-                                     )
-            torch.save(complete_first_last_idx_with_object_batch, file_path)
+                file_path = os.path.join(self.data_folder,
+                                         self.first_last_idx_with_object_file_name
+                                         )
+                torch.save(complete_first_last_idx_with_object_batch, file_path)
 
-            file_path = os.path.join(self.data_folder,
-                                     self.nb_obj_all_states_file_name)
-            torch.save(complete_nb_obj_all_states_batch, file_path)
+                file_path = os.path.join(self.data_folder,
+                                         self.nb_obj_all_states_file_name)
+                torch.save(complete_nb_obj_all_states_batch, file_path)
 
             del rng_states
             cuda.current_context().memory_manager.deallocations.clear()
@@ -1574,10 +1570,12 @@ class SSA():
                          seed
                         )
 
+            self.simulation_time = np.nan
             if self.print_times:
-                print("Simulation time: ", time.time() - start)
+                self.simulation_time = time.time() - start
+                print("Simulation time: ", self.simulation_time)
 
-            self.object_states = torch.Tensor(np.copy(object_states[1:]))
+            self.object_states = torch.Tensor(np.copy(object_states[3:]))
 
             for property_nb, property in enumerate(self.properties):
                 property.array = torch.Tensor(np.copy(
@@ -1735,7 +1733,7 @@ class SSA():
 
         # create new object states object that includes data for
         # all timepoints
-        object_states = np.zeros((nb_timepoints + 2,
+        object_states = np.zeros((nb_timepoints + 3,
                                   self.object_states.shape[0],
                                   *param_shape_batch),
                                  dtype=np.int32)
@@ -1863,9 +1861,11 @@ class SSA():
 
         first_last_idx_with_object = to_cuda(convert_array(first_last_idx_with_object))
         numba.cuda.profile_start()
+        # print(property_array_batch.shape)
+        # for parameter in self.parameters:
+        #     print(parameter.name, parameter.number)
+        #     print(parameter.value_array)
         # print(parameter_value_array)
-        # print(parameter_value_array.shape)
-        # dasd
 
         sim[nb_SM,
          nb_cc](object_states_batch, #int32[:,:,:]
@@ -1934,9 +1934,14 @@ class SSA():
 
                 rng_states, simulation_factor, parameter_factor
                 )
+        # if self.print_times:
+        #     print("Simulation time: ",
+        #           np.round(time.time() - start, 2), "\n")
+
+        self.simulation_time = np.nan
         if self.print_times:
-            print("Simulation time: ",
-                  np.round(time.time() - start, 2), "\n")
+            self.simulation_time = time.time() - start
+            print("Simulation time: ", np.round(self.simulation_time, 2))
 
         # nb_parallel_cores = nb_parallel_cores.copy_to_host()
 
@@ -1957,7 +1962,21 @@ class SSA():
         # plt.figure()
         # plt.plot(local_density_batches.mean(axis=1))
 
-        self.object_states = object_states_batch[2:]
+        self.object_states = object_states_batch[3:]
+        self.creation_source = object_states_batch[2]
+
+        # print(np.unique(object_states_batch[0]))
+        # print(len(np.where(object_states_batch[0,:,0] == 1)[0]),
+        #       len(np.where(object_states_batch[0,:,0] == 2)[0]),
+        #       len(np.where(object_states_batch[0,:,0] == 3)[0]),
+        #       len(np.where(object_states_batch[0,:,0] == 4)[0]),
+        #       len(np.where(object_states_batch[0,:,0] == 5)[0]))
+        # print(np.nanmax(np.array(property_array_batch[0,0])),
+        #       np.nanmin(np.array(property_array_batch[0,0])))
+        # print(np.nanmax(np.array(property_array_batch[0,1])),
+        #       np.nanmin(np.array(property_array_batch[0,1])))
+        # print(np.nanmax(np.array(property_array_batch[0,2])),
+        #       np.nanmin(np.array(property_array_batch[0,2])))
 
         self.times = (times_batch * time_resolution.copy_to_host())
         self.times = self.times.unsqueeze(1).to(self.device)
@@ -2116,6 +2135,8 @@ class SSA():
             dependence = parameter.dependence
             if dependence is None:
                 continue
+            if dependence.number is not None:
+                continue
             dependence.number = dependence_nb
             if dependence.name == "":
                 dependence.name = str(dependence.number)
@@ -2129,7 +2150,7 @@ class SSA():
                                     dependence.param_change_is_abs,
                                     dependence.prop_change_is_abs]
             for potential_param in all_potential_params:
-                if type(potential_param) == type(self.parameters[0]):
+                if type(potential_param) in [Parameter, DependenceParameter]:
                     # check whether parameter was already used somewhere else
                     # and therefor is already in the self.parameters array
                     # by checking whether the number is defined
@@ -2141,7 +2162,7 @@ class SSA():
                     else:
                         print("WARNING: A parameter should only be used in "
                              "one dependence. Otherwise, "
-                             "is_target_value might not work "
+                             "as_target_values might not work "
                              "anymore, since it would overwrite the "
                              "value for the second dependence, thereby "
                               "changing the actual target value for previous "
@@ -2359,6 +2380,16 @@ class SSA():
 
                 with open(file_path, "w") as text_file:
                     text_file.write(self.comment)
+
+            # save comment in separate txt file for quick and easy access
+            if not np.isnan(self.simulation_time):
+                file_path = os.path.join(self.data_folder,
+                                         "simulation_time.txt")
+
+                with open(file_path, "w") as text_file:
+                    text_file.write("Seconds: "+ str(self.simulation_time))
+                    text_file.write("Minutes: "+ str(self.simulation_time/60))
+                    text_file.write("Hours: "+ str(self.simulation_time/60/60))
 
         print("Saving simulation object...")
         # pickle the entire simulation object

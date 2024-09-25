@@ -542,9 +542,6 @@ class DataExtraction():
                 (e.g. for [[1,2],[3]], where each number is a State object,
                 state 1 and 2 will be analyzed as one state but state 3
                 will be analyzed as a separate state)
-            regular_print (bool): Whether the extraction is part of the regular
-                print for monitoring and therefore should only contain data from
-                the last iteration
         """
         self.dimensions = dimensions
         self.kwargs = kwargs
@@ -575,66 +572,93 @@ class DataExtraction():
         else:
             self.operation = operation
 
-    def extract(self, simulation_object, regular_print=False, **kwargs):
+    def extract(self, simulation_object, **kwargs):
 
         all_kwargs = {**self.kwargs, **kwargs}
 
         if self.state_groups is None:
             data, _ = self.operation(self.dimensions, simulation_object,
-                                     regular_print=regular_print,
                                 **all_kwargs)
-            all_data = data
-        elif type(self.state_groups) == str:
+            return data
+
+        if type(self.state_groups) == str:
             if self.state_groups.lower() != "all":
                 raise ValueError("The only allowed string value for state "
                                  "groups is 'all'. Instead the value was:"
                                  f" {self.state_groups}.")
-            all_data = {}
-            for state in simulation_object.states:
-                data, data_col_names = self.operation(self.dimensions,
-                                                  simulation_object,
-                                                  state_numbers=
-                                                  [state.number],
-                                                      regular_print=
-                                                      regular_print,
-                                                  **all_kwargs)
-                # extract the actual data and not auxiliary information
-                # which would be the same between different state groups
-                # due to same underlying space structure
-                for name, data_vals in data.items():
-                    # data_col_names contains all names of the actual data
-                    # which is different between state groups
-                    if name in data_col_names:
-                        all_data[name+"_"+state.name] = data_vals
-                    else:
-                        # add auxiliary information once
-                        if name not in all_data.keys():
-                            all_data[name] = data_vals
+            state_groups = {state.name:[state.number]
+                            for state in simulation_object.states}
         else:
-            all_data = {}
+            state_groups = {}
             for group_name, state_group in self.state_groups.items():
-                state_numbers = [state.number for state in state_group]
-                # state_numbers_str = [str(state) for state in state_numbers]
-                # state_string = "S"+"-".join(state_numbers_str)
-                data, data_col_names = self.operation(self.dimensions,
-                                                 simulation_object,
-                                                  state_numbers=
-                                                  state_numbers,
-                                                      regular_print=
-                                                      regular_print,
-                                                 **all_kwargs)
-                # extract the actual data and not auxiliary information
-                # which would be the same between different state groups
-                # due to same underlying space structure
-                for name, data_vals in data.items():
-                    # data_col_names contains all names of the actual data
-                    # which is different between state groups
-                    if name in data_col_names:
-                        all_data[name+ "_" + group_name] = data_vals
-                    else:
-                        # add auxiliary information once
-                        if name not in all_data.keys():
-                            all_data[name] = data_vals
+                state_groups[group_name] = [state.number
+                                            for state in state_group]
+
+        # all_data = {}
+        # for group_name, state_group in self.state_groups.items():
+        #     data, data_col_names = self.operation(self.dimensions,
+        #                                       simulation_object,
+        #                                       state_numbers=
+        #                                       state_group,
+        #                                           regular_print=
+        #                                           regular_print,
+        #                                       **all_kwargs)
+        #     # extract the actual data and not auxiliary information
+        #     # which would be the same between different state groups
+        #     # due to same underlying space structure
+        #     for name, data_vals in data.items():
+        #         # data_col_names contains all names of the actual data
+        #         # which is different between state groups
+        #         if name in data_col_names:
+        #             all_data[name+"_"+state.name] = data_vals
+        #         else:
+        #             # add auxiliary information once
+        #             if name not in all_data.keys():
+        #                 all_data[name] = data_vals
+        # else:
+
+        all_data = self._execute_operation(state_groups, simulation_object,
+                                           **all_kwargs)
+
+        if self.operation_name == "global":
+            all_kwargs["nucleation_states"] = True
+            object_creation_source = simulation_object.creation_source
+            all_creation_sources = np.unique(object_creation_source)
+            state_groups = {}
+            for creation_source in all_creation_sources:
+                creation_name = simulation_object.transitions[int(creation_source)].name
+                state_groups[creation_name] = [int(creation_source)]
+            new_data = self._execute_operation(state_groups, simulation_object,
+                                               **all_kwargs)
+
+            all_data = {**all_data, **new_data}
+
+        return all_data
+
+
+    def _execute_operation(self, state_groups, simulation_object, **all_kwargs):
+        all_data = {}
+        for group_name, state_group in state_groups.items():
+            # state_numbers_str = [str(state) for state in state_numbers]
+            # state_string = "S"+"-".join(state_numbers_str)
+            data, data_col_names = self.operation(self.dimensions,
+                                             simulation_object,
+                                              state_numbers=
+                                              state_group,
+                                             **all_kwargs)
+            # extract the actual data and not auxiliary information
+            # which would be the same between different state groups
+            # due to same underlying space structure
+            for name, data_vals in data.items():
+                # data_col_names contains all names of the actual data
+                # which is different between state groups
+                if name in data_col_names:
+                    all_data[name+ "_" + group_name] = data_vals
+                else:
+                    # add auxiliary information once
+                    if name not in all_data.keys():
+                        all_data[name] = data_vals
+
 
         return all_data
 
@@ -767,7 +791,8 @@ class DataExtraction():
         return data_dict, all_data_columns
 
     def _operation_global(self, dimensions, simulation_object, properties,
-                                     state_numbers, regular_print, **kwargs):
+                          state_numbers, nucleation_states=False,
+                          **kwargs):
         """
         Get global properties of object in states.
         Args:
@@ -784,7 +809,10 @@ class DataExtraction():
         Returns:
 
         """
-        object_states = simulation_object.object_states
+        if nucleation_states:
+            object_states = simulation_object.creation_source.unsqueeze(0)
+        else:
+            object_states = simulation_object.object_states
 
         # if regular_print:
         #     object_states = simulation_object.object_states.unsqueeze(0)
@@ -831,7 +859,10 @@ class DataExtraction():
                 #     property_array = property.array.unsqueeze(0)
                 # else:
                 #     property_array = torch.concat(property.array_buffer)
-
+            # since nucleation states are only saved for end state of
+            # simulation, only used last timepoint of property array
+            if nucleation_states:
+                property_array = property_array[-1:]
             property_array[mask_inv] = float("nan")
             analysis_properties[name] = property_array
 
@@ -839,12 +870,17 @@ class DataExtraction():
         object_number = mask.sum(dim=1).unsqueeze(1)
         data_dict["number"] = object_number.cpu()
 
+        positions_array = dimensions[0].positions[0].array
+
+        if nucleation_states:
+            positions_array = positions_array[-1:]
+
         all_data_columns = ["number"]
         for name, values in analysis_properties.items():
             mean_values = values.nanmean(dim=1).unsqueeze(1)
             data_dict["mean_"+name] = mean_values.cpu()
             # get mean data for objects completely inside (position >= 0)
-            values[dimensions[0].positions[0].array < 0] = math.nan
+            values[positions_array < 0] = math.nan
             inside_mean_values = values.nanmean(dim=1).unsqueeze(1)
             data_dict["mean_inside_"+name] = inside_mean_values.cpu()
             data_dict["mass_"+name] = (mean_values.cpu() * object_number.cpu())
@@ -862,7 +898,7 @@ class DataExtraction():
 
 
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,
-                                    state_numbers=None, regular_print=False,
+                                    state_numbers=None,
                                     resolution=0.2, end_density=False,
                                     **kwargs):
         """
@@ -1516,7 +1552,7 @@ class StateTransition():
     def __init__(self, start_state=None, end_state=None, parameter=None,
                  transfer_property=None, properties_set_to_zero=None,
                  saved_properties=None, retrieved_properties=None,
-                 time_dependency = None, name=""):
+                 name=""):
         """
 
         Args:
@@ -1534,12 +1570,6 @@ class StateTransition():
                 State Objects for which values should be saved upon transition.
             retrieved_properties (Iterable): 1D Iterable (list, tuple) of
                 State Objects for which values should be saved upon transition.
-            time_dependency (func): Function that takes a torch tensor
-                containing the current timepoints as input and converts it to a
-                tensor of factors (using only pytorch functions)
-                to then be multiplied with the rates. It is recommended to have
-                the time dependency function range from 0 to 1, which makes the
-                supplied rates maximum rates.
             name (str): Name of transition, used for data export and readability
 
 
@@ -1549,7 +1579,6 @@ class StateTransition():
         self.parameter = parameter
         self.saved_properties = saved_properties
         self.retrieved_properties = retrieved_properties
-        self.time_dependency = time_dependency
         self.transfer_property = transfer_property
         self.properties_set_to_zero = properties_set_to_zero
         self.name = name
@@ -1583,14 +1612,14 @@ class ObjectCreation(StateTransition):
 
     def __init__(self, state, parameter, changed_start_values=None,
                  creation_on_objects=False, properties_for_creation=None,
-                 time_dependency=None, resources = None, name=""):
+                 resources = None,
+                 save_object_creation_source=False, name=""):
         """
 
         Args:
             state:
             parameter:
             changed_start_values: List or tuple of ChangedStartValue objects
-            time_dependency:
             creation_on_objects (Bool): Whether objects are created dependent
                 on other objects/object properties.
             properties_for_creation (List): List of Property objects on which
@@ -1606,12 +1635,12 @@ class ObjectCreation(StateTransition):
                 entry per transition. But only generating transitions with
                 defined resources will be tracked.
         """
-        super().__init__(end_state=state, parameter=parameter,
-                         time_dependency=time_dependency, name=name)
+        super().__init__(end_state=state, parameter=parameter)
         self.changed_start_values = changed_start_values
         self.creation_on_objects = creation_on_objects
         self.properties_for_creation = properties_for_creation
         self.resources = resources
+        self.save_object_creation_source = save_object_creation_source
 
 class ObjectCutting(ObjectCreation):
     """
@@ -1620,8 +1649,7 @@ class ObjectCutting(ObjectCreation):
     the state of objects or the number of objects in a state.
     """
     def __init__(self, states_before_cut, states_after_cut,
-                 parameter,  property_to_cut,
-                 time_dependency=None, resources = None, name=""):
+                 parameter,  property_to_cut, resources = None, name=""):
         """
 
         Args:
@@ -1646,7 +1674,6 @@ class ObjectCutting(ObjectCreation):
                 states_before_cut.
             parameter:
             property_to_cut (State object): Property where cutting can happen
-            time_dependency:
             resources (int): How many active transitions are allowed. This is
                 only implemented for generating new objects. The generation
                 process they originate from will be tracked in the object_state
@@ -1663,8 +1690,7 @@ class ObjectCutting(ObjectCreation):
                          changed_start_values = None,
                          creation_on_objects=True,
                          properties_for_creation=[property_to_cut],
-                         resources = resources,
-                         time_dependency=time_dependency, name=name)
+                         resources = resources, name=name)
 
         self.states_before_cut = states_before_cut
         self.states_after_cut = states_after_cut
