@@ -437,10 +437,13 @@ class SSA():
             transition_parameters[nb, 0] = transition.parameter.number
             if transition.resources is not None:
                 transition_parameters[nb, 1] = transition.resources.number
-                transition_parameters[nb, 2] = 1
-            if (hasattr(transition, "save_object_creation_sources") & 
-                    (transition.start_state == 0)):
-                if transition.save_object_creation_source:
+            if (hasattr(transition, "inherit_creation_source") &
+                    (transition.start_state is None)):
+                if transition.inherit_creation_source:
+                    transition_parameters[nb, 2] = 2
+            if (hasattr(transition, "track_creation_sources") &
+                    (transition.start_state is None)):
+                if transition.track_creation_sources:
                     transition_parameters[nb, 2] = 1
         return transition_parameters
 
@@ -1867,7 +1870,7 @@ class SSA():
         #     print(parameter.name, parameter.number)
         #     print(parameter.value_array)
         #     print(parameter.value_array.shape)
-        print(total_density.shape)
+
 
         sim[nb_SM,
          nb_cc](object_states_batch, #int32[:,:,:]
@@ -1967,18 +1970,18 @@ class SSA():
         self.object_states = object_states_batch[3:]
         self.creation_source = object_states_batch[2]
 
-        print(np.unique(object_states_batch[0]))
-        print(len(np.where(object_states_batch[0,:,0,0] == 1)[0]),
-              len(np.where(object_states_batch[0,:,0,0] == 2)[0]),
-              len(np.where(object_states_batch[0,:,0,0] == 3)[0]),
-              len(np.where(object_states_batch[0,:,0,0] == 4)[0]),
-              len(np.where(object_states_batch[0,:,0,0] == 5)[0]))
-        print(np.nanmax(np.array(property_array_batch[0,0,:,0,0])),
-              np.nanmin(np.array(property_array_batch[0,0,:,0,0])))
-        print(np.nanmax(np.array(property_array_batch[0,1,:,0,0])),
-              np.nanmin(np.array(property_array_batch[0,1,:,0,0])))
-        print(np.nanmax(np.array(property_array_batch[0,2,:,0,0])),
-              np.nanmin(np.array(property_array_batch[0,2,:,0,0])))
+        # print(np.unique(object_states_batch[0]))
+        # print(len(np.where(object_states_batch[0,:,0,0] == 1)[0]),
+        #       len(np.where(object_states_batch[0,:,0,0] == 2)[0]),
+        #       len(np.where(object_states_batch[0,:,0,0] == 3)[0]),
+        #       len(np.where(object_states_batch[0,:,0,0] == 4)[0]),
+        #       len(np.where(object_states_batch[0,:,0,0] == 5)[0]))
+        # print(np.nanmax(np.array(property_array_batch[0,0,:,0,0])),
+        #       np.nanmin(np.array(property_array_batch[0,0,:,0,0])))
+        # print(np.nanmax(np.array(property_array_batch[0,1,:,0,0])),
+        #       np.nanmin(np.array(property_array_batch[0,1,:,0,0])))
+        # print(np.nanmax(np.array(property_array_batch[0,2,:,0,0])),
+        #       np.nanmin(np.array(property_array_batch[0,2,:,0,0])))
 
         self.times = (times_batch * time_resolution.copy_to_host())
         self.times = self.times.unsqueeze(1).to(self.device)

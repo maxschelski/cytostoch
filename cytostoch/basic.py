@@ -1631,10 +1631,10 @@ class ObjectCreation(StateTransition):
     """
 
     def __init__(self, state, parameter, changed_start_values=None,
-                 creation_on_objects=False, inherit_orientation=None,
+                 creation_on_objects=False, inherit_creation_source=None,
                  properties_for_creation=None,
                  resources = None,
-                 save_object_creation_source=False, name=""):
+                 track_creation_sources=False, name=""):
         """
 
         Args:
@@ -1659,11 +1659,14 @@ class ObjectCreation(StateTransition):
         super().__init__(end_state=state, parameter=parameter)
         self.changed_start_values = changed_start_values
         self.creation_on_objects = creation_on_objects
-        if (inherit_orientation is None) & creation_on_objects:
-            self.inherit_orientation = True
+        print(inherit_creation_source, creation_on_objects)
+        if (inherit_creation_source is None) & creation_on_objects:
+            self.inherit_creation_source = True
+        else:
+            self.inherit_creation_source = inherit_creation_source
         self.properties_for_creation = properties_for_creation
         self.resources = resources
-        self.save_object_creation_source = save_object_creation_source
+        self.track_creation_sources = track_creation_sources
 
 class ObjectCutting(ObjectCreation):
     """
