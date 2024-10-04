@@ -4527,72 +4527,111 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                                           sim_id, param_id]
                 property_nb += 1
 
-            end = start
-            index = 0
-            while index < target_property_nbs.shape[0]:
-                property_nb = int(target_property_nbs[index])
-                if math.isnan(property_nb):
-                    break
-                end += properties_array[0, property_nb, object_position,
-                                        sim_id, param_id]
-                index += 1
+            # start has to be before the end of the x pos range
+            if start < ((x_pos + 2) * local_resolution):
 
-            # end = start + properties_array[0, target_property_nb,
-            #                                object_position,
-            #                                sim_id, param_id]
-            start_min = max(-local_resolution, start)
-            if (end - start_min) > 0:
-                if ((end > (x_pos - 1) * local_resolution)):
-                    # increase density_sum by fraction of
-                    # the range filled by the property values
-                    # of the current object
-                    # allow a maximum of 1 to be added
-                    # if end is until the end of the range
-
-                    density = 1
-                    # the start point is not actually at the very
-                    # beginning of the resolution but after that
-                    # therefore the added density is below 1 for the
-                    # first position. Subtract the relative amount of
-                    # the local resolution that the object starts
-                    # after the x_pos
-                    x_um = (x_pos + 1) * local_resolution
-                    density -= max(0, ( 1 -
-                                 max(0, (x_um - start_min)
-                                     / local_resolution)))
-                    # for the x bin in which the MT ended, don't add a
-                    # full MT but just the relative amount of the bin
-                    # crossed by the MT
-                    x_um = x_pos * local_resolution
-                    density -= max(0, ((x_um - end) /
-                                       local_resolution))
-                    length_in_range = density * local_resolution
-                    # length_in_range = min(1,
-                    #                    (end - x_pos *
-                    #                     local_resolution)
-                    #                    / local_resolution)
-                    # length_in_range -= max(0, min(1,
-                    #                            (start - (x_pos-1) *
-                    #                             local_resolution) /
-                    #                            local_resolution))
-                    # if (sim_id == 2) & (core_id == 0):
-                    #     print(density_sum, length_in_range,
-                    #           x_um, start, end,
-                    #           (x_um - start), (x_um - end),
-                    #           local_density_here
-                    #           )
-                    density_sum += length_in_range
-                    # subtract a maximum of 1 if the start
-                    # is at the end of the range
-                    if round(density_sum,6) >= round(threshold,6):
+                end = start
+                index = 0
+                while index < target_property_nbs.shape[0]:
+                # while index < properties_array.shape[1]:
+                    property_nb = int(target_property_nbs[index])
+                    # property_nb = index
+                    if math.isnan(property_nb):
                         break
+                    if not math.isnan(properties_array[0, property_nb,
+                                                       object_position,
+                                                       sim_id, param_id]):
+                        end += properties_array[0, property_nb, object_position,
+                                                sim_id, param_id]
+                    index += 1
+
+                # end has to be after the beginning of the range
+                if end > ((x_pos-2) * local_resolution):
+                    # end = start + properties_array[0, target_property_nb,
+                    #                                object_position,
+                    #                                sim_id, param_id]
+                    start_min = max(-local_resolution, start)
+                    if (end - start_min) > 0:
+                        # if ((end > (x_pos - 1) * local_resolution)):
+                        # increase density_sum by fraction of
+                        # the range filled by the property values
+                        # of the current object
+                        # allow a maximum of 1 to be added
+                        # if end is until the end of the range
+
+                        density = 1
+                        # the start point is not actually at the very
+                        # beginning of the resolution but after that
+                        # therefore the added density is below 1 for the
+                        # first position. Subtract the relative amount of
+                        # the local resolution that the object starts
+                        # after the x_pos
+
+                        density -= max(0,min(1,((start -
+                                     x_pos * local_resolution) /
+                                    local_resolution)))
+                        # density -= ( 1 -
+                        #              (x_pos * local_resolution - start)
+                        #              / local_resolution)
+                        # for the x bin in which the MT ended, don't add a
+                        # full MT but just the relative amount of the bin
+                        # crossed by the MT
+                        # x_um = x_pos * local_resolution
+                        # density -= ((x_pos * local_resolution - end) / local_resolution)
+                        density -= max(0, min(1,(1 - ((end - x_pos *
+                                          local_resolution) /
+                                         local_resolution))))
+
+                        # x_um = (x_pos + 1) * local_resolution
+                        # density -= max(0, ( 1 -
+                        #              max(0, (x_um - start_min)
+                        #                  / local_resolution)))
+                        # # for the x bin in which the MT ended, don't add a
+                        # # full MT but just the relative amount of the bin
+                        # # crossed by the MT
+                        # # x_um = x_pos * local_resolution
+                        # density -= max(0, min(1,
+                        #                       ((x_um - end) /
+                        #                        local_resolution)))
+                        length_in_range = density * local_resolution
+                        # length_in_range = min(1,
+                        #                    (end - x_pos *
+                        #                     local_resolution)
+                        #                    / local_resolution)
+                        # length_in_range -= max(0, min(1,
+                        #                            (start - (x_pos-1) *
+                        #                             local_resolution) /
+                        #                            local_resolution))
+                        # if (sim_id == 2) & (core_id == 0):
+                        #     print(density_sum, length_in_range,
+                        #           x_um, start, end,
+                        #           (x_um - start), (x_um - end),
+                        #           local_density_here
+                        #           )
+                        density_sum += length_in_range
+                        # subtract a maximum of 1 if the start
+                        # is at the end of the range
+                        if round(density_sum,6) >= round(threshold,6):
+                            break
+                        # if (length_in_range == 0) | (length_in_range < 0):
+                        #     print(11223344, length_in_range,
+                        #           x_pos, start_min, end)
+
+                        # if ((round(density_sum, 6) < round(threshold, 6)) &
+                        #         (core_id == 0) & (sim_id == 2)):
+                        #     print(11223366, length_in_range,
+                        #           x_pos*local_resolution, start_min, end,
+                        #           density_sum, threshold, length_in_range,
+                        #           local_density_here)
         object_position += 1
 
-        if ((round(density_sum, 6) < round(threshold, 6)) &
-                (core_id == 0) & (sim_id == 2)):
-            print(78910, object_position,
-                  density_sum, threshold, length_in_range,
-                  local_density_here, x_pos)
+    if ((round(density_sum, 6) < round(threshold, 6)) &
+            (core_id == 0) & (sim_id == 2)):
+        print(78910, object_position,
+              density_sum, threshold, length_in_range,
+              local_density_here)
+    # elif (core_id == 0) & (sim_id == 2):
+    #     print(11111)
 
     return object_position, length_in_range, start
 

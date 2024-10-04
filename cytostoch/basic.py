@@ -663,8 +663,8 @@ class DataExtraction():
         return all_data
 
 
-    def _length_distribution(self, dimensions, simulation_object, properties, state_numbers,
-                             max_length,
+    def _length_distribution(self, dimensions, simulation_object, properties,
+                             state_numbers, max_length,
                              first_last_idx_with_object,
                              bin_size=None, nb_bins=None,
                              **kwargs):
@@ -1659,7 +1659,6 @@ class ObjectCreation(StateTransition):
         super().__init__(end_state=state, parameter=parameter)
         self.changed_start_values = changed_start_values
         self.creation_on_objects = creation_on_objects
-        print(inherit_creation_source, creation_on_objects)
         if (inherit_creation_source is None) & creation_on_objects:
             self.inherit_creation_source = True
         else:

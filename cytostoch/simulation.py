@@ -68,9 +68,11 @@ class SSA():
                 need to be defined
             transitions (list of StateTransition objects):
             properties (list of ObjectProperty objects): Order of object
-                properties in list is important if a Geometry object is supplied
+                properties in list is important since it determines the physical
+                order of the properties in objects.
+                Order is particularly important if a Geometry object is supplied
                 for an object property (min, max, start or initial condition),
-                then the object property that is a parameter to Geometry
+                then the object property which is a parameter to Geometry
                 must be in the list before the property that contains the
                 Geometry (e.g. the property "length" has a Geometry object based
                 on the property "position", then the property "position" needs
@@ -430,6 +432,16 @@ class SSA():
     def _get_transition_parameters(self):
         # - all transition rates
         nb_transitions = len(self.transitions)
+        # check if any of the creation sources should be tracked.
+        # if not, no creation source has to be inherited either
+        any_creation_source_tracked = False
+        for nb, transition in enumerate(self.transitions):
+            if (hasattr(transition, "track_creation_sources") &
+                    (transition.start_state is None)):
+                if transition.track_creation_sources:
+                    any_creation_source_tracked = True
+                    break
+
         # the first dimension is the number of the parameter for the rate
         # the second dimensions is the number of the parameter for resources
         transition_parameters = np.full((nb_transitions, 3), np.nan)
@@ -438,7 +450,8 @@ class SSA():
             if transition.resources is not None:
                 transition_parameters[nb, 1] = transition.resources.number
             if (hasattr(transition, "inherit_creation_source") &
-                    (transition.start_state is None)):
+                    (transition.start_state is None) &
+                    any_creation_source_tracked):
                 if transition.inherit_creation_source:
                     transition_parameters[nb, 2] = 2
             if (hasattr(transition, "track_creation_sources") &
@@ -553,9 +566,12 @@ class SSA():
                     properties_to_add = []
                     for (prop_nb,
                          property) in enumerate(properties_for_creation):
-                        creation_on_objects[transition_nb, 0,
-                                            prop_nb] = property.number
                         properties_to_add.append(property.number)
+                    # sort properties according to number before adding them!
+                    properties_to_add.sort(key=int)
+                    for prop_nb, property_nb in enumerate(properties_to_add):
+                        creation_on_objects[transition_nb, 0,
+                                            prop_nb] = property_nb
                     # check whether there is the need to calculate separate
                     # densities (based on different properties)
                     if len(properties_to_add) < len(self.properties):
@@ -569,6 +585,7 @@ class SSA():
                                             prop_nb] = property.number
                     all_properties_for_creation.update(
                         list(range(len(self.properties))))
+
 
             # check if the transition has attributes needed for cutting
             if ((not hasattr(transition, "states_before_cut")) &
@@ -1870,7 +1887,10 @@ class SSA():
         #     print(parameter.name, parameter.number)
         #     print(parameter.value_array)
         #     print(parameter.value_array.shape)
-
+        # print(transition_parameters)
+        # dasd
+        # print(creation_on_objects)
+        # dasd
 
         sim[nb_SM,
          nb_cc](object_states_batch, #int32[:,:,:]
@@ -2523,6 +2543,10 @@ class SSA():
                     if not global_data:
                         plt.plot(plot_data_param,
                                  label=param_val_string)
+                        if sub_name.find("length") != -1:
+                            plt.yscale("log")
+                        else:
+                            plt.yscale("linear")
                         plt.grid(visible=True)
                         max_y = max(max_y, plt.ylim()[1])
                         all_axs.append(plt.gca())
