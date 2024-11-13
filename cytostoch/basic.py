@@ -225,6 +225,84 @@ def _get_local_and_total_density(local_density,
             object_pos += 1
         current_sim_nb += nb_processes
 
+
+@numba.cuda.jit
+def _reorder_lifetime_data(object_lifetime_array,
+                           new_object_lifetime_array,
+                           positions_array,
+                           local_resolution,
+                           start_nb_object, end_nb_object,
+                           nb_parallel_cores):
+
+    nb_processes = numba.cuda.gridsize(1)
+    thread_id = numba.cuda.grid(1)
+    grid = numba.cuda.cg.this_grid()
+
+    # reassign_threads_time_step_size = 0.1
+    # min_time_diff_for_reassigning = 0.1
+    # nb_reassigned_threads = 1
+    # rel_time_reassignment_check = 0.1
+
+    total_nb_simulations = (object_lifetime_array.shape[-2] *
+                            object_lifetime_array.shape[-1] *
+                            nb_parallel_cores)
+    # print(cuda.gridsize(1), total_nb_simulations)
+    current_sim_nb = thread_id
+
+    while current_sim_nb < total_nb_simulations:
+
+        param_id = int(math.floor(current_sim_nb /
+                                  (object_lifetime_array.shape[-2] *
+                                   nb_parallel_cores)))
+        sim_id = int(math.floor((current_sim_nb -
+                                 param_id * object_lifetime_array.shape[-2] *
+                                 nb_parallel_cores)
+                                / nb_parallel_cores))
+        core_id = int(current_sim_nb -
+                      param_id * object_lifetime_array.shape[-2] * nb_parallel_cores -
+                      sim_id * nb_parallel_cores)
+
+        (object_pos,
+         last_object_pos) = _get_first_and_last_object_pos(end_nb_object -
+                                                           start_nb_object,
+                                                           nb_parallel_cores,
+                                                           core_id)
+
+        object_pos += start_nb_object
+        index = 0
+        # go through each object
+        while object_pos < (last_object_pos):
+            start_found = False
+            local_object_pos = 0
+            # go through each segment of the object
+            while index < object_lifetime_array.shape[1]:
+                lifetime = object_lifetime_array[object_pos, local_object_pos,
+                                                 sim_id, param_id]
+                # if lifetime is nan, the end of the object is reached
+                if math.isnan(lifetime):
+                    break
+
+                if start_found:
+                    # start adding lifetimes once the index is positive,
+                    # which indicates that the object is now in the compartment
+                    if index >= 0:
+                        new_object_lifetime_array[object_pos, int(index),
+                                                  sim_id, param_id] = lifetime
+                    index += 1
+
+                # lifetime of 0 indicates the start of the object, which can be
+                # at any index in the array
+                if lifetime == 0:
+                    start_found = True
+                    # set the index as the start position of the object
+                    position = positions_array[0, object_pos, sim_id, param_id]
+                    position = math.floor(position / local_resolution)
+                    index = position
+
+                local_object_pos += 1
+            object_pos += 1
+        current_sim_nb += nb_processes
+
 def _run_operation_2D_to_1D_density_numba(sim_id, param_id, object_states, properties_array, times,
                                            transition_rates_array, all_transition_states,
                                            action_values, action_state_array,
@@ -558,6 +636,8 @@ class DataExtraction():
         implemented_operations["raw"] = self._operation_raw
         implemented_operations["global"] = self._operation_global
         implemented_operations["length_distribution"] = self._length_distribution
+        implemented_operations["lifetime_to_density"] = self._2D_lifetime_to_1D_density
+
 
         if type(operation) == str:
             if operation not in implemented_operations:
@@ -895,6 +975,137 @@ class DataExtraction():
         data_dict["position"] = dimensions[0].positions[0].array.cpu()
         data_dict["length"] = dimensions[0].length.array.cpu()
         return data_dict
+
+    def _2D_lifetime_to_1D_density(self, dimensions, simulation_object,
+                                   rate,
+                                    state_numbers=None,
+                                    **kwargs):
+
+        lifetime_array = simulation_object.local_object_lifetime_array
+
+        position_array = 0
+        for position in dimensions[0].positions:
+            position_array = position_array + position.array
+
+        object_states = simulation_object.object_states
+        if state_numbers is not None:
+            # get mask for all objects in defined state
+            # if regular_print:
+            #     object_states = simulation_object.object_states
+            # else:
+            #     object_states = torch.concat(simulation_object.object_states_buffer)
+            mask = torch.zeros_like(object_states).to(torch.bool)
+            mask_inv = torch.full(object_states.shape, 1).to(torch.bool)
+            for state in state_numbers:
+                mask = (mask | (object_states == state))
+                mask_inv = (mask_inv & (object_states != state))
+
+            # get the maximum number of objects that should be analyzed
+            # (from all simulations)
+            # first sort mask so that first in the matrix there are all True
+            # elements
+            mask_sorted, idx = torch.sort(mask.to(torch.int), dim=1,
+                                          stable=True, descending=True)
+            # the first position that is not True is the sum of all True
+            # elements across the first dim
+            first_false_position = torch.count_nonzero(mask_sorted, dim=1)
+            # then get the maximum of all simulations
+            max_nb_objects = first_false_position.max()
+
+            idx = idx.to("cuda")
+
+            # set all properties of objects outside of mask to NaN
+            # also use the maximum number of objects of interest for all
+            # simulations, to discard all parts of the sorted array that only
+            # contains objects which are not of interest
+            position_array[mask_inv] = float("nan")
+            position_array = torch.gather(position_array, dim=1,
+                                          index=idx)
+            position_array = position_array[:, :max_nb_objects]
+
+            lifetime_array = torch.gather(lifetime_array.cuda(), dim=1,
+                                          index=idx)
+            lifetime_array = lifetime_array[:max_nb_objects]
+        else:
+            first_false_position = torch.count_nonzero(object_states, dim=1)
+            max_nb_objects = first_false_position.max()
+
+        resolution = simulation_object.local_resolution
+
+        to_cuda = lambda x: numba.cuda.to_device(np.ascontiguousarray(x))
+
+        new_object_lifetime_array = to_cuda(np.full(lifetime_array.shape,
+                                                    np.nan))
+        # Lifetimes are organized so that the start point of an object is marked
+        # by a preceding 0 in the array. Thus, the start point for objects
+        # might be at different indices.
+        # First resort the lifetimes array so that the first index is the first
+        # value for the object
+        nb_parallel_cores = 32
+
+        print(resolution, nb_parallel_cores, max_nb_objects)
+
+        nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
+        _reorder_lifetime_data[nb_SM, nb_cc](to_cuda(lifetime_array.cpu()),
+                                               new_object_lifetime_array,
+                                               to_cuda(position_array.cpu()),
+                                               resolution,
+                                               0, int(max_nb_objects),
+                                               nb_parallel_cores)
+        cuda.synchronize()
+        # use the supplied rate of the modification to transform
+        # the local object lifetime to the amount of modification
+        new_object_lifetime_array = new_object_lifetime_array.copy_to_host()
+
+        # print(lifetime_array[:10,:10,0,0])
+        # print(position_array[0,:10,0,0])
+        # print(new_object_lifetime_array[:10,:10,0,0])
+        # to get the lifetime, calculate the difference of the end time of
+        # the simulation and the start time of the object segment
+        new_object_lifetime_array = (simulation_object.min_time -
+                                     new_object_lifetime_array)
+
+        # print(new_object_lifetime_array[:10,:10,0,0])
+        # assume very simple rate based modifications with initial condition
+        # 0 for the modification and initial condition 1 for the not modified
+        modified = 1 - np.exp(-rate *
+                                   new_object_lifetime_array)
+
+        unmodified = 1 - modified
+
+        # sum modifications across all objects to get sum of modifications
+        # at each position
+        modified = np.nansum(modified, axis=0)
+        unmodified = np.nansum(unmodified, axis=0)
+
+        positions = torch.arange(0,
+                                 modified.shape[1] * resolution,  # + resolution * 0.9,
+                                 resolution)
+
+        dimensions = [-1] + [1] * (len(modified.shape) - 2)
+        positions = positions.view(*dimensions)
+        positions = positions.unsqueeze(0).expand([modified.shape[0],
+                                                   *positions.shape])
+
+        data_dict = {}
+        data_dict["1D_density_position"] = positions
+        print(modified.shape)
+        print(unmodified.shape)
+
+        data_dict["1D_density_modified"] = torch.Tensor(modified).unsqueeze(0)
+        data_dict["1D_density_unmodified"] = torch.Tensor(unmodified).unsqueeze(0)
+        del positions
+
+        # mean = modified.mean(axis=1)
+        # plt.figure()
+        # plt.plot(mean)
+        #
+        # mean = unmodified.mean(axis=1)
+        # plt.figure()
+        # plt.plot(mean)
+        # dasd
+
+        return data_dict, ["1D_density"]
 
 
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,

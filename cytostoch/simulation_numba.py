@@ -57,6 +57,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                             tau_square_eq_terms,
 
                             first_last_idx_with_object,
+                                     local_object_lifetime_array,
 
                             timepoint_array,
                             time_resolution, min_time, start_save_time,
@@ -304,6 +305,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                                          tau_square_eq_terms,
 
                                         first_last_idx_with_object,
+                                     local_object_lifetime_array,
 
                                        timepoint_array, min_time,
                                          start_save_time,
@@ -363,6 +365,8 @@ def _execute_simulation_gpu(object_states, properties_array, times,
 
             if success == 2:
                 current_sim_nb += nb_processes
+                # if core_id == 0:
+                #     print(100000, iteration_nb)
                 break
 
             # if (sim_id == 0) & (not re_assigned):
@@ -671,6 +675,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                             tau_square_eq_terms,
 
                             first_last_idx_with_object,
+                                     local_object_lifetime_array,
 
                         timepoint_array,
                         time_resolution, min_time, save_initial_state,
@@ -761,6 +766,7 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                                      tau_square_eq_terms,
 
                                      first_last_idx_with_object,
+                                     local_object_lifetime_array,
 
                                        timepoint_array, min_time,
                                        time_resolution, save_initial_state,
@@ -873,6 +879,7 @@ def _run_iteration(object_states, properties_array , times,
                    tau_square_eq_terms,
 
                    first_last_idx_with_object,
+                   local_object_lifetime_array,
 
                    timepoint_array, min_time, start_save_time,
                    time_resolution, save_initial_state,
@@ -1067,7 +1074,11 @@ def _run_iteration(object_states, properties_array , times,
         _execute_actions_on_objects(parameter_value_array, action_parameters,
                                     action_state_array,
                                     properties_array ,
+                                nb_objects_all_states,
                                     property_extreme_values,
+
+                                    local_object_lifetime_array,
+                                    local_resolution,
 
                                     all_action_properties,
                                     action_operation_array,
@@ -1112,7 +1123,11 @@ def _run_iteration(object_states, properties_array , times,
     _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 action_state_array,
                                 properties_array ,
+                                nb_objects_all_states,
                                 property_extreme_values,
+
+                                local_object_lifetime_array,
+                                local_resolution,
 
                                 all_action_properties,
                                 action_operation_array,
@@ -1212,6 +1227,8 @@ def _run_iteration(object_states, properties_array , times,
                             creation_on_objects,
                           first_last_idx_with_object,
 
+                          local_object_lifetime_array,
+
                           local_density, total_density,
                           local_resolution,
                           density_threshold_boundaries,
@@ -1228,6 +1245,8 @@ def _run_iteration(object_states, properties_array , times,
                     nb_objects_all_states, transition_parameters,
                     object_states, properties_array,
                     first_last_idx_with_object,
+                    local_object_lifetime_array, times,
+                    local_resolution,
                     nb_parallel_cores,  core_id, sim_id, param_id)
 
     if core_id == 0:
@@ -1267,6 +1286,12 @@ def _decorate_all_functions_for_cpu():
     # if not isinstance(_execute_simulation_cpu,
     #                   numba.core.registry.CPUDispatcher):
     #     _execute_simulation_cpu = numba.njit(_execute_simulation_cpu)
+
+    global _track_object_property_changes
+    if not isinstance(_track_object_property_changes,
+                      numba.core.registry.CPUDispatcher):
+        _track_object_property_changes = numba.njit(
+            _track_object_property_changes)
 
     global _get_rate_of_density_dependent_transition
     if not isinstance(_get_rate_of_density_dependent_transition,
@@ -1415,6 +1440,13 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
         _run_iteration = numba.cuda.jit(_run_iteration, debug=debug, opt=opt,
                                         fastmath=fastmath, lineinfo=lineinfo,
                                             device=True)
+
+    global _track_object_property_changes
+    if not isinstance(_track_object_property_changes,
+                      numba.cuda.dispatcher.CUDADispatcher):
+        _track_object_property_changes = numba.cuda.jit(
+            _track_object_property_changes, debug=debug, opt=opt,
+            fastmath=fastmath, lineinfo=lineinfo, device=True)
 
     global _get_rate_of_density_dependent_transition
     if not isinstance(_get_rate_of_density_dependent_transition,
@@ -2792,7 +2824,7 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
             #
             #                                 rate_diff)
 
-            # if (transition_nb == 6):
+            # if (transition_nb == 13) & (final_rate != 0):
             #     print(final_rate, rate_diff, base_value,
             #           end_position, max_position, position_diff,
             #           param_prop_dependence[0], param_prop_dependence[1],
@@ -2801,6 +2833,12 @@ def _get_rate_of_prop_dependent_transition(param_prop_dependence,
             #                                   int(timepoint_array[0, sim_id,
             #                                                       param_id]),
             #                                   param_id],
+            #           parameter_value_array[int(
+            #               param_prop_dependence[4]),
+            #                                 int(timepoint_array[
+            #                                         0, sim_id,
+            #                                         param_id]),
+            #                                 param_id]
             #           # param_prop_dependence[6], # 0 for linear
             #           # param_prop_dependence[2], # 0 for absolute change
             #           # param_prop_dependence[4] # change value, nan for none defined
@@ -3455,7 +3493,7 @@ def _determine_positions_of_transitions(current_transitions,
             # go through all objects, check which one is in the start_state
             # and then choose the nth (n=random_object_pos) object that is in
             # the start_state
-            while object_pos <= first_last_idx_with_object[1,sim_id, param_id]+20:# object_states.shape[0]:#
+            while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:# object_states.shape[0]:#
                 # if object_state > 4:
                 #     print(555, object_state, object_pos)
                 if (object_states[0, object_pos, sim_id, param_id] ==
@@ -3545,10 +3583,158 @@ def _determine_positions_of_transitions(current_transitions,
     return
 
 
+def _track_object_property_changes(object_nb, property_nb, new_value,
+                                   properties_array, local_object_lifetime_array,
+                                   local_resolution, times,
+                                   sim_id, param_id):
+    """
+    Whenever a property is changed, a function with the property number, the
+    previous property value and the new property value should be executed.
+    For multiple property values changing, first the property closest
+    to the tip has to be changed (highest property number).
+
+    Lifetime tracking does not work well if some populations move retrogradely
+    and some anterogradely
+	If an object would move out of the system at one open end, the lifetime
+	information there might be overwritten (if the length of the object is
+	larger than the system length). When the object (once transitioned to a
+	different population) would move in again, the lifetime information is lost
+	already and cant be recovered - leaving a section of the object in the
+	system without a lifetime.
+    """
+    # check if lifetime should be tracked by checking that the length of
+    # the first and second index is not 1 (which would mean only one MT and
+    # only one length segment allowed, but is actually used as a placeholder
+    # when lifetime should not be tracked)
+    if ((local_object_lifetime_array.shape[0] == 1) &
+            (local_object_lifetime_array.shape[1] == 1)):
+        return
+    # if the changed property is the position (property_nb == 0), no lifetime
+    # change needs to be tracked since the actual MT is not changing
+    if property_nb == 0:
+        return
+
+    # get start point for current property change
+    # first add all properties before the current property_nb
+    base = 0
+    # start adding from property_nb 1, since the position does not matter
+    # for the timestamp
+    start_property_nb = 1
+    while start_property_nb < property_nb:
+        if not math.isnan(properties_array[0, start_property_nb, object_nb,
+                                           sim_id, param_id]):
+            base += properties_array[0, start_property_nb, object_nb, sim_id,
+                                      param_id]
+        start_property_nb += 1
+
+    # then add the old property value
+    start = base
+    if not math.isnan(properties_array[0, int(property_nb),
+                                       int(object_nb), sim_id, param_id]):
+        start += properties_array[0, int(property_nb),
+                                    int(object_nb), sim_id, param_id]
+
+    # the end point is the base value plus the new value
+    end = base + new_value
+
+    # the first index in local_object_lifetime_array is nan, indicating the
+    # start of the object (this is relevant, once the object length exceeds
+    # the system length through moving out of an open end of the system
+
+    # add one, since one idx is used as a marker for the beginning of the object
+    # (with a 0 value)
+    start_idx = math.floor(start / local_resolution)
+    if end == 0:
+        end_idx = 0
+    else:
+        end_idx = math.floor(end / local_resolution) + 1
+
+    # if (start_idx != end_idx) & (object_nb == 0):
+    #     print(start_idx, end_idx,
+    #           properties_array[0, int(property_nb),
+    #                            int(object_nb), sim_id, param_id],
+    #           new_value
+    #           )
+
+    # change timestamp, if object moved out of an index (for both directions)
+    # if end is larger than start, add timestamps
+    if end_idx > start_idx:
+        # only start filling after the start index, but until the end_idx
+        start_idx += 1
+        while start_idx <= end_idx:
+            # if the current idx is larger than the size of the lifetime array
+            # start again from the beginning of the lifetime array, by
+            # subtracting the highest full multiple of the lifetime array size
+            # that still keeps the index positive
+            if start_idx >= local_object_lifetime_array.shape[1]:
+                # print(11, start_idx, end_idx,
+                #       properties_array[0, int(property_nb),
+                #                        int(object_nb), sim_id, param_id],
+                #       new_value
+                #       )
+                # by subtracting both from start_idx and end_idx,
+                # this calculation only needs to be done at the transition
+                # beyond the size of the array
+                end_idx -= int(math.floor(start_idx /
+                                            local_object_lifetime_array.shape[1]
+                                            ) *
+                               local_object_lifetime_array.shape[1])
+                start_idx -= int(math.floor(start_idx /
+                                            local_object_lifetime_array.shape[1]
+                                            ) *
+                                            local_object_lifetime_array.shape[1]
+                                 )
+                # if the last index is reached, add the marker for the
+                # beginning of the part of the MT in the neurite again (0 value)
+                # if start_idx + 1 is larger than the lifetime array size
+                # add the separator at the beginning of the array (idx 0)
+                if (start_idx + 1) == local_object_lifetime_array.shape[1]:
+                    local_object_lifetime_array[object_nb, 0,
+                                                sim_id, param_id] = 0
+                # otherwise set the separator one index after the start_idx
+                if start_idx == end_idx:
+                    local_object_lifetime_array[object_nb, int(start_idx) + 1,
+                                                sim_id, param_id] = 0
+
+            local_object_lifetime_array[object_nb, int(start_idx),
+                                        sim_id,
+                                        param_id] = times[0, sim_id,
+                                                                    param_id]
+            start_idx += 1
+    else:
+        # if end is smaller than start, remove timestamps
+         # start removing at the start_index, but don't include the end_idx
+         # (since it is still in the end_idx
+        while start_idx > end_idx:
+            # if the current idx is larger than the size of the lifetime array
+            # start again from the beginning of the lifetime array, by
+            # subtracting the highest full multiple of the lifetime array size
+            # that still keeps the index positive
+            if start_idx >= local_object_lifetime_array.shape[1]:
+                start_idx_tmp = start_idx - int(math.floor(start_idx /
+                                            local_object_lifetime_array.shape[1]
+                                            ) *
+                                 local_object_lifetime_array.shape[1])
+                # print(22, start_idx, end_idx,
+                #       properties_array[0, int(property_nb),
+                #                        int(object_nb), sim_id, param_id],
+                #       new_value
+                #       )
+            else:
+                start_idx_tmp = start_idx
+            local_object_lifetime_array[object_nb, int(start_idx_tmp),
+                                        sim_id, param_id] = np.nan
+            start_idx -= 1
+
+
 def _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 action_state_array,
-                                properties_array ,
+                                properties_array,
+                                nb_objects_all_states,
                                 property_extreme_values,
+
+                                local_object_lifetime_array,
+                                local_resolution,
 
                                 all_action_properties,
                                 action_operation_array,
@@ -3623,68 +3809,6 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     #     print(33, property_nb, new_property_val, property_val,
                     #           action_operation, current_action_value)
 
-                    # check whether property is below min
-                    # if there is just one non-nan value in min_value
-                    # then this is the min_value
-                    # if there are multiple non-nan values in min_value
-                    # then these are property numbers, except
-                    # for the first value, which is threshold
-                    # and the second value, which is the operation
-                    # (-1 for subtracting other property values from the current
-                    #  property value before comparing to the threshold,
-                    #  and +1 for adding other property values to the current
-                    #  property, before comparing to the threshold)
-                    min_value = property_extreme_values[0, int(property_nb)]
-                    if math.isnan(min_value[0]):
-                        threshold = math.nan
-                    else:
-                        threshold = parameter_value_array[int(min_value[0]),
-                                                          int(timepoint_array[
-                                                            0, sim_id, param_id]),
-                                                          param_id]
-
-                    # if the second index is 0, then the threshold is not closed
-                    # therefore it just defines geometry and is not enforced
-                    if min_value[1] == 0:
-                        threshold = math.nan
-                    elif len(min_value) == 2:
-                        # this case would mean that the threshold is closed
-                        # but that the extreme properties do not depend on other
-                        # properties (therefore min_value is not longer than 2)
-                        threshold = threshold
-                    elif math.isnan(min_value[2]):
-                        # this is the same case as before, but it is indicated
-                        # by a nan value at the second index. Therefore
-                        # there are no properties defined on which the
-                        # threshold depends (but other properties have more
-                        #  values defined, which is why the dimension in the
-                        #  array is longer, therefore min_value is longer)
-                        threshold = threshold
-                    else:
-                        min_value_nb = 3
-                        while min_value_nb < len(min_value):
-                            val_property_nb = min_value[min_value_nb]
-                            if math.isnan(val_property_nb):
-                                break
-                            # if property values are added, the threshold should
-                            # be reduced by the other property values
-                            # (since higher other property values means that the
-                            # threshold "is reached earlier")
-                            if min_value[2] == 1:
-                                threshold = threshold - properties_array[
-                                    0, int(val_property_nb), object_pos,
-                                    sim_id, param_id]
-                            if min_value[2] == -1:
-                                threshold = threshold + properties_array[0, int(val_property_nb),
-                                                                         object_pos,
-                                                                         sim_id,
-                                                                         param_id]
-                            min_value_nb += 1
-
-                    # if threshold was defined as None, it is now NaN
-                    # and therefore the comparison will always be False
-                    if new_property_val < threshold:
-                        new_property_val = threshold
 
                     # if (sim_id == 0) & (param_id == 0) & (core_id == 0) & (times[0, sim_id, param_id] < 0.2):
                     #     print(44, property_nb, new_property_val, property_val,
@@ -3754,8 +3878,121 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     #     print(333, threshold, new_property_val,
                     #           len(max_value), max_value[0], max_value[1],
                     #           max_value[2], max_value[3])
-                    if new_property_val > threshold:
+                    if new_property_val >= threshold:
                         new_property_val = threshold
+
+                        # # HARD CODE CATASTROPHE UPON REACHING MAX VALUE
+                        # object_states[0, object_pos,
+                        #                  sim_id, param_id] = 2
+                        #
+                        # cuda.atomic.add(nb_objects_all_states,
+                        #                 (0, 1, sim_id, param_id),
+                        #                 -1)
+                        #
+                        # cuda.atomic.add(nb_objects_all_states,
+                        #                 (0, 2, sim_id, param_id),
+                        #                 1)
+                        #
+                        # shrinkage = (new_property_val - threshold) / 9 * 15
+                        #
+                        # new_property_val = threshold
+                        # new_property_val -= shrinkage
+                        # new_property_val = max(0, new_property_val)
+
+                    else:
+                        # the property value cannot be higher than the max
+                        # and higher than the min at the same time
+
+                        # check whether property is below min
+                        # if there is just one non-nan value in min_value
+                        # then this is the min_value
+                        # if there are multiple non-nan values in min_value
+                        # then these are property numbers, except
+                        # for the first value, which is threshold
+                        # and the second value, which is the operation
+                        # (-1 for subtracting other property values from the current
+                        #  property value before comparing to the threshold,
+                        #  and +1 for adding other property values to the current
+                        #  property, before comparing to the threshold)
+                        min_value = property_extreme_values[0, int(property_nb)]
+                        if math.isnan(min_value[0]):
+                            threshold = math.nan
+                        else:
+                            threshold = parameter_value_array[int(min_value[0]),
+                                                              int(timepoint_array[
+                                                                0, sim_id, param_id]),
+                                                              param_id]
+
+                        # if the second index is 0, then the threshold is not closed
+                        # therefore it just defines geometry and is not enforced
+                        if min_value[1] == 0:
+                            threshold = math.nan
+                        elif len(min_value) == 2:
+                            # this case would mean that the threshold is closed
+                            # but that the extreme properties do not depend on other
+                            # properties (therefore min_value is not longer than 2)
+                            threshold = threshold
+                        elif math.isnan(min_value[2]):
+                            # this is the same case as before, but it is indicated
+                            # by a nan value at the second index. Therefore
+                            # there are no properties defined on which the
+                            # threshold depends (but other properties have more
+                            #  values defined, which is why the dimension in the
+                            #  array is longer, therefore min_value is longer)
+                            threshold = threshold
+                        else:
+                            min_value_nb = 3
+                            while min_value_nb < len(min_value):
+                                val_property_nb = min_value[min_value_nb]
+                                if math.isnan(val_property_nb):
+                                    break
+                                # if property values are added, the threshold should
+                                # be reduced by the other property values
+                                # (since higher other property values means that the
+                                # threshold "is reached earlier")
+                                if min_value[2] == 1:
+                                    threshold = threshold - properties_array[
+                                        0, int(val_property_nb), object_pos,
+                                        sim_id, param_id]
+                                if min_value[2] == -1:
+                                    threshold = threshold + properties_array[0, int(val_property_nb),
+                                                                             object_pos,
+                                                                             sim_id,
+                                                                             param_id]
+                                min_value_nb += 1
+
+                        # if threshold was defined as None, it is now NaN
+                        # and therefore the comparison will always be False
+                        if new_property_val < threshold:
+                            new_property_val = threshold
+
+                            # new_property_val = math.nan
+                            # # HARD CODE LOSS OF MT UPON REACHING 0 length
+                            # object_states[0, object_pos,
+                            #                  sim_id, param_id] = 0
+                            # properties_array[0, 0,
+                            #                  object_pos,
+                            #                  sim_id,
+                            #                  param_id] = math.nan
+                            #
+                            # properties_array[0, 1,
+                            #                  object_pos,
+                            #                  sim_id,
+                            #                  param_id] = math.nan
+                            #
+                            # properties_array[0, 2,
+                            #                  object_pos,
+                            #                  sim_id,
+                            #                  param_id] = math.nan
+                            #
+                            # cuda.atomic.add(nb_objects_all_states,
+                            #                 (0, 2,
+                            #                       sim_id, param_id), -1)
+                            #
+                            # cuda.atomic.add(nb_objects_all_states,
+                            #                 (0, 0,
+                            #                       sim_id, param_id), 1)
+
                     # set the property val to the property val within the
                     # [min_value, max_value] limits
                     # if math.isnan(new_property_val) & (core_id == 0) & (sim_id == 0):
@@ -3778,6 +4015,15 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     #           threshold, max_value[0],
                     #           len(max_value), max_value[1])
 
+                    # if object_states[0, object_pos,
+                    #                      sim_id, param_id] > 0:
+                    _track_object_property_changes(object_pos, property_nb,
+                                                   new_property_val,
+                                                   properties_array,
+                                                   local_object_lifetime_array,
+                                                   local_resolution,
+                                                   times,
+                                                   sim_id, param_id)
                     properties_array[0, int(property_nb),
                                      object_pos,
                                      sim_id, param_id] = new_property_val
@@ -3975,6 +4221,8 @@ def _update_object_states(current_transitions, all_transition_states,
                             creation_on_objects,
                           first_last_idx_with_object,
 
+                          local_object_lifetime_array,
+
                           local_density, total_density, local_resolution,
                           density_threshold_boundaries,
                           nb_parallel_cores,  thread_masks, core_id,
@@ -3990,6 +4238,13 @@ def _update_object_states(current_transitions, all_transition_states,
         start_state = transition_states[0]
         end_state = transition_states[1]
         transition_position = int(all_transition_positions[sim_id, param_id])
+        if math.isnan(properties_array[0, 0, transition_position, sim_id, param_id]) & (start_state != 0):
+            print(111)
+            return
+        # end_pos = properties_array[0, 0, transition_position, sim_id, param_id] + properties_array[0, 1, transition_position, sim_id, param_id]
+        # if end_pos == 20:
+        #     return
+
         object_states[0, transition_position,sim_id, param_id] = end_state
         # change the object counter according to the executed transition
         # don't apply standard changes for cutting (creation on object == 2)
@@ -4001,7 +4256,7 @@ def _update_object_states(current_transitions, all_transition_states,
                 nb_objects_all_states[0, int(start_state),
                                       sim_id, param_id] -= 1
             else:
-                nb_objects_all_states[0, 0, sim_id, param_id] -= 1
+                # nb_objects_all_states[0, 0, sim_id, param_id] -= 1
 
                 # if resources for the object generation transition are defined,
                 # set generation method for object
@@ -4025,7 +4280,7 @@ def _update_object_states(current_transitions, all_transition_states,
             if end_state != 0:
                 nb_objects_all_states[0, int(end_state), sim_id, param_id] += 1
             else:
-                nb_objects_all_states[0, 0, sim_id, param_id] += 1
+                # nb_objects_all_states[0, 0, sim_id, param_id] += 1
                 # set generation method of object to 0 since the object is
                 # removed
                 # to get the generation method, use the object state in the
@@ -4055,8 +4310,11 @@ def _update_object_states(current_transitions, all_transition_states,
 
         # if objects are cut creation_on_objects for the transition is not
         # nan at idx 1 and 2 and contain transition maps at these indices
+        # indicating that the transition includes cutting of objects
         if not math.isnan(creation_on_objects[transition_nb, 1, 0]):
             if core_id == 0:
+                # FUR CUTTING LIFETIME OF OBJECTS SHOULD RATHER BE TRANSFERRED
+                # BUT RIGHT NOW NEW TIMESTAMPS ARE USED INSTEAD; WHICH IS WRONG!
                 # get the x position of the cut
                 x_pos, _, local_density_here = _get_density_dependent_position(
                     transition_nb, creation_on_objects,
@@ -4107,6 +4365,15 @@ def _update_object_states(current_transitions, all_transition_states,
 
                 property_nb_tmp = 0
                 while property_nb_tmp < properties_array.shape[1]:
+
+                    _track_object_property_changes(transition_position,
+                                                   property_nb_tmp,
+                                                   0,
+                                                   properties_array,
+                                                   local_object_lifetime_array,
+                                                   local_resolution,
+                                                   times,
+                                                   sim_id, param_id)
                     properties_array[0, property_nb_tmp,
                                    transition_position,
                                    sim_id,
@@ -4122,6 +4389,19 @@ def _update_object_states(current_transitions, all_transition_states,
                 #           properties_array[0, property_nb_tmp, object_position,
                 #                      sim_id, param_id])
                 #     property_nb_tmp += 1
+
+                _track_object_property_changes(object_position,
+                                               property_nb,
+                                               properties_array[
+                                                   0, property_nb,
+                                                   object_position,
+                                                   sim_id,
+                                                   param_id] - cut_length,
+                                               properties_array,
+                                               local_object_lifetime_array,
+                                               local_resolution,
+                                                   times,
+                                               sim_id, param_id)
                 properties_array[0, property_nb,
                                  object_position,
                                  sim_id, param_id] -= cut_length
@@ -4130,6 +4410,15 @@ def _update_object_states(current_transitions, all_transition_states,
                     print(400000, cut_length)
 
                 # the new object will get the cut length as new property value
+
+                _track_object_property_changes(transition_position,
+                                               property_nb,
+                                               cut_length,
+                                               properties_array,
+                                               local_object_lifetime_array,
+                                               local_resolution,
+                                                   times,
+                                               sim_id, param_id)
                 properties_array[0, property_nb,
                                  transition_position,
                                  sim_id, param_id] = cut_length
@@ -4145,6 +4434,18 @@ def _update_object_states(current_transitions, all_transition_states,
                 while property_nb > 0:
                     # set the property value of the new object
                     # to the value of the old object
+
+                    # _track_object_property_changes(transition_position,
+                    #                                property_nb,
+                    #                                properties_array[
+                    #                                    0, property_nb,
+                    #                                    object_position,
+                    #                                    sim_id, param_id],
+                    #                                properties_array,
+                    #                                local_object_lifetime_array,
+                    #                                local_resolution,
+                    #                                times,
+                    #                                sim_id, param_id)
                     properties_array[0, property_nb,
                                    transition_position,
                                    sim_id,
@@ -4152,6 +4453,14 @@ def _update_object_states(current_transitions, all_transition_states,
                                                               object_position,
                                                               sim_id, param_id]
 
+                    _track_object_property_changes(object_position,
+                                                   property_nb,
+                                                   0,
+                                                   properties_array,
+                                                   local_object_lifetime_array,
+                                                   local_resolution,
+                                                   times,
+                                                   sim_id, param_id)
                     # set the property value of the old object to 0
                     properties_array[0, property_nb,
                                    object_position,
@@ -4234,24 +4543,41 @@ def _update_object_states(current_transitions, all_transition_states,
                                                            sim_id, param_id]-1]
 
                 if state_before_cut == 0:
-                    property_nb_tmp = 0
-                    while property_nb_tmp < properties_array.shape[1]:
+                    property_nb_tmp = properties_array.shape[1]-1
+                    while property_nb_tmp >= 0:
+                        _track_object_property_changes(transition_position,
+                                                       property_nb_tmp,
+                                                       0,
+                                                       properties_array,
+                                                       local_object_lifetime_array,
+                                                       local_resolution,
+                                                   times,
+                                                       sim_id, param_id)
                         properties_array[0, property_nb_tmp,
                                        transition_position,
                                        sim_id,
                                        param_id] = math.nan
-                        property_nb_tmp += 1
+                        property_nb_tmp -= 1
                     # object_states[0, transition_position, sim_id, param_id] = 0
                     # if transition_position == first_last_idx_with_object[1, ]
 
                 if state_after_cut == 0:
-                    property_nb_tmp = 0
-                    while property_nb_tmp < properties_array.shape[1]:
+                    property_nb_tmp = properties_array.shape[1] - 1
+                    while property_nb_tmp > 0:
+
+                        _track_object_property_changes(object_position,
+                                                       property_nb_tmp,
+                                                       0,
+                                                       properties_array,
+                                                       local_object_lifetime_array,
+                                                       local_resolution,
+                                                   times,
+                                                       sim_id, param_id)
                         properties_array[0, property_nb_tmp,
                                        object_position,
                                        sim_id,
                                        param_id] = math.nan
-                        property_nb_tmp += 1
+                        property_nb_tmp -= 1
 
                     nb_objects_all_states[0,
                                           int(object_states[0, object_position,
@@ -4417,13 +4743,22 @@ def _update_object_states(current_transitions, all_transition_states,
                 # if (sim_id == 0) & (param_id == 0) & (core_id == 0) & (times[0, sim_id, param_id]< 0.4):
                 #     print(33, transition_position, property_nb, property_val)
 
+                _track_object_property_changes(transition_position,
+                                               property_nb,
+                                               property_val,
+                                               properties_array,
+                                               local_object_lifetime_array,
+                                               local_resolution,
+                                                   times,
+                                               sim_id, param_id)
+
                 properties_array[0, property_nb,
                                  int(transition_position),
                                  sim_id, param_id] = property_val
 
                 property_nb += 1
 
-        elif end_state == 0:
+        elif (end_state == 0) & (core_id == 0):
             # check if the idx for removing a position is the currently highest
             # position
             # if so, go backward from that position until the next object is found
@@ -4435,16 +4770,25 @@ def _update_object_states(current_transitions, all_transition_states,
 
 
             # if an object was removed, set property values to NaN
-            nb_properties = property_start_vals.shape[0]
-            (property_nb,
-             last_property_nb) = _get_first_and_last_object_pos(nb_properties,
-                                                              nb_parallel_cores[sim_id, param_id],
-                                                              core_id)
-            while property_nb < last_property_nb:
+            # nb_properties = property_start_vals.shape[0]
+            # (property_nb,
+            #  last_property_nb) = _get_first_and_last_object_pos(nb_properties,
+            #                                                   nb_parallel_cores[sim_id, param_id],
+            #                                                   core_id)
+            property_nb = property_start_vals.shape[0] - 1
+            while property_nb >= 0:
+                _track_object_property_changes(transition_position,
+                                               property_nb,
+                                               0,
+                                               properties_array,
+                                               local_object_lifetime_array,
+                                               local_resolution,
+                                                   times,
+                                               sim_id, param_id)
                 properties_array[0, property_nb,
                                  int(transition_position),
                                  sim_id, param_id] = math.nan
-                property_nb += 1
+                property_nb -= 1
 
         # if the object is not removed, it might be that the transition triggers
         # other events as well
@@ -4463,13 +4807,31 @@ def _update_object_states(current_transitions, all_transition_states,
                 target_val = properties_array[0, int(target_property_number),
                                               int(transition_position),
                                               sim_id, param_id]
+
+                # _track_object_property_changes(int(transition_position),
+                #                                int(source_property_number),
+                #                                0,
+                #                                properties_array,
+                #                                local_object_lifetime_array,
+                #                                local_resolution,
+                #                                    times,
+                #                                sim_id, param_id)
+                properties_array[0, int(source_property_number),
+                                 int(transition_position),
+                                 sim_id, param_id] = 0 #source_val/2
+
+                # _track_object_property_changes(int(transition_position),
+                #                                int(target_property_number),
+                #                                target_val + source_val,
+                #                                properties_array,
+                #                                local_object_lifetime_array,
+                #                                local_resolution,
+                #                                    times,
+                #                                sim_id, param_id)
                 properties_array[0, int(target_property_number),
                                  int(transition_position),
                                  sim_id, param_id] = target_val + source_val #/2
 
-                properties_array[0, int(source_property_number),
-                                 int(transition_position),
-                                 sim_id, param_id] = 0 #source_val/2
 
             # if properties should be set to zero for the current transition
             # do that at the current position
@@ -4481,6 +4843,14 @@ def _update_object_states(current_transitions, all_transition_states,
                     zero_property = set_to_zero_properties[zero_property_nb]
                     if math.isnan(zero_property):
                         break
+                    _track_object_property_changes(int(transition_position),
+                                                   int(zero_property),
+                                                   0,
+                                                   properties_array,
+                                                   local_object_lifetime_array,
+                                                   local_resolution,
+                                                   times,
+                                                   sim_id, param_id)
                     properties_array[0, int(zero_property),
                                      int(transition_position),
                                      sim_id, param_id] = 0
@@ -4528,16 +4898,21 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                 property_nb += 1
 
             # start has to be before the end of the x pos range
-            if start < ((x_pos + 2) * local_resolution):
+            if start < ((x_pos + 1) * local_resolution):
 
                 end = start
+                # index = 1
+                # while index < properties_array.shape[1]:
+                #     property_nb = index
                 index = 0
                 while index < target_property_nbs.shape[0]:
-                # while index < properties_array.shape[1]:
-                    property_nb = int(target_property_nbs[index])
-                    # property_nb = index
+                    property_nb = target_property_nbs[index]
                     if math.isnan(property_nb):
                         break
+                    # its important to only convert to int now, otherwise the
+                    # int conversion of a nan is unpredictable and can lead to
+                    # weird results at seemingly random objects
+                    property_nb = int(property_nb)
                     if not math.isnan(properties_array[0, property_nb,
                                                        object_position,
                                                        sim_id, param_id]):
@@ -4546,7 +4921,7 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                     index += 1
 
                 # end has to be after the beginning of the range
-                if end > ((x_pos-2) * local_resolution):
+                if end > ((x_pos-1) * local_resolution):
                     # end = start + properties_array[0, target_property_nb,
                     #                                object_position,
                     #                                sim_id, param_id]
@@ -4625,9 +5000,8 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                         #           local_density_here)
         object_position += 1
 
-    if ((round(density_sum, 6) < round(threshold, 6)) &
-            (core_id == 0) & (sim_id == 2)):
-        print(78910, object_position,
+    if (round(density_sum, 6) < round(threshold, 6)):
+        print(78910, sim_id, param_id, object_position,
               density_sum, threshold, length_in_range,
               local_density_here)
     # elif (core_id == 0) & (sim_id == 2):
@@ -4659,6 +5033,8 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                     nb_objects_all_states, transition_parameters,
                     object_states, properties_array,
                     first_last_idx_with_object,
+                    local_object_lifetime_array, times,
+                    local_resolution,
                     nb_parallel_cores,  core_id, sim_id, param_id):
     removal_nb = 0
     while removal_nb < len(all_object_removal_properties):
@@ -4732,7 +5108,7 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                     else:
                         nb_objects_all_states[0, object_state_to_remove,
                                               sim_id, param_id] -= 1
-                        nb_objects_all_states[0, 0, sim_id, param_id] += 1
+                        # nb_objects_all_states[0, 0, sim_id, param_id] += 1
                         if object_pos < first_last_idx_with_object[0,sim_id,
                                                                    param_id]:
                             first_last_idx_with_object[0,sim_id,
@@ -4763,12 +5139,20 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
 
                     object_states[0, int(object_pos),
                                   sim_id, param_id] = 0
-                    property_nb = 0
-                    while property_nb < properties_array.shape[1]:
+                    property_nb = properties_array.shape[1] - 1
+                    while property_nb > 0:
+                        _track_object_property_changes(int(object_pos),
+                                                       int(property_nb),
+                                                       0,
+                                                       properties_array,
+                                                       local_object_lifetime_array,
+                                                       local_resolution,
+                                                   times,
+                                                       sim_id, param_id)
                         properties_array[0, property_nb,
                                          int(object_pos),
                                          sim_id, param_id] = math.nan
-                        property_nb += 1
+                        property_nb -= 1
                 object_pos += 1
 
         removal_nb += 1

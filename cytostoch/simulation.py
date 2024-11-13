@@ -91,6 +91,7 @@ class SSA():
         self.script_path = script_path
         self.name = name
         self.simulations_summary_path = simulations_summary_path
+        self.simulations_summary_table_name = "simulations_summary.csv"
 
         # resort properties so that position/s are always first
         positions = []
@@ -168,6 +169,7 @@ class SSA():
                single_parameter_changes=True,
               two_combined_parameter_changes = False,
               nb_parallel_cores=1,
+               track_object_lifetime=False,
               all_parameter_combinations=False,
               comment="", initial_state_folder="",
               seed=42,
@@ -264,6 +266,8 @@ class SSA():
         self.initial_state_folder = initial_state_folder
         self.local_resolution = local_resolution
         self.two_combined_parameter_changes = two_combined_parameter_changes
+        self.track_object_lifetime = track_object_lifetime
+        self.min_time = min_time
 
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
@@ -360,7 +364,8 @@ class SSA():
                 property_extreme_values[0, property_nb, 1] = 1
             else:
                 property_extreme_values[0, property_nb, 1] = 0
-            if isinstance(min_value, Parameter):
+            # if isinstance(min_value, Parameter):
+            if type(min_value) == type(self.parameters[0]):
                 property_extreme_values[0, property_nb, 0] = min_value.number
             elif min_value is not None:
                 if min_value.properties[0].closed_min:
@@ -388,7 +393,9 @@ class SSA():
             # print(max_value)
             # print(type(max_value), type(Parameter(values=[0])))
             # print(type(max_value) == type(Parameter(values=[0])))
-            if isinstance(max_value, Parameter):
+            # print(max_value, isinstance(max_value, type(Parameter(values=[0]))))
+            # if isinstance(max_value, Parameter):
+            if type(max_value) == type(self.parameters[0]):
                 property_extreme_values[1, property_nb, 0] = max_value.number
             elif max_value is not None:
                 if max_value.properties[0].closed_max:
@@ -669,6 +676,11 @@ class SSA():
                 continue
             property_nbs_set_to_zero = [prop.number
                                         for prop in properties_set_to_zero]
+            # sort the numbers descendingly, to have higher numbers first
+            # which is necessary to track lifetime of MTs
+            # since properties closer to the tip have to be changed first in
+            # order to track lifetime properly
+            property_nbs_set_to_zero.sort(reverse=True)
             all_transition_set_to_zero_properties[nb,
             :] = property_nbs_set_to_zero
 
@@ -953,6 +965,22 @@ class SSA():
 
         return params_prop_dependence, position_dependence, dependence_nb
 
+    def _does_sim_folder_name_exist(self, data_folder, summary_file_folders):
+        """
+        Check whether the simulation folder name was used in the past -
+        either since it exists as a folder directly or whether it is included
+        in the simulation summary table. Through the comparison with the
+        simulation summary table, even if the results of the simulation folder
+        where moved to a different folder, as long as the simulation summary
+        file was not changed, the name of the experiment will not be reused.
+        """
+        folder_name = os.path.basename(data_folder)
+        if os.path.exists(data_folder):
+            return True
+        if folder_name in summary_file_folders:
+            return True
+        return False
+
     def _start(self, nb_simulations, min_time, data_extractions,data_folder,
                time_resolution, start_save_time = None,
                save_initial_state=False,
@@ -1001,10 +1029,23 @@ class SSA():
         # get normalized path
         data_folder = os.path.abspath(data_folder)
 
+        sim_summary_file = os.path.join(self.simulations_summary_path,
+                                        self.simulations_summary_table_name)
+        if os.path.exists(sim_summary_file):
+            summary_file = pd.read_csv(sim_summary_file)
+            summary_file_folders = summary_file["folder"].tolist()
+            summary_file_folders = [os.path.basename(folder.split(",")[0]).replace('"','')
+                                    for folder in summary_file_folders]
+            summary_file_folders = tuple(summary_file_folders)
+        else:
+            summary_file_folders = []
+
         # if data should not be overwritten, create a new datafolder
         # by appending a "__number" (e.g. "__001") to it
         if not overwrite:
-            if os.path.exists(data_folder) | self.always_add_number_to_path:
+            if (self._does_sim_folder_name_exist(data_folder,
+                                                summary_file_folders) |
+                    self.always_add_number_to_path):
                 last_folder = os.path.basename(os.path.normpath(data_folder))
                 number_finder = re.compile("__([\d]+)$")
                 number_string = number_finder.search(last_folder)
@@ -1017,7 +1058,8 @@ class SSA():
                     last_folder = last_folder + "__" + number
                     data_folder = data_folder + "__" + number
 
-                while os.path.exists(data_folder):
+                while self._does_sim_folder_name_exist(data_folder,
+                                                       summary_file_folders):
                     last_number = number
                     number = int(number) + 1
                     number = str(number).zfill(number_len)
@@ -1055,7 +1097,6 @@ class SSA():
         # if the current experiments are a test, dont save the data
         if os.path.basename(data_folder).find("___TEST") != -1:
             save_results = False
-
 
         self.min_time = min_time
         self.data_extractions = data_extractions
@@ -1195,6 +1236,22 @@ class SSA():
         # self._add_data_to_buffer()
         if self.save_results:
             self._save_simulation_parameters()
+
+            if self.script_path is not None:
+                if not os.path.exists(self.script_path):
+                    raise ValueError(
+                        f"The provided script path {self.script_path}"
+                        f" does not exist. The easiest way to supply "
+                        f"the correct path to the simulation script "
+                        f"is to use the __file__ variable.")
+                script_file_name = os.path.basename(self.script_path)
+                experiment = os.path.basename(self.data_folder)
+                script_file_name = script_file_name.replace(".py",
+                                                            "_" + experiment +
+                                                            ".py")
+                new_script_path = os.path.join(self.data_folder,
+                                               script_file_name)
+                shutil.copy(self.script_path, new_script_path)
 
         self.data_buffer = []
         self.last_data_extraction = 0
@@ -1579,6 +1636,7 @@ class SSA():
                          convert_array(tau_square_eq_terms),
 
                          convert_array(first_last_idx_with_object),
+                         local_object_lifetime_array,
 
                         timepoint_array,
                         time_resolution, min_time, save_initial_state,
@@ -1702,6 +1760,7 @@ class SSA():
              *param_shape_batch),
             dtype=np.float32)
 
+
         property_changes_per_state = np.zeros(
             (len(self.states), nb_properties,
              *param_shape_batch))
@@ -1822,6 +1881,20 @@ class SSA():
                                   param_combinations_per_batch))
         local_density = convert_array(local_density)
 
+        if self.track_object_lifetime:
+            local_object_lifetime_array = np.full((max_number_objects,
+                                                   local_density_size + 1,
+                                                   nb_simulations,
+                                                   param_combinations_per_batch)
+                                                  , np.nan)
+        else:
+            local_object_lifetime_array = np.full((1,1,1,1), np.nan)
+
+        local_object_lifetime_array[:,0] = 0
+
+        local_object_lifetime_array = convert_array(local_object_lifetime_array)
+        local_object_lifetime_array = to_cuda(local_object_lifetime_array)
+
         total_density = np.zeros((len(self.properties),
                                   nb_simulations, param_combinations_per_batch))
 
@@ -1890,6 +1963,8 @@ class SSA():
         # print(transition_parameters)
         # dasd
         # print(creation_on_objects)
+        # print(creation_on_objects.shape)
+        # print(creation_on_objects[2, 0])
         # dasd
 
         sim[nb_SM,
@@ -1943,6 +2018,7 @@ class SSA():
 
                 to_cuda(convert_array(tau_square_eq_terms)),
                 first_last_idx_with_object,
+                local_object_lifetime_array,
 
                timepoint_array_batch,
                time_resolution, min_time, start_save_time,
@@ -1978,6 +2054,9 @@ class SSA():
         property_array_batch = torch.Tensor(
             property_array_batch.copy_to_host())
         times_batch = torch.Tensor(timepoint_array_batch.copy_to_host()[2:])
+
+        self.local_object_lifetime_array = torch.Tensor(
+            local_object_lifetime_array.copy_to_host())
 
         first_last_idx_with_object = first_last_idx_with_object.copy_to_host()
 
@@ -2120,7 +2199,10 @@ class SSA():
                 continue
             if transition.resources is None:
                 continue
-            if not isinstance(transition.resources, Parameter):
+            # print(transition.resources, isinstance(transition.resources, Parameter))
+            # print(type(transition.resources) == type(parameters[0]))
+            # if not isinstance(transition.resources, Parameter):
+            if not (type(transition.resources) == type(parameters[0])):
                 raise ValueError("Resources have to be defined through a "
                                  "parameter.")
             parameters.append(transition.resources)
@@ -2285,9 +2367,8 @@ class SSA():
 
     def _save_all_metadata(self, nb_simulations, max_number_objects):
         if self.simulations_summary_path is not None:
-            summary_script_name = "simulations_summary.csv"
             simulations_summary_path = os.path.join(self.simulations_summary_path,
-                                                    summary_script_name)
+                                                    self.simulations_summary_table_name)
             if os.path.exists(simulations_summary_path):
                 simulations_summary = pd.read_csv(simulations_summary_path,
                                                   index_col=0)
@@ -2422,18 +2503,6 @@ class SSA():
         with open(file_path, "wb") as file:
             dill.dump(self, file, fix_imports=False)
 
-        if self.script_path is not None:
-            if not os.path.exists(self.script_path):
-                raise ValueError(f"The provided script path {self.script_path}"
-                                 f" does not exist. The easiest way to supply "
-                                 f"the correct path to the simulation script "
-                                 f"is to use the __file__ variable.")
-            script_file_name = os.path.basename(self.script_path)
-            experiment = os.path.basename(self.data_folder)
-            script_file_name = script_file_name.replace(".py",
-                                                        "_"+experiment+".py")
-            new_script_path = os.path.join(self.data_folder, script_file_name)
-            shutil.copy(self.script_path, new_script_path)
 
     @staticmethod
     def _get_number_of_cuda_cores():
@@ -2485,8 +2554,9 @@ class SSA():
         for sub_name, sub_data in all_data[
             data_name].items():
             global_data = False
-            if not ((sub_name.find("mean") == -1) &
-                    (sub_name.find("number") == -1)):
+            if ((not ((sub_name.find("mean") == -1) &
+                    (sub_name.find("number") == -1))) &
+                    (sub_name.find("_hist_") == -1)):
                 global_data = True
                 print_data = True
             if sub_data.sum() == 0:
@@ -2501,13 +2571,22 @@ class SSA():
                 continue
             if sub_name.find("_bins_") != -1:
                 continue
+            # if sub_name.find("_hist_") != -1:
+            #     continue
+
+            # if sub_name.find("hist") != -1:
+            #     print(sub_data)
+
             all_axs = []
             all_figures = {}
             max_y = 0
             for timepoint in range(sub_data.shape[0]):
                 # the first dimension is for the time
                 # only plot data for the last timepoint
-                plot_data = torch.Tensor(np.nanmean(sub_data[timepoint].cpu(),
+                if timepoint >= sub_data.shape[0]:
+                    break
+                plot_data = sub_data[timepoint]
+                plot_data = torch.Tensor(np.nanmean(plot_data.cpu(),
                                        axis=1))
 
                 if not global_data:
@@ -2575,8 +2654,16 @@ class SSA():
             if self.save_results & (not global_data):
                 for figure_name, figure in all_figures.items():
                     # save figures in simulation path
-                    figure.savefig(os.path.join(self.data_folder,
-                                                figure_name+".png"))
+                    # prevent the script to stop before saving all data
+                    # due to an error while saving the figure
+                    # (which is usually due to a too high path length)
+                    try:
+                        figure.savefig(os.path.join(self.data_folder,
+                                                    figure_name+".png"),
+                                       dpi=400,
+                                       bbox_inches="tight")
+                    except:
+                        pass
                     # save figures in summary path
                     # where figures for all simulations are saved
                     # with a unique file name
@@ -2585,21 +2672,29 @@ class SSA():
                     identifier = os.path.basename(self.data_folder)
                     image_data_folder = os.path.join(os.path.dirname(self.data_folder),
                                                      "summary_sim")
-                    figure.savefig(os.path.join(image_data_folder,
-                                                identifier
-                                                + "_" +
-                                                figure_name+".png"),
-                                   dpi = 400)
+                    try:
+                        figure.savefig(os.path.join(image_data_folder,
+                                                    identifier
+                                                    + "_" +
+                                                    figure_name+".png"),
+                                       dpi = 400,
+                                       bbox_inches="tight")
+                    except:
+                        pass
 
                     # or sortable by extracted data
                     # (unique identifier last in file name)
                     image_data_folder = os.path.join(os.path.dirname(self.data_folder),
                                                      "summary_data")
-                    figure.savefig(os.path.join(image_data_folder,
-                                                figure_name + "_" +
-                                                identifier +
-                                                ".png"),
-                                   dpi = 400)
+                    try:
+                        figure.savefig(os.path.join(image_data_folder,
+                                                    figure_name + "_" +
+                                                    identifier +
+                                                    ".png"),
+                                       dpi = 400,
+                                       bbox_inches="tight")
+                    except:
+                        pass
 
                     # or sortable by iterations (meaning same base
                     # file name), where only the number of
@@ -2613,14 +2708,18 @@ class SSA():
                         identifier = identifier.replace("__" +
                                                         number_string,
                                                         "")
-                        figure.savefig(os.path.join(image_data_folder,
-                                                    identifier +
-                                                    "_" +
-                                                    figure_name +
-                                                    "__" +
-                                                    number_string +
-                                                    ".png"),
-                                       dpi = 400)
+                        try:
+                            figure.savefig(os.path.join(image_data_folder,
+                                                        identifier +
+                                                        "_" +
+                                                        figure_name +
+                                                        "__" +
+                                                        number_string +
+                                                        ".png"),
+                                           dpi = 400,
+                                       bbox_inches="tight")
+                        except:
+                            pass
 
     def _empty_buffers(self):
         for property in self.properties:
