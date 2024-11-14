@@ -164,6 +164,7 @@ class SSA():
 
     def start(self, nb_simulations, min_time, data_extractions, data_folder,
               time_resolution, local_resolution=0.02,
+              local_lifetime_resolution=None,
               start_save_time=None, save_initial_state=False,
               max_number_objects=None,
                single_parameter_changes=True,
@@ -264,6 +265,9 @@ class SSA():
         self.comment = comment
         self.always_add_number_to_path = always_add_number_to_path
         self.initial_state_folder = initial_state_folder
+        if local_lifetime_resolution is None:
+            local_lifetime_resolution = local_resolution
+        self.local_lifetime_resolution = local_lifetime_resolution
         self.local_resolution = local_resolution
         self.two_combined_parameter_changes = two_combined_parameter_changes
         self.track_object_lifetime = track_object_lifetime
@@ -1637,6 +1641,7 @@ class SSA():
 
                          convert_array(first_last_idx_with_object),
                          local_object_lifetime_array,
+                self.local_lifetime_resolution,
 
                         timepoint_array,
                         time_resolution, min_time, save_initial_state,
@@ -1881,9 +1886,14 @@ class SSA():
                                   param_combinations_per_batch))
         local_density = convert_array(local_density)
 
+        highest_max_value = self.properties[0].max_value.values.max()
+
+        local_lifetime_density_size = int(highest_max_value /
+                                          self.local_lifetime_resolution) #+ 1
+
         if self.track_object_lifetime:
             local_object_lifetime_array = np.full((max_number_objects,
-                                                   local_density_size + 1,
+                                                   local_lifetime_density_size + 1,
                                                    nb_simulations,
                                                    param_combinations_per_batch)
                                                   , np.nan)
@@ -1919,6 +1929,7 @@ class SSA():
                    int((nb_SM * nb_cc)))
 
         thread_to_sim_id = np.zeros((size, 3))
+
 
         # local_density_batch = cuda.to_device(
         #     convert_array(local_density))
@@ -2019,6 +2030,7 @@ class SSA():
                 to_cuda(convert_array(tau_square_eq_terms)),
                 first_last_idx_with_object,
                 local_object_lifetime_array,
+                self.local_lifetime_resolution,
 
                timepoint_array_batch,
                time_resolution, min_time, start_save_time,

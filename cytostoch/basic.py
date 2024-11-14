@@ -1012,25 +1012,29 @@ class DataExtraction():
             # then get the maximum of all simulations
             max_nb_objects = first_false_position.max()
 
-            idx = idx.to("cuda")
+            idx = idx.cpu()#.to("cuda")
 
             # set all properties of objects outside of mask to NaN
             # also use the maximum number of objects of interest for all
             # simulations, to discard all parts of the sorted array that only
             # contains objects which are not of interest
             position_array[mask_inv] = float("nan")
-            position_array = torch.gather(position_array, dim=1,
+            position_array = torch.gather(position_array.cpu(), dim=1,
                                           index=idx)
             position_array = position_array[:, :max_nb_objects]
 
-            lifetime_array = torch.gather(lifetime_array.cuda(), dim=1,
+            lifetime_array = lifetime_array.unsqueeze(0)
+
+            idx = idx[0].unsqueeze(0).unsqueeze(2).expand(lifetime_array.shape)
+
+            lifetime_array = torch.gather(lifetime_array, dim=1,
                                           index=idx)
-            lifetime_array = lifetime_array[:max_nb_objects]
+            lifetime_array = lifetime_array[0,:max_nb_objects]
         else:
             first_false_position = torch.count_nonzero(object_states, dim=1)
             max_nb_objects = first_false_position.max()
 
-        resolution = simulation_object.local_resolution
+        resolution = simulation_object.local_lifetime_resolution
 
         to_cuda = lambda x: numba.cuda.to_device(np.ascontiguousarray(x))
 
@@ -1042,8 +1046,6 @@ class DataExtraction():
         # First resort the lifetimes array so that the first index is the first
         # value for the object
         nb_parallel_cores = 32
-
-        print(resolution, nb_parallel_cores, max_nb_objects)
 
         nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
         _reorder_lifetime_data[nb_SM, nb_cc](to_cuda(lifetime_array.cpu()),
@@ -1089,8 +1091,6 @@ class DataExtraction():
 
         data_dict = {}
         data_dict["1D_density_position"] = positions
-        print(modified.shape)
-        print(unmodified.shape)
 
         data_dict["1D_density_modified"] = torch.Tensor(modified).unsqueeze(0)
         data_dict["1D_density_unmodified"] = torch.Tensor(unmodified).unsqueeze(0)
@@ -1105,7 +1105,7 @@ class DataExtraction():
         # plt.plot(mean)
         # dasd
 
-        return data_dict, ["1D_density"]
+        return data_dict, ["1D_density_modified", "1D_density_unmodified"]
 
 
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,
