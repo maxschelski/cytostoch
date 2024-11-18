@@ -53,7 +53,7 @@ class Analyzer():
         # Per default, data folder will be used from the simulation object
         # but if the analyzer is used not directly after a simulation,
         # supplying a different data folder might make sense and is allowed
-        if data_folder is None:
+        if self.simulation is not None:
             self.data_folder = self.simulation.data_folder
 
     def start(self, time_resolution, max_time, use_assertion_checks = True):

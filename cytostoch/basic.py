@@ -1090,7 +1090,7 @@ class DataExtraction():
                                                    *positions.shape])
 
         data_dict = {}
-        data_dict["1D_density_position"] = positions
+        data_dict["1D_density_position"] = positions[:,:1,:].unsqueeze(0)
 
         data_dict["1D_density_modified"] = torch.Tensor(modified).unsqueeze(0)
         data_dict["1D_density_unmodified"] = torch.Tensor(unmodified).unsqueeze(0)
