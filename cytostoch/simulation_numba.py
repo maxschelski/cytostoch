@@ -3764,12 +3764,19 @@ def _track_object_property_changes(object_nb, property_nb, new_value,
     if end_idx > start_idx:
         # only start filling after the start index, but until the end_idx
         start_idx += 1
+        start_from_first_idx = True
         while start_idx <= end_idx:
             # if the current idx is larger than the size of the lifetime array
             # start again from the beginning of the lifetime array, by
             # subtracting the highest full multiple of the lifetime array size
             # that still keeps the index positive
             if start_idx >= local_object_lifetime_array.shape[1]:
+                # Whether the MT actually starts at the first index,
+                # or whether it starts at a later index (if it is longer than
+                # the system but its startpoint is outside of the system)
+                # THIS DOES NOT WORK IF THE ENDPOINT CAN BE OUTSIDE OF THE
+                # SYSTEM
+                start_from_first_idx = False
                 # print(11, start_idx, end_idx,
                 #       properties_array[0, int(property_nb),
                 #                        int(object_nb), sim_id, param_id],
@@ -3787,33 +3794,37 @@ def _track_object_property_changes(object_nb, property_nb, new_value,
                                             ) *
                                             local_object_lifetime_array.shape[1]
                                  )
-                # if the last index is reached, add the marker for the
-                # beginning of the part of the MT in the neurite again (0 value)
-                # if start_idx + 1 is larger than the lifetime array size
-                # add the separator at the beginning of the array (idx 0)
-                if (start_idx + 1) == local_object_lifetime_array.shape[1]:
-                    local_object_lifetime_array[object_nb, 0,
-                                                sim_id, param_id] = 0
-                # otherwise set the separator one index after the start_idx
-                if start_idx == end_idx:
-                    local_object_lifetime_array[object_nb, int(start_idx) + 1,
-                                                sim_id, param_id] = 0
 
             local_object_lifetime_array[object_nb, int(start_idx),
                                         sim_id,
-                                        param_id] = times[0, sim_id,
-                                                                    param_id]
+                                        param_id] = times[0, sim_id, param_id]
             start_idx += 1
+
+        # if the MT does not start from the first idx anymore,
+        # put the new start point one position after the end_idx
+        if (not start_from_first_idx):
+            # if the last index is reached, add the marker for the
+            # beginning of the part of the MT in the neurite again (0 value)
+            # if start_idx + 1 is larger than the lifetime array size
+            # add the separator at the beginning of the array (idx 0)
+            if int(end_idx + 1) == local_object_lifetime_array.shape[1]:
+                local_object_lifetime_array[object_nb, 0,
+                                            sim_id, param_id] = 0
+            else:
+                local_object_lifetime_array[object_nb, int(end_idx) + 1,
+                                            sim_id, param_id] = 0
     else:
         # if end is smaller than start, remove timestamps
          # start removing at the start_index, but don't include the end_idx
          # (since it is still in the end_idx
+        start_from_first_idx = True
         while start_idx > end_idx:
             # if the current idx is larger than the size of the lifetime array
             # start again from the beginning of the lifetime array, by
             # subtracting the highest full multiple of the lifetime array size
             # that still keeps the index positive
             if start_idx >= local_object_lifetime_array.shape[1]:
+                start_from_first_idx = False
                 start_idx_tmp = start_idx - int(math.floor(start_idx /
                                             local_object_lifetime_array.shape[1]
                                             ) *
@@ -3828,6 +3839,11 @@ def _track_object_property_changes(object_nb, property_nb, new_value,
             local_object_lifetime_array[object_nb, int(start_idx_tmp),
                                         sim_id, param_id] = np.nan
             start_idx -= 1
+        # move the startpoint back
+        if (not start_from_first_idx) & (end_idx != 0):
+            local_object_lifetime_array[object_nb, int(end_idx) + 1,
+                                        sim_id, param_id] = 0
+
 
 
 def _execute_actions_on_objects(parameter_value_array, action_parameters,
@@ -4455,6 +4471,10 @@ def _update_object_states(current_transitions, all_transition_states,
             (property_nb,
              last_property_nb) = _get_first_and_last_object_pos(
                 nb_properties, nb_parallel_cores[sim_id, param_id], core_id)
+
+            # set start of lifetime for objects
+            local_object_lifetime_array[transition_position, 0,
+                                        sim_id, param_id] = 0
 
             # property_nb = 0
             # while property_nb < property_start_values.shape[0]:
@@ -5172,7 +5192,7 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
     # and then check whether adding its density in the range
     # pushes the density sum above the threshold
     object_position = 0
-    while object_position <= first_last_idx_with_object[1, sim_id, param_id]:
+    while object_position <= first_last_idx_with_object[1, sim_id, param_id]+20:
         if object_states[0, object_position, sim_id, param_id] > 0:
             # check if property value is zero
 

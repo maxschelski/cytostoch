@@ -271,11 +271,11 @@ def _reorder_lifetime_data(object_lifetime_array,
         object_pos += start_nb_object
         index = 0
         # go through each object
-        while object_pos < (last_object_pos):
+        while object_pos < last_object_pos:
             start_found = False
             local_object_pos = 0
             # go through each segment of the object
-            while index < object_lifetime_array.shape[1]:
+            while local_object_pos < object_lifetime_array.shape[1]:
                 lifetime = object_lifetime_array[object_pos, local_object_pos,
                                                  sim_id, param_id]
                 # if lifetime is nan, the end of the object is reached
@@ -285,6 +285,7 @@ def _reorder_lifetime_data(object_lifetime_array,
                 if start_found:
                     # start adding lifetimes once the index is positive,
                     # which indicates that the object is now in the compartment
+
                     if index >= 0:
                         new_object_lifetime_array[object_pos, int(index),
                                                   sim_id, param_id] = lifetime
@@ -292,14 +293,22 @@ def _reorder_lifetime_data(object_lifetime_array,
 
                 # lifetime of 0 indicates the start of the object, which can be
                 # at any index in the array
-                if lifetime == 0:
+                if (lifetime == 0):
+                    # if the start was already found before, the entire MT
+                    # is covered now.
+                    if start_found:
+                        break
                     start_found = True
                     # set the index as the start position of the object
                     position = positions_array[0, object_pos, sim_id, param_id]
                     position = math.floor(position / local_resolution)
                     index = position
 
+                # at the end of the lifetime array, reset to zero, to check
+                # if there is a MT segment before the start point
                 local_object_pos += 1
+                if local_object_pos == (object_lifetime_array.shape[1]):
+                    local_object_pos = 0
             object_pos += 1
         current_sim_nb += nb_processes
 
@@ -1038,6 +1047,8 @@ class DataExtraction():
 
         to_cuda = lambda x: numba.cuda.to_device(np.ascontiguousarray(x))
 
+        print(lifetime_array.shape)
+
         new_object_lifetime_array = to_cuda(np.full(lifetime_array.shape,
                                                     np.nan))
         # Lifetimes are organized so that the start point of an object is marked
@@ -1049,11 +1060,11 @@ class DataExtraction():
 
         nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
         _reorder_lifetime_data[nb_SM, nb_cc](to_cuda(lifetime_array.cpu()),
-                                               new_object_lifetime_array,
-                                               to_cuda(position_array.cpu()),
-                                               resolution,
-                                               0, int(max_nb_objects),
-                                               nb_parallel_cores)
+                                                   new_object_lifetime_array,
+                                                   to_cuda(position_array.cpu()),
+                                                   resolution,
+                                                   0, int(max_nb_objects),
+                                                   nb_parallel_cores)
         cuda.synchronize()
         # use the supplied rate of the modification to transform
         # the local object lifetime to the amount of modification
