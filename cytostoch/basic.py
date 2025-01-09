@@ -312,191 +312,6 @@ def _reorder_lifetime_data(object_lifetime_array,
             object_pos += 1
         current_sim_nb += nb_processes
 
-def _run_operation_2D_to_1D_density_numba(sim_id, param_id, object_states, properties_array, times,
-                                           transition_rates_array, all_transition_states,
-                                           action_values, action_state_array,
-                                           all_action_properties, action_operation_array,
-                                           current_transition_rates,
-                                           property_start_values,
-                                           property_min_values, property_max_values,
-                                           all_transition_tranferred_vals,
-                                           all_transition_set_to_zero_properties,
-                                           all_object_removal_properties,
-                                           object_removal_operations,
-
-                                           nb_objects_all_states,
-                                           total_rates, reaction_times,
-                                           current_transitions,
-                                           all_transition_positions,
-
-                                           current_timepoint_array, timepoint_array,
-                                           object_state_time_array, properties_time_array,
-                                           time_resolution, rng_states,
-                                          execute_action_properties
-                                           ):
-
-    length_array = 0
-    for length in dimensions[0].lengths:
-        new_length_array = length.array
-        # if regular_print:
-        #     new_length_array = length.array
-        # else:
-        #     new_length_array = torch.concat(length.array_buffer)
-        length_array = length_array + new_length_array
-
-    if state_numbers is not None:
-        # get mask for all objects in defined state
-        object_states = simulation_object.object_states
-        # if regular_print:
-        #     object_states = simulation_object.object_states
-        # else:
-        #     object_states = torch.concat(simulation_object.object_states_buffer)
-        mask = torch.zeros_like(object_states).to(torch.bool)
-        for state in state_numbers:
-            mask = (mask | (object_states == state))
-        # get the maximum number of objects that should be analyzed
-        # (from all simulations)
-        # first sort mask so that first in the matrix there are all True
-        # elements
-        mask_sorted, idx = torch.sort(mask.to(torch.int), dim=1,
-                                      stable=True, descending=True)
-        # the first position that is not True is the sum of all True
-        # elements across the first dim
-        first_false_position = torch.count_nonzero(mask_sorted, dim=1)
-        # then get the maximum of all simulations
-        max_nb_objects = first_false_position.max()
-
-        # set all properties of objects outside of mask to NaN
-        # also use the maximum number of objects of interest for all
-        # simulations, to discard all parts of the sorted array that only
-        # contains objects which are not of interest
-        position_array[mask_inv] = float("nan")
-        position_array = torch.gather(position_array, dim=1, index=idx)
-        position_array = position_array[:, :max_nb_objects]
-
-        length_array[mask_inv] = float("nan")
-        length_array = torch.gather(length_array, dim=1, index=idx)
-        length_array = length_array[:, :max_nb_objects]
-
-    # create boolean data array later by expanding each microtubule in space
-    # size of array will be:
-    # (max_position of neurite / resolution) x nb of microtubules
-    min_position = dimensions[0].position.min_value
-    if min_position is None:
-        min_position = 0
-    max_position = dimensions[0].position.max_value
-
-    device = simulation_object.device
-
-    positions = torch.arange(min_position, max_position + resolution * 0.9,
-                             resolution).to(device)
-
-    # print(position_array.shape, positions.shape)
-    all_data = torch.zeros((position_array.shape[0], positions.shape[0],
-                            *position_array.shape[2:])).to(device)
-
-    # only if at least one element is True, analyze the data
-    if mask.sum() > 0:
-
-        position_dimension = int(round((max_position - min_position)
-                                       / resolution, 5))
-        # print(1, time.time() - start)
-        start = time.time()
-        # create tensors on correct device
-        tensors = simulation_object.tensors
-
-        # data type depends on dimension 0 - since that is the number of
-        # different int values needed (int8 for <=256; int16 for >=256)
-        # (dimension 0 is determined by max_x of neurite / resolution)
-        if (position_dimension + 1) < 256:
-            indices_tensor = torch.ByteTensor
-            indices_dtype = torch.uint8
-        else:
-            indices_tensor = torch.ShortTensor
-            indices_dtype = torch.short
-
-        # extract positions of the array that actually contains objects
-        # crop data so that positions that don't contain objects
-        # are excluded
-        # objects_array = ~torch.isnan(position_array)
-        # positions_object = torch.nonzero(objects_array)
-        # min_pos_with_object = positions_object[:,0].min()
-
-        position_start = position_array
-        # max_nb_objects = position_start.shape[0]
-        # position_start = position_start[min_pos_with_object:max_nb_objects]
-
-        # transform object properties into multiples of resolution
-        # then transform length into end position
-        position_start = torch.div(position_start, resolution,
-                                   rounding_mode="floor")  # .to(torch.short)
-        position_start = torch.unsqueeze(position_start, 1)
-
-        position_end = length_array.unsqueeze(1)
-
-        # position_end = position_end[min_pos_with_object:max_nb_objects]
-        position_end = torch.div(position_end + position_array.unsqueeze(1),
-                                 resolution,
-                                 rounding_mode="floor")  # .to(indices_dtype)
-
-        # # remove negative numbers to only look at inside the neurite
-        # position_start[position_start < 0] = 0
-        # position_start = position_start#.to(indices_dtype)
-
-        # create indices array which each number
-        # corresponding to one position in space (in dimension 0)
-        indices = np.linspace(0, position_dimension, position_dimension + 1)
-        indices = np.expand_dims(indices,
-                                 tuple(range(1, len(position_start.shape) - 1)))
-        indices = indices_tensor(indices).unsqueeze(0).to(device=device)
-
-        # split by simulations to reduce memory usage, if needed
-        # otherwise high memory usage leads to
-        # massively increased processing time
-        # with this split, processing time increases linearly with
-        # array size (up to a certain max array size beyond which
-        # the for loop leads to a supralinear increase in processing time)
-
-        nb_objects = position_start.shape[2]
-        # find way to dynamically determine ideal step size!
-        step_size = nb_objects  # 5
-        nb_steps = int(nb_objects / step_size)
-        start_nb_objects = torch.linspace(0, nb_objects - step_size, nb_steps)
-
-        # print(2, time.time() - start)
-        start = time.time()
-        for start_nb_object in start_nb_objects:
-            end_nb_object = int((start_nb_object + step_size).item())
-            start_nb_object = int(start_nb_object.item())
-            # create boolean data array later by expanding each microtubule in space
-            # use index array to set all positions in boolean data array to True
-            # that are between start point and end point
-            nb_timepoints = position_start.shape[0]
-            data_array = ((indices.expand(nb_timepoints, -1, step_size,
-                                          *position_start.shape[3:])
-                           >= position_start[:, :,
-                              start_nb_object:end_nb_object]) &
-                          (indices.expand(nb_timepoints, -1, step_size,
-                                          *position_start.shape[3:])
-                           <= position_end[:, :,
-                              start_nb_object:end_nb_object]))
-
-            # then sum across microtubules to get number of MTs at each position
-            data_array_sum = torch.sum(data_array, dim=2, dtype=torch.int16)
-
-            all_data = all_data + data_array_sum
-            # val_tmp = all_data[:2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-
-    # print(3, time.time() - start)
-    start = time.time()
-    data_array = all_data[:, :-1]
-
-    dimensions = [-1] + [1] * (len(data_array.shape) - 2)
-    positions = positions.view(*dimensions)[:-1]
-    positions = positions.unsqueeze(0).expand([data_array.shape[0],
-                                               *positions.shape])
-
-
 class PropertyGeometry():
 
     def __init__(self, properties, operation):
@@ -709,18 +524,18 @@ class DataExtraction():
         all_data = self._execute_operation(state_groups, simulation_object,
                                            **all_kwargs)
 
-        if self.operation_name == "global":
-            all_kwargs["nucleation_states"] = True
-            object_creation_source = simulation_object.creation_source
-            all_creation_sources = np.unique(object_creation_source)
-            state_groups = {}
-            for creation_source in all_creation_sources:
-                creation_name = simulation_object.transitions[int(creation_source)].name
-                state_groups[creation_name] = [int(creation_source)]
-            new_data = self._execute_operation(state_groups, simulation_object,
-                                               **all_kwargs)
-
-            all_data = {**all_data, **new_data}
+        # if self.operation_name == "global":
+        #     all_kwargs["nucleation_states"] = True
+        #     object_creation_source = simulation_object.creation_source
+        #     all_creation_sources = np.unique(object_creation_source)
+        #     state_groups = {}
+        #     for creation_source in all_creation_sources:
+        #         creation_name = simulation_object.transitions[int(creation_source)].name
+        #         state_groups[creation_name] = [int(creation_source)]
+        #     new_data = self._execute_operation(state_groups, simulation_object,
+        #                                        **all_kwargs)
+        #
+        #     all_data = {**all_data, **new_data}
 
         return all_data
 
@@ -759,10 +574,10 @@ class DataExtraction():
                              **kwargs):
 
         start = time.time()
-        object_states = simulation_object.object_states
+        object_states = simulation_object.object_states[0]
 
         # get mask of each position not being in any of the state_numbers
-        mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
+        mask = torch.zeros(object_states.shape).to(torch.bool)
         mask_inv = torch.full(object_states.shape, 1).to(torch.bool)
         for state in state_numbers:
             mask_inv = (mask_inv & (object_states != state))
@@ -901,14 +716,14 @@ class DataExtraction():
         if nucleation_states:
             object_states = simulation_object.creation_source.unsqueeze(0)
         else:
-            object_states = simulation_object.object_states
+            object_states = simulation_object.object_states[0]
 
         # if regular_print:
         #     object_states = simulation_object.object_states.unsqueeze(0)
         # else:
         #     object_states = torch.concat(simulation_object.object_states_buffer)
 
-        mask = torch.zeros_like(torch.Tensor(object_states)).to(torch.bool)
+        mask = torch.zeros(object_states.shape).to(torch.bool)
         mask_inv = torch.full(object_states.shape, 1).to(torch.bool)
         for state in state_numbers:
             mask = (mask | (object_states == state))
@@ -986,7 +801,7 @@ class DataExtraction():
         return data_dict
 
     def _2D_lifetime_to_1D_density(self, dimensions, simulation_object,
-                                   rate,
+                                   rates,
                                     state_numbers=None,
                                     **kwargs):
 
@@ -996,14 +811,14 @@ class DataExtraction():
         for position in dimensions[0].positions:
             position_array = position_array + position.array
 
-        object_states = simulation_object.object_states
+        object_states = simulation_object.object_states[0]
         if state_numbers is not None:
             # get mask for all objects in defined state
             # if regular_print:
             #     object_states = simulation_object.object_states
             # else:
             #     object_states = torch.concat(simulation_object.object_states_buffer)
-            mask = torch.zeros_like(object_states).to(torch.bool)
+            mask = torch.zeros(object_states.shape).to(torch.bool)
             mask_inv = torch.full(object_states.shape, 1).to(torch.bool)
             for state in state_numbers:
                 mask = (mask | (object_states == state))
@@ -1047,8 +862,6 @@ class DataExtraction():
 
         to_cuda = lambda x: numba.cuda.to_device(np.ascontiguousarray(x))
 
-        print(lifetime_array.shape)
-
         new_object_lifetime_array = to_cuda(np.full(lifetime_array.shape,
                                                     np.nan))
         # Lifetimes are organized so that the start point of an object is marked
@@ -1078,35 +891,38 @@ class DataExtraction():
         new_object_lifetime_array = (simulation_object.min_time -
                                      new_object_lifetime_array)
 
-        # print(new_object_lifetime_array[:10,:10,0,0])
-        # assume very simple rate based modifications with initial condition
-        # 0 for the modification and initial condition 1 for the not modified
-        modified = 1 - np.exp(-rate *
-                                   new_object_lifetime_array)
+        data_dict = {}
 
-        unmodified = 1 - modified
+        data_columns = []
+        for rate in rates:
+            # print(new_object_lifetime_array[:10,:10,0,0])
+            # assume very simple rate based modifications with initial condition
+            # 0 for the modification and initial condition 1 for the not modified
+            modified = 1 - np.exp(-rate * new_object_lifetime_array)
 
-        # sum modifications across all objects to get sum of modifications
-        # at each position
-        modified = np.nansum(modified, axis=0)
-        unmodified = np.nansum(unmodified, axis=0)
+            unmodified = 1 - modified
+
+            # sum modifications across all objects to get sum of modifications
+            # at each position
+            modified = np.nansum(modified, axis=0)
+            unmodified = np.nansum(unmodified, axis=0)
+
+            data_column ="1D_density_modified_" + str(rate)
+            data_columns.append(data_column)
+            data_dict[data_column] = torch.Tensor(modified).unsqueeze(0)
+            data_column ="1D_density_unmodified_" + str(rate)
+            data_columns.append(data_column)
+            data_dict[data_column] = torch.Tensor(unmodified).unsqueeze(0)
 
         positions = torch.arange(0,
-                                 modified.shape[1] * resolution,  # + resolution * 0.9,
+                                 modified.shape[0] * resolution,  # + resolution * 0.9,
                                  resolution)
 
-        dimensions = [-1] + [1] * (len(modified.shape) - 2)
+        dimensions = [-1] + [1] * (len(modified.shape) - 1)
         positions = positions.view(*dimensions)
-        positions = positions.unsqueeze(0).expand([modified.shape[0],
-                                                   *positions.shape])
-
-        data_dict = {}
+        # positions = positions.expand([modified.shape[0], *positions.shape])
         data_dict["1D_density_position"] = positions[:,:1,:].unsqueeze(0)
-
-        data_dict["1D_density_modified"] = torch.Tensor(modified).unsqueeze(0)
-        data_dict["1D_density_unmodified"] = torch.Tensor(unmodified).unsqueeze(0)
         del positions
-
         # mean = modified.mean(axis=1)
         # plt.figure()
         # plt.plot(mean)
@@ -1116,7 +932,7 @@ class DataExtraction():
         # plt.plot(mean)
         # dasd
 
-        return data_dict, ["1D_density_modified", "1D_density_unmodified"]
+        return data_dict, data_columns
 
 
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,
@@ -1163,7 +979,7 @@ class DataExtraction():
 
         if state_numbers is not None:
             # get mask for all objects in defined state
-            object_states = simulation_object.object_states
+            object_states = simulation_object.object_states[0]
             # if regular_print:
             #     object_states = simulation_object.object_states
             # else:

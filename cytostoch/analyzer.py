@@ -6,7 +6,110 @@ import re
 import copy
 import time
 from tqdm import tqdm
+import numba
+import cytostoch.simulation
+from cytostoch import simulation
+import math
 
+@numba.cuda.jit
+def _get_first_and_last_object_pos(nb_objects, nb_parallel_cores, core_id):
+    objects_per_core = math.ceil(nb_objects / nb_parallel_cores)
+    if core_id < 0:
+        core_id_use = int(- (core_id + 1))
+    else:
+        core_id_use = int(core_id)
+
+    object_pos = objects_per_core * core_id_use
+    last_object_pos = objects_per_core * (core_id_use + 1)
+    last_object_pos = min(last_object_pos, nb_objects)
+    # if core_id is negative, then it should be started from the back
+    # (negative object positions)
+    if core_id < 0:
+        last_object_pos = int(- last_object_pos)
+        if object_pos == 0:
+            first_object_pos = -2
+        else:
+            first_object_pos = - object_pos
+    else:
+        first_object_pos = object_pos
+    return int(first_object_pos), int(last_object_pos)
+
+@numba.cuda.jit
+def _object_length_in_range(start_length_in_range, end_length_in_range,
+                            range_start, range_end,
+                            start_nb_object, end_nb_object,
+                            position_array, length_array,
+                            nb_parallel_cores):
+
+    nb_processes = numba.cuda.gridsize(1)
+    thread_id = numba.cuda.grid(1)
+    grid = numba.cuda.cg.this_grid()
+
+    # reassign_threads_time_step_size = 0.1
+    # min_time_diff_for_reassigning = 0.1
+    # nb_reassigned_threads = 1
+    # rel_time_reassignment_check = 0.1
+
+    total_nb_simulations = (position_array.shape[-2] *
+                            position_array.shape[-1] *
+                            nb_parallel_cores)
+    # print(cuda.gridsize(1), total_nb_simulations)
+    current_sim_nb = thread_id
+
+    while current_sim_nb < total_nb_simulations:
+
+        param_id = int(math.floor(current_sim_nb /
+                                  (position_array.shape[-2] *
+                                   nb_parallel_cores)))
+        sim_id = int(math.floor((current_sim_nb -
+                                 param_id * position_array.shape[-2] *
+                                 nb_parallel_cores)
+                                / nb_parallel_cores))
+        core_id = int(current_sim_nb -
+                      param_id * position_array.shape[-2] * nb_parallel_cores -
+                      sim_id * nb_parallel_cores)
+
+        (object_pos,
+         last_object_pos) = _get_first_and_last_object_pos(end_nb_object -
+                                                           start_nb_object,
+                                                           nb_parallel_cores,
+                                                           core_id)
+
+        object_pos += start_nb_object
+        while object_pos < last_object_pos:
+            if ((not math.isnan(length_array[object_pos, sim_id, param_id]))):
+                start = position_array[object_pos, sim_id, param_id]
+                end = start + length_array[object_pos, sim_id, param_id]
+                if (start < range_end) & (end > range_start):
+                    # if the object starts after the range start,
+                    # the start length in range is 0, since the beginning is
+                    # already in the range
+                    if start >= range_start:
+                        start_length_in_range[object_pos, sim_id, param_id] = 0
+                    else:
+                        # otherwise, the start length in range is the difference
+                        # between the start pos in range and the start of the
+                        # object
+                        start_length_in_range[object_pos,
+                                           sim_id, param_id] = (range_start -
+                                                                start)
+
+                    # if the object end is before the end of the range
+                    # the end length in range is the actual length of the
+                    # object (end - start)
+                    if end <= range_end:
+                        end_length_in_range[object_pos,
+                                            sim_id, param_id] = (end - start)
+                    else:
+                        # otherwise, the object end is after the range end
+                        # and thus the end length in range is the difference of
+                        # the range end and the object start
+                        end_length_in_range[object_pos,
+                                            sim_id, param_id] = (range_end -
+                                                                start)
+
+            object_pos += 1
+        current_sim_nb += nb_processes
 
 class Analyzer():
 
@@ -55,6 +158,216 @@ class Analyzer():
         # supplying a different data folder might make sense and is allowed
         if self.simulation is not None:
             self.data_folder = self.simulation.data_folder
+
+    def get_global_object_orientation(self, transition_nb_for_orientation=None,
+                                      chance_of_orientation=0.5):
+        """
+
+        Args:
+            transition_nb_for_orientation (int): Number of transition for
+                nucleation that creates the objects of the orientation to be
+                measured.
+            chance_of_orientation (float): For the defined nucleation, the
+                chance (between 0 and 1) that an object has the orientation
+                to be measured. A value of 0.5 means that half of all objects
+                nucleated with this mechanism have the orientation to be
+                measured.
+
+        Returns:
+
+        """
+
+
+        if self.simulation is None:
+            object_states_array = torch.load(os.path.join(self.data_folder,
+                                                    "object_states.pt"))
+        else:
+            object_states_array = self.simulation.object_states
+
+        object_states = object_states_array[:, 0]
+        orientation = object_states_array[:, 2]
+
+        # if a target transition_nb for the desired orientation is defined
+        # only leave positions with that number as nonzero
+        if transition_nb_for_orientation is not None:
+            orientation[orientation != transition_nb_for_orientation] = 0
+
+        orientation_count = torch.count_nonzero(orientation, dim=1)
+        object_count = torch.count_nonzero(object_states, dim=1)
+
+        relative_orientation = ((orientation_count / object_count) *
+                                chance_of_orientation)
+
+        orientation_data = {}
+        # length_decay_data["time"] = (torch.Tensor(range(len(all_lengths_in_range)))
+        #                              * time_resolution).unsqueeze(1).unsqueeze(1).expand(all_lengths_in_range.shape)
+        orientation_data["fraction"] = relative_orientation.unsqueeze(1)[:-1]
+
+        all_data = {}
+        all_data["orientation_fraction"] = orientation_data
+
+        simulation.SSA._save_data(all_data, self.data_folder, 0)
+
+
+    def track_local_object_length(self, range_start, range_end,
+                                  max_pos = None, time_resolution = None):
+        """
+        Simulate a photoconversion experiment. The accuracy is limited by the
+        time resolution of the simulation.
+
+        Args:
+            start_pos: relative start position of photoconversion
+            end_pos: relative end position of photoconversion
+            max_pos: max absolute position, only needed if simulation object
+                is not defined for analyzer
+
+        """
+        if self.simulation is None:
+            object_states = torch.load(os.path.join(self.data_folder,
+                                                    "object_states.pt"))
+            properties_array = torch.load(os.path.join(self.data_folder,
+                                                       "property_array.pt"))
+        else:
+            object_states = self.simulation.object_states
+            properties_array = self.simulation.properties_array
+
+        if (max_pos is None) & (self.simulation is None):
+            raise ValueError("For the photoconversion simulation, either the "
+                             "simulation object or the max_pos need to be "
+                             "defined.")
+        elif max_pos is None:
+            max_pos = self.simulation.properties[0].max_value
+
+        if (time_resolution is None) & (self.simulation is None):
+            raise ValueError("For the photoconversion simulation, either the "
+                             "simulation object or the time_resolution "
+                             "need to be defined.")
+        elif time_resolution is None:
+            time_resolution = self.simulation.time_resolution
+
+        # get absolute start and end pos
+        range_start_abs = range_start * max_pos
+        range_end_abs = range_end * max_pos
+
+        # For each timepoint have the object length that was initially in the
+        # defined compartment range (between start_pos and end_pos)
+
+        all_lengths_in_range = []
+        # For first timepoint:
+        # Go through each object and check how much length is
+        # between defined start and end position in compartment.
+        # Save start and end position of object that is in range,
+        # in separate array
+        first_timepoint_idx_states = 3
+        initial_creation_time = object_states[1, first_timepoint_idx_states]
+        first_timepoint_idx_props = 1
+        properties = properties_array[first_timepoint_idx_props]
+
+        first_false_position = torch.count_nonzero(
+            object_states[0,first_timepoint_idx_props], dim=0)
+        max_nb_objects = first_false_position.max()
+
+        start_length_in_range = np.zeros(object_states.shape[2:])
+        end_length_in_range = np.zeros(object_states.shape[2:])
+
+        def to_cuda(x):
+            return numba.cuda.to_device(np.ascontiguousarray(x))
+
+        start_length_in_range = to_cuda(start_length_in_range)
+        end_length_in_range = to_cuda(end_length_in_range)
+
+        nb_parallel_cores = 32
+
+        nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
+
+        properties_sum = 0
+        for property_nb in range(1, properties.shape[0]):
+            properties_sum = properties_sum + properties[property_nb]
+
+        _object_length_in_range[nb_SM, nb_cc](start_length_in_range,
+                                              end_length_in_range,
+                                              range_start_abs, range_end_abs,
+                                              0, int(max_nb_objects),
+                                              to_cuda(properties[0]),
+                                              to_cuda(properties_sum),
+                                              nb_parallel_cores)
+
+        start_length_in_range = torch.Tensor(start_length_in_range.copy_to_host()).cpu()
+        end_length_in_range = torch.Tensor(end_length_in_range.copy_to_host()).cpu()
+
+        # numba cuda kernel to get the start and end pos in range for each
+        # object
+        total_length_in_range = (end_length_in_range -
+                                 start_length_in_range).sum(axis=0)
+        all_lengths_in_range.append(torch.Tensor(total_length_in_range).unsqueeze(0))
+
+        torch.set_printoptions(linewidth=2000)
+        # print(initial_creation_time)
+        # print(object_states[1, first_timepoint_idx_states][:8,0,0])
+        # print(object_states[0, first_timepoint_idx_states])
+
+        object_mask = initial_creation_time == 0
+        # For following timepoints:
+        # If same object is still present (check position and creation time)
+        # check how much the length is below the end point in range.
+        # Subtract that amount from the length of the first timepoint.
+        for timepoint in range(1, object_states.shape[1] -
+                                  first_timepoint_idx_states):
+
+            timepoint_idx_states = timepoint + first_timepoint_idx_states
+            timepoint_idx_props = timepoint + first_timepoint_idx_props
+            creation_time = object_states[1, timepoint_idx_states]
+            # update mask to only include the same objects as in the beginning
+            # (indicated by same position in array and same creation time)
+            object_mask = object_mask | (creation_time != initial_creation_time)
+
+            # print(timepoint, (~object_mask).sum()/object_mask.sum())
+
+            # initial_creation_time = object_states[1, timepoint_idx_states]
+            # print(timepoint_idx_states, object_states[0, timepoint_idx_states][:8,0,0])
+            # print(timepoint_idx_states,
+            #       properties_array[timepoint_idx_states, 1][:8,0,0])
+            # print(timepoint_idx_states,
+            #       properties_array[timepoint_idx_states, 2][:8,0,0])
+            # print(object_mask.shape)
+
+            properties = properties_array[timepoint_idx_props]
+            # set all properties for initial objects that are not there anymore
+            # to 0. Thereby end_length_in_range is also reduced to 0 and no length
+            # for that object is considered
+            properties_sum = 0
+            for property_nb in range(1, properties.shape[0]):
+                properties_sum = properties_sum + properties[property_nb]
+
+            properties_sum[object_mask] = 0
+            # reduce end_pos in range if properties_sum is below it
+            end_length_in_range[properties_sum < end_length_in_range] = properties_sum[properties_sum < end_length_in_range]
+            # if the property sum is below the start pos in range, the end pos
+            # is set to 0, since nothing of the object in the initial range is
+            # left
+            end_length_in_range[properties_sum <= start_length_in_range] = 0
+            start_length_in_range[properties_sum <= start_length_in_range] = 0
+            # sum total length in range for all objects
+            # print((end_length_in_range - start_length_in_range).max())
+
+            total_length_in_range = (end_length_in_range -
+                                     start_length_in_range).sum(axis=0)
+            all_lengths_in_range.append(torch.Tensor(total_length_in_range).unsqueeze(0))
+
+        all_lengths_in_range = torch.concat(all_lengths_in_range, axis=0).unsqueeze(1)
+        length_decay_data = {}
+        # length_decay_data["time"] = (torch.Tensor(range(len(all_lengths_in_range)))
+        #                              * time_resolution).unsqueeze(1).unsqueeze(1).expand(all_lengths_in_range.shape)
+        length_decay_data["decay"] = all_lengths_in_range
+
+        all_data = {}
+        all_data["length_decay_"
+                 +str(range_start)+"-"+str(range_end)] = length_decay_data
+
+        simulation.SSA._save_data(all_data, self.data_folder, 0)
+
+        # return all_data
+
 
     def start(self, time_resolution, max_time, use_assertion_checks = True):
         """
@@ -609,6 +922,15 @@ class Analyzer():
                 data_shape).flatten().unsqueeze(1))
             column_names.append("simulation_nb")
 
+            # the last dimensions is for the param index
+            simulation_array_shape = [1 for _ in data_shape]
+            simulation_array_shape[-1] = data_shape[-1]
+            param_nb_array = torch.arange(data_shape[-1]).view(
+                simulation_array_shape)
+            data_values.append(param_nb_array.cpu().expand(
+                data_shape).flatten().unsqueeze(1))
+            column_names.append("param_nb")
+
             # next add all simulation parameters
             for name, parameter in parameters.items():
                 # print(parameter.shape, data_shape)
@@ -639,9 +961,11 @@ class Analyzer():
                     data_shape).flatten().unsqueeze(1))
                 column_names.append(name)
 
+
             # now add all data
             for column_name, data in data_dict.items():
-                data_values.append(data.cpu().expand(data_shape)
+                data_values.append(data.cpu().expand((data.shape[0],
+                                                      *data_shape[1:]))
                                    .flatten().unsqueeze(1))
                 column_names.append(column_name)
 

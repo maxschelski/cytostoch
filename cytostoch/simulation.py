@@ -170,7 +170,8 @@ class SSA():
                single_parameter_changes=True,
               two_combined_parameter_changes = False,
               nb_parallel_cores=1,
-               track_object_lifetime=False,
+               track_local_object_lifetime=False,
+              track_object_creation_time=False,
               all_parameter_combinations=False,
               comment="", initial_state_folder="",
               seed=42,
@@ -270,8 +271,11 @@ class SSA():
         self.local_lifetime_resolution = local_lifetime_resolution
         self.local_resolution = local_resolution
         self.two_combined_parameter_changes = two_combined_parameter_changes
-        self.track_object_lifetime = track_object_lifetime
+        self.track_local_object_lifetime = track_local_object_lifetime
+        self.track_object_creation_time = track_object_creation_time
         self.min_time = min_time
+
+        self.data_type = np.float32
 
         with torch.no_grad():
             self._start(nb_simulations, min_time, data_extractions, data_folder,
@@ -302,7 +306,8 @@ class SSA():
         # - all object properties over time
         nb_properties = len(self.properties)
 
-        property_start_values = np.full((nb_properties, 2), math.nan)
+        property_start_values = np.full((nb_properties, 2), math.nan,
+                                        dtype=self.data_type)
         for property_nb, property in enumerate(self.properties):
             start_value = property.start_value
             if property.start_value is None:
@@ -360,7 +365,7 @@ class SSA():
 
         property_extreme_values = np.full((2, nb_properties,
                                        max_nb_extreme_properties),
-                                      math.nan)
+                                      math.nan, dtype=self.data_type)
 
         for property_nb, property in enumerate(self.properties):
             min_value = property._min_value
@@ -424,6 +429,7 @@ class SSA():
         parameter_value_array = np.zeros((nb_parameters,
                                           nb_timepoints,
                                           param_shape_batch[1]))
+        print("\n")
         for nb, parameter in enumerate(self.parameters):
             array = torch.Tensor(parameter.value_array[:,param_slice])
             # if parameter is per_um, multiply the parameter value with the
@@ -455,7 +461,8 @@ class SSA():
 
         # the first dimension is the number of the parameter for the rate
         # the second dimensions is the number of the parameter for resources
-        transition_parameters = np.full((nb_transitions, 3), np.nan)
+        transition_parameters = np.full((nb_transitions, 3), np.nan,
+                                        dtype=self.data_type)
         for nb, transition in enumerate(self.transitions):
             transition_parameters[nb, 0] = transition.parameter.number
             if transition.resources is not None:
@@ -490,7 +497,7 @@ class SSA():
     def _get_transition_transferred_vals_array(self):
         nb_transitions = len(self.transitions)
         all_transition_tranferred_vals = np.full((nb_transitions, 2),
-                                                 math.nan)
+                                                 math.nan, dtype=self.data_type)
         for nb, transition in enumerate(self.transitions):
             transfer_property = transition.transfer_property
             if transfer_property is None:
@@ -521,7 +528,7 @@ class SSA():
                                             len(self.properties),
                                             max_nb_changed_start_values*2)
         changed_start_values_array = np.full(changed_start_values_array_shape,
-                                             math.nan)
+                                             math.nan, dtype=self.data_type)
 
         for transition_nb, transition in enumerate(self.transitions):
             if not hasattr(transition, "changed_start_values"):
@@ -563,7 +570,7 @@ class SSA():
         creation_on_objects = np.full((len(self.transitions)+1,
                                        3, max(len(self.properties),
                                               len(self.states))),
-                                      math.nan)
+                                      math.nan, dtype=self.data_type)
         separate_densities = False
         all_properties_for_creation = set([])
         for transition_nb, transition in enumerate(self.transitions):
@@ -673,7 +680,8 @@ class SSA():
         max_nb_properties_set_to_zero = max(max_nb_properties_set_to_zero, 1)
         all_transition_set_to_zero_properties = np.full((nb_transitions,
                                                          max_nb_properties_set_to_zero),
-                                                        math.nan)
+                                                        math.nan,
+                                                        dtype=self.data_type)
         for nb, transition in enumerate(self.transitions):
             properties_set_to_zero = transition.properties_set_to_zero
             if properties_set_to_zero is None:
@@ -763,7 +771,8 @@ class SSA():
 
         all_object_removal_properties = np.full((len(self.object_removal),
                                                  max_nb_properties+1),
-                                                math.nan)
+                                                math.nan,
+                                                dtype=self.data_type)
 
         for removal_nb, object_removal in enumerate(self.object_removal):
             object_removal_properties = [property.number
@@ -802,11 +811,11 @@ class SSA():
                                          in
                                          range(len(self.object_states.shape[1:])
                                                )])
-        object_state_mask = object_states[0] > 0
+        object_state_mask = object_states[0,0] > 0
         highest_idx_with_object = (object_state_mask * idx_array).max(axis=0)
         highest_idx_with_object = np.expand_dims(highest_idx_with_object,0)
 
-        object_state_mask = object_states[0] == 0
+        object_state_mask = object_states[0,0] == 0
         lowest_idx_no_object = (object_state_mask * idx_array).min(axis=0)
         lowest_idx_no_object = np.expand_dims(lowest_idx_no_object,0)
 
@@ -862,7 +871,7 @@ class SSA():
 
         params_prop_dependence = np.full((len(self.parameters),
                                          7 + max_nb_properties),
-                                        np.nan)
+                                        np.nan, dtype=self.data_type)
 
         position_dependence = False
         dependence_nb = 0
@@ -1202,8 +1211,16 @@ class SSA():
         self._simulation_array_size = [self.max_number_objects, nb_simulations,
                                        *simulation_parameter_lengths]
 
+        if self.start_save_time is None:
+            start_save_time = 0
+        else:
+            start_save_time = self.start_save_time
+
         # get number of timepoints
-        nb_timepoints = math.ceil(self.min_time / time_resolution)
+        nb_timepoints = math.ceil(self.min_time
+                                  / time_resolution)
+
+
         if save_initial_state:
             nb_timepoints += 1
 
@@ -1347,6 +1364,17 @@ class SSA():
                                                               nb_simulations,
                                                               seed)
 
+            local_lifetime_density_size = int(highest_max_value /
+                                              self.local_lifetime_resolution)  # + 1
+
+            if self.track_local_object_lifetime:
+                local_object_lifetime_size = [max_number_objects,
+                                              local_lifetime_density_size + 1,
+                                              nb_simulations,
+                                              nb_parameter_combinations]
+            else:
+                local_object_lifetime_size = [1, 1, 1, 1]
+
             # get free GPU memory if device is cuda, to do calculations in batches
             # that fit on the GPU
             (free_memory,
@@ -1390,10 +1418,21 @@ class SSA():
                                                ), dtype=np.int64)
                                      * object_property.element_size())
 
+            # subtract number of timepoints before determining the
+            # size of data arrays
+            nb_timepoints_for_size = (nb_timepoints -
+                             max(0, (math.floor(start_save_time /
+                                                time_resolution) - 1)))
 
-            total_size = ((nb_timepoints+1) * (size_states + size_properties)
+            total_size = ((nb_timepoints_for_size+1) * (size_states + size_properties)
                           + size_density + size_tminmax
-                          + size_property_changes + size_object_dep_rates)*1.4
+                          + size_property_changes + size_object_dep_rates)
+
+            # elements will be 32 bit for lifetime, therefore 4 bytes per element
+            total_size += np.product(local_object_lifetime_size, 
+                                     dtype=np.int64) * 4
+
+            total_size *= 1.4
 
             # think about sorting parameter values in the array by
             # their magnitude - higher transition rates should be separate from
@@ -1407,6 +1446,7 @@ class SSA():
             # if total size is larger than free memory on GPU
             # split array by number of parameters into smaller pieces
             nb_memory_batches = int(math.ceil(total_size/free_memory))
+
 
             # also check how many parameter combinations can be processed
             # with the number of cuda cores available
@@ -1510,6 +1550,7 @@ class SSA():
             complete_first_last_idx_with_object_batch = torch.Tensor([])
             complete_nb_obj_all_states_batch = torch.Tensor([])
 
+
             for batch_nb in tqdm.tqdm(range(nb_batches)):
                 (object_states_batch,
                  property_array_batch,
@@ -1533,6 +1574,7 @@ class SSA():
                                         some_creation_on_objects,
                                         all_object_removal_properties,
                                         object_removal_operations,
+                                        local_object_lifetime_size,
                                         nb_timepoints,
                                        nb_dependences, max_number_objects,
                                        start_save_time, start,
@@ -1659,7 +1701,7 @@ class SSA():
                 self.simulation_time = time.time() - start
                 print("Simulation time: ", self.simulation_time)
 
-            self.object_states = torch.Tensor(np.copy(object_states[3:]))
+            self.object_states = torch.Tensor(np.copy(object_states[:, 3:]))
 
             for property_nb, property in enumerate(self.properties):
                 property.array = torch.Tensor(np.copy(
@@ -1674,6 +1716,7 @@ class SSA():
             # self.all_data = all_data
             # self.times = times
 
+
     def _execute_batch(self, batch_nb, param_shape_batch,
                        params_prop_dependence, position_dependence,
                        transition_parameters,all_transition_states,
@@ -1685,6 +1728,7 @@ class SSA():
                        changed_start_values_array, creation_on_objects,
                        some_creation_on_objects,all_object_removal_properties,
                        object_removal_operations,
+                       local_object_lifetime_size,
                        nb_timepoints, nb_dependences,
                        max_number_objects, start_save_time, start,
                        time_resolution, min_time, local_resolution,
@@ -1752,7 +1796,7 @@ class SSA():
         properties_tmax = np.full((2, 32,
                                    nb_properties - 1,
                                    *param_shape_batch),
-                                  math.nan)
+                                  math.nan, dtype=self.data_type)
         # properties_tmax_sorted = np.full((32,
         #                                   nb_properties-1,
         #                                   *param_shape_batch),
@@ -1763,7 +1807,7 @@ class SSA():
             (2, max_number_objects,
              nb_properties,
              *param_shape_batch),
-            dtype=np.float32)
+            dtype=self.data_type)
 
 
         property_changes_per_state = np.zeros(
@@ -1809,7 +1853,7 @@ class SSA():
 
         timepoint_array = np.full((nb_timepoints + 2,
                                    *param_shape_batch),
-                                  math.nan)
+                                  math.nan, dtype=self.data_type)
 
         timepoint_array[:1] = 0
 
@@ -1818,17 +1862,29 @@ class SSA():
 
         # create new object states object that includes data for
         # all timepoints
-        object_states = np.zeros((nb_timepoints + 3,
+
+        # if time of creation is tracked, object states also tracks the time
+        # at which each object was created
+        # This provides a unique ID for each object: the position in the array
+        # and the time it was created. This is needed for simulation
+        # of photoconversion experiments.
+        if self.track_object_creation_time:
+            nb_dims_time_track = 2
+        else:
+            nb_dims_time_track = 1
+
+        object_states = np.zeros((nb_dims_time_track,
+                                  nb_timepoints + 3,
                                   self.object_states.shape[0],
                                   *param_shape_batch),
-                                 dtype=np.int32)
+                                 dtype=np.float32)
 
         nb_properties = len(self.properties)
 
         properties_array = np.full((nb_timepoints + 1, nb_properties,
                                     self.object_states.shape[0],
                                     *param_shape_batch),
-                                   math.nan)
+                                   math.nan, dtype=self.data_type)
 
         # print(object_states.shape)
         # object_states = self.initial_object_states.clone()
@@ -1841,23 +1897,24 @@ class SSA():
         if len(self.initial_object_states) == 0:
 
             # the first index is the current object states
-            object_states[0] = self.object_states
+            object_states[0, 0] = self.object_states
 
             # the second index is the transition number of the
             # generating transition, that the object comes from
 
             if save_initial_state:
-                object_states[2] = self.object_states
+                object_states[0, 2] = self.object_states
 
             # calculate number of objects for all states
             nb_objects_all_states = np.zeros((2, max(len(self.parameters),
                                                   len(self.states)) + 1,
                                               *param_shape_batch))
+
             nb_objects_all_states[0, 0] = self.object_states.shape[0]
 
             for state_nb, state in enumerate(self.states):
                 nb_objects_all_states[0, state_nb + 1] = np.sum(
-                    object_states[0] == state.number, axis=0)
+                    object_states[0, 0] == state.number, axis=0)
 
             for property_nb, property in enumerate(self.properties):
                 properties_array[0, property_nb] = property.array
@@ -1870,11 +1927,11 @@ class SSA():
                 object_states)
 
         else:
-            object_states[0] = self.initial_object_states[0].clone()
-            object_states[1] = self.initial_object_states[1].clone()
+            object_states[0,0] = self.initial_object_states[0].clone()
+            object_states[0,1] = self.initial_object_states[1].clone()
             properties_array[0] = self.initial_properties_array[0].clone()
             if save_initial_state:
-                object_states[2] = self.initial_object_states[0].clone()
+                object_states[0,1] = self.initial_object_states[0].clone()
                 properties_array[1] = self.initial_properties_array[0].clone()
 
             nb_objects_all_states = self.initial_nb_obj_all_states.clone()
@@ -1888,17 +1945,10 @@ class SSA():
 
         highest_max_value = self.properties[0].max_value.values.max()
 
-        local_lifetime_density_size = int(highest_max_value /
-                                          self.local_lifetime_resolution) #+ 1
+        local_object_lifetime_size[-1] = param_combinations_per_batch
 
-        if self.track_object_lifetime:
-            local_object_lifetime_array = np.full((max_number_objects,
-                                                   local_lifetime_density_size + 1,
-                                                   nb_simulations,
-                                                   param_combinations_per_batch)
-                                                  , np.nan)
-        else:
-            local_object_lifetime_array = np.full((1,1,1,1), np.nan)
+        local_object_lifetime_array = np.full(tuple(local_object_lifetime_size)
+                                              , np.nan, dtype=self.data_type)
 
         local_object_lifetime_array[:,0] = 0
 
@@ -1917,7 +1967,6 @@ class SSA():
 
         thread_masks = np.zeros((4, *param_shape_batch), dtype=np.int64)
 
-
         timepoint_array = convert_array(timepoint_array)
         properties_array = convert_array(properties_array)
 
@@ -1930,14 +1979,12 @@ class SSA():
 
         thread_to_sim_id = np.zeros((size, 3))
 
-
         # local_density_batch = cuda.to_device(
         #     convert_array(local_density))
         # total_density_batch = cuda.to_device(
         #     convert_array(total_density))
 
-        timepoint_array_batch = cuda.to_device(
-            convert_array(timepoint_array))
+        timepoint_array_batch = cuda.to_device(timepoint_array)
         time_resolution = cuda.to_device(time_resolution)
 
         sim = simulation_numba._execute_simulation_gpu
@@ -2070,6 +2117,13 @@ class SSA():
         self.local_object_lifetime_array = torch.Tensor(
             local_object_lifetime_array.copy_to_host())
 
+        # for time_tmp in range(3, object_states_batch.shape[1]):
+        #     print(object_states_batch[0, time_tmp, 1, 0, 0],
+        #           object_states_batch[1, time_tmp, 1, 0, 0],
+        #           property_array_batch[time_tmp-2, 0, 1, 0,0],
+        #           property_array_batch[time_tmp-2, 1, 1, 0,0],
+        #           property_array_batch[time_tmp-2, 2, 1, 0,0])
+
         first_last_idx_with_object = first_last_idx_with_object.copy_to_host()
 
         del timepoint_array_batch
@@ -2078,8 +2132,8 @@ class SSA():
         # plt.figure()
         # plt.plot(local_density_batches.mean(axis=1))
 
-        self.object_states = object_states_batch[3:]
-        self.creation_source = object_states_batch[2]
+        self.object_states = object_states_batch[:, 3:]
+        self.creation_source = object_states_batch[0, 2]
 
         # print(np.unique(object_states_batch[0]))
         # print(len(np.where(object_states_batch[0,:,0,0] == 1)[0]),
@@ -2158,7 +2212,7 @@ class SSA():
         if self.save_results:
             print("Saving raw and analyzed data ...")
             self._save_times_and_object_states(batch_nb)
-            self._save_data(all_data, batch_nb)
+            self._save_data(all_data, self.data_folder, batch_nb)
 
         # print(2, numba.cuda.current_context().get_memory_info()[0]
         # /1024/1024/1024)
@@ -2192,8 +2246,8 @@ class SSA():
             del object_dependent_rates_batch
             del property_array_batch
             del object_states_batch
-            del local_density_batch
-            del total_density_batch
+            # del local_density_batch
+            # del total_density_batch
         else:
             self.all_data = all_data
 
@@ -2338,7 +2392,8 @@ class SSA():
                 sim_param_comb_lengths.append(total_param_length)
             simulation_parameter_lengths = [np.sum(sim_param_comb_lengths) + 1]
 
-        elif not self.single_parameter_changes:
+        elif ((not self.single_parameter_changes) &
+              (not self.all_parameter_combinations)):
             simulation_parameter_lengths = [nb
                                               for nb
                                               in simulation_parameter_lengths
@@ -2364,6 +2419,17 @@ class SSA():
                                             + 1)
             simulation_parameter_lengths = [simulation_parameter_lengths]
 
+        elif self.all_parameter_combinations:
+            simulation_parameter_lengths = [nb
+                                            for nb
+                                            in simulation_parameter_lengths
+                                            if nb > 1]
+            if len(simulation_parameter_lengths) == 0:
+                simulation_parameter_lengths = [1]
+            else:
+                simulation_parameter_lengths = [np.product(
+                    simulation_parameter_lengths)]
+
         if (self.dynamically_increase_nb_objects |
                 (self.max_number_objects is None)):
             # if the number of objects allowed in the simulation should be
@@ -2374,7 +2440,6 @@ class SSA():
             # to obtain the starting simulation array size
             self.max_number_objects = (max_number_objects +
                                        nb_objects_added_per_step)
-
         return simulation_parameter_lengths
 
     def _save_all_metadata(self, nb_simulations, max_number_objects):
@@ -2889,6 +2954,7 @@ class SSA():
                 all_combinations = np.array(all_combinations)
                 all_parameter_arrays.append(all_combinations)
 
+        print(single_parameter_changes, all_parameter_combinations, self.two_combined_parameter_changes)
         nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
             all_timepoints_param_vals = model_parameters.values
@@ -2929,7 +2995,13 @@ class SSA():
                             dimension]
                     array = torch.Tensor(array)
 
-                elif not single_parameter_changes:
+                elif ((not single_parameter_changes) &
+                      (not all_parameter_combinations)):
+                    # if parameter values should be used as they are supplied
+                    # except for parameters with only one value, which will
+                    # be expanded to the number of parameter combinations
+                    # (which is the number of values for any other parameter
+                    #  that has more than one value)
                     if len(param_vals) == 1:
                         array = param_vals.repeat(
                             (simulation_parameter_lengths))
@@ -2939,16 +3011,20 @@ class SSA():
                     # array = array.expand(1, *self._simulation_array_size[1:])
                     # model_parameters.value_array = array
                 elif all_parameter_combinations:
+                    # NOT WORKING AT THE MOMENT!
                     array_dimension = dimension + 2
                     expand_dimensions = copy.copy(all_dimensions)
                     expand_dimensions.remove(array_dimension)
                     # expand dimensions of parameter values to simulation array
-                    array = np.expand_dims(param_vals,
-                                           expand_dimensions)
+                    array = np.expand_dims(param_vals, expand_dimensions)
                     # save array in object, therefore also change objects saved
                     # in self.transitions and self.actions
                     array = torch.Tensor(array)
                 else:
+                    # if single parameter value changes should be done
+                    # with the first value for each parameter being the standard
+                    # parameter value that will be used for value changes for
+                    # other parameters
                     standard_value = param_vals[0]
                     standard_value = torch.Tensor([standard_value])
                     # use standard value across entire array
@@ -3270,7 +3346,8 @@ class SSA():
                 all_concat_data[data_name][keyword] = concat_data
         return all_concat_data
 
-    def _save_data(self, data_dict, iteration_nb):
+    @staticmethod
+    def _save_data(data_dict, data_folder, iteration_nb, ):
 
         data_dict_cpu = {}
         for data_name, data in data_dict.items():
@@ -3281,7 +3358,7 @@ class SSA():
         # save data to hard drive
         for data_name, data in data_dict.items():
             for keyword, data_array in data.items():
-                sub_data_folder = os.path.join(self.data_folder,
+                sub_data_folder = os.path.join(data_folder,
                                                "_data_"+data_name)
                 if not os.path.exists(sub_data_folder):
                     os.mkdir(sub_data_folder)

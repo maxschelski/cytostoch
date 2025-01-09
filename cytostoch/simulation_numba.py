@@ -265,7 +265,6 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                     # new_simulation = False
                     success = 0
                     break
-
                 success = _run_iteration(object_states,
                                          properties_array,
                                        times, parameter_value_array,
@@ -324,6 +323,9 @@ def _execute_simulation_gpu(object_states, properties_array, times,
             # while the following code seems to work, it does not speed
             # up simulations - instead for some reason it slows it down?!
 
+            # if core_id == 0:
+            #     print(timepoint_array[0, sim_id, param_id])
+
             if (timepoint_array[0, sim_id, param_id] >=
                     math.floor(min_time/time_resolution[0])):
                 # print(thread_id, warp_nb, warp_thread_idx, iteration_nb,
@@ -357,7 +359,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
                     #       times[0, sim_id, param_id],
                     #       nb_parallel_cores[sim_id, param_id])
                     # if core_id == 0:
-                    #     print(iteration_nb, sim_id)
+                    #     print(111111111111, iteration_nb, sim_id)
                     break
 
             if success == 0:
@@ -793,8 +795,8 @@ def _execute_simulation_cpu(object_states, properties_array, times,
             if assertion_checks:
                 # print("\n")
                 # print(nb_objects_all_states[:,0,0])
-                for state in range(1,np.max(object_states[0])+1):
-                    state_mask = object_states[0] == state
+                for state in range(1,int(np.max(object_states[0, 0,0]))+1):
+                    state_mask = object_states[0, 0,0] == state
                     # if state == 1:
                     #     plus_pos = (properties_array[0, 0][state_mask]
                     #                 + properties_array[0, 1][state_mask])
@@ -828,14 +830,14 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                         # if (state == 3) & (property_nb == 1):
                         #             print(property_vals_state)
                     # check that the calculated number of objects is correct
-                    nb_objects = len(object_states[0][object_states[0] == state])
+                    nb_objects = len(object_states[0, 0,0][object_states[0, 0,0] == state])
                     saved_nb_objects = nb_objects_all_states[0, state,
                                                              sim_id, param_id]
                     assert nb_objects == saved_nb_objects
                     # check that the maximum transition position is within
                     # the size of the array
                     max_position = all_transition_positions.max()
-                    assert max_position < object_states[0].shape[0]
+                    assert max_position < object_states[0, 0,0].shape[0]
             last_transition = int(current_transitions[sim_id, param_id])
 
             iteration_nb += 1
@@ -900,7 +902,7 @@ def _run_iteration(object_states, properties_array , times,
     # Implement
 
     # if (core_id == 0) & (sim_id == 0):
-    #     print(111, object_states[0,1,sim_id, param_id])
+    #     print(111, object_states[0, 0,1,sim_id, param_id])
     #     # print(properties_array.shape[0],
     #     #       properties_array.shape[1],
     #     #       properties_array.shape[2],
@@ -1064,6 +1066,13 @@ def _run_iteration(object_states, properties_array , times,
                           time_resolution[0] +
                           time_resolution[0]))
 
+    if reaction_times[sim_id, param_id] < 0:
+        print(222333344, reaction_times[sim_id, param_id])
+
+    # if core_id == 0:
+    #     print(1, times[0, sim_id, param_id], reaction_times[sim_id, param_id],
+    #           timepoint_array[0, sim_id, param_id])
+
     if ((times[0, sim_id, param_id] +
         reaction_times[sim_id, param_id]) >= next_timepoint):
         # if a new timepoint should be saved, the current transition went beyond
@@ -1076,6 +1085,15 @@ def _run_iteration(object_states, properties_array , times,
         # reaction times to the time from the saved timepoint until the transition
         # timepoint and execute actions and transitions normally.
         reaction_time_tmp = next_timepoint - times[0, sim_id, param_id]
+
+        if reaction_time_tmp < 0:
+            print(2223333, reaction_time_tmp,
+                  times[0, sim_id, param_id],
+                  timepoint_array[0, sim_id, param_id] *
+                  time_resolution[0] +
+                  time_resolution[0],
+                  reaction_times[sim_id, param_id]
+                  )
 
         _execute_actions_on_objects(parameter_value_array, action_parameters,
                                     action_state_array,
@@ -1120,6 +1138,9 @@ def _run_iteration(object_states, properties_array , times,
         if core_id == 0:
             reaction_times[sim_id, param_id] = (reaction_times[sim_id, param_id] -
                                                 reaction_time_tmp)
+
+            if reaction_times[sim_id, param_id] < 0:
+                print(22233334455, reaction_times[sim_id, param_id])
 
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
@@ -1251,6 +1272,9 @@ def _run_iteration(object_states, properties_array , times,
 
                           times)
 
+    # if core_id == 0:
+    #     print(3, times[0, sim_id, param_id], reaction_times[sim_id, param_id],
+    #           timepoint_array[0, sim_id, param_id])
     if nb_parallel_cores[sim_id, param_id] > 1:
        cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
@@ -1259,7 +1283,7 @@ def _run_iteration(object_states, properties_array , times,
                     object_states, properties_array,
                     first_last_idx_with_object,
                     local_object_lifetime_array,
-                                                 local_lifetime_resolution, times,
+                    local_lifetime_resolution, times,
                     local_resolution,
                     nb_parallel_cores,  core_id, sim_id, param_id)
 
@@ -1915,7 +1939,7 @@ def _reset_local_density(local_density, nb_parallel_cores, core_id,
 #                                                        core_id)
 #
 #     while object_pos < last_object_pos:
-#         if object_states[object_pos, sim_id, param_id] > 0:
+#         if object_states[0, 0,object_pos, sim_id, param_id] > 0:
 #
 #             start = properties_array[0, 0, object_pos, sim_id, param_id]
 #             end = start + properties_array[0, 1, object_pos, sim_id, param_id]
@@ -1974,7 +1998,7 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
     #     print(2222, core_id, object_pos, last_object_pos)
 
     while object_pos < last_object_pos:
-        if object_states[0, object_pos, sim_id, param_id] > 0:
+        if object_states[0, 0, object_pos, sim_id, param_id] > 0:
 
             creation_property = 0
             end = 0
@@ -2546,7 +2570,7 @@ def _get_rate_of_density_dependent_transition(params_prop_dependence,
     # max_position = property_extreme_values[1, 0, 0]
 
     while object_nb < last_object_pos:
-        if object_states[0, object_nb, sim_id, param_id] == start_state:
+        if object_states[0, 0, object_nb, sim_id, param_id] == start_state:
             # get actual rate of the object depending on its position
             # if the start value of position dependence is defined,
             # calculate the change from the start position value
@@ -2651,7 +2675,7 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
                                          param_id]
 
     while object_nb < last_object_pos:
-        if object_states[0, object_nb, sim_id, param_id] == start_state:
+        if object_states[0, 0, object_nb, sim_id, param_id] == start_state:
             # get actual rate of the object depending on its position
             # if the start value of position dependence is defined,
             # calculate the change from the start position value
@@ -2701,7 +2725,7 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
                                                  object_nb,
                                                  sim_id, param_id]
 
-                # print(object_states[0, object_nb, sim_id, param_id],
+                # print(object_states[0, 0, object_nb, sim_id, param_id],
                 #       params_prop_dependence[dependence_prop_nb],
                 #       int(params_prop_dependence[dependence_prop_nb]),
                 #           dependence_prop_nb,
@@ -2960,7 +2984,7 @@ def _get_tmin_tmax_for_property_changes(property_changes_tminmax_array,
                                                     core_id)
     while object_nb < last_object_pos:
         # check if action should be executed on object
-        state = int(object_states[0, object_nb, sim_id, param_id])
+        state = int(object_states[0, 0, object_nb, sim_id, param_id])
         if state > 0:
             properties_net_change = property_changes_per_state[state-1,:,
                                                                sim_id,
@@ -3320,7 +3344,7 @@ def _get_tau(total_rates, first_last_idx_with_object, object_states,
                                                               nb_parallel_cores[sim_id, param_id],
                                                               core_id)
             while object_nb < last_object_nb:
-                state = object_states[0, object_nb, sim_id, param_id]
+                state = int(object_states[0, 0, object_nb, sim_id, param_id])
 
                 if state > 0:
                     property_idx = 0
@@ -3530,7 +3554,8 @@ def _determine_positions_of_transitions(current_transitions,
         # increase index until an index without object is found and save this
         # position
         if core_id == 0:
-            if object_states[0, first_last_idx_with_object[0,sim_id, param_id],
+            if object_states[0, 0,
+                             first_last_idx_with_object[0,sim_id, param_id],
                              sim_id, param_id] != 0:
                 _increase_lowest_no_object_idx(first_last_idx_with_object,
                                                object_states, sim_id, param_id)
@@ -3542,7 +3567,7 @@ def _determine_positions_of_transitions(current_transitions,
     else:
         # if the highest idx with object vanished
         # search for the new highest object idx
-        if object_states[0, first_last_idx_with_object[1, sim_id, param_id],
+        if object_states[0, 0, first_last_idx_with_object[1, sim_id, param_id],
                          sim_id, param_id] == 0:
             _reduce_highest_object_idx(first_last_idx_with_object,
                                        object_states, sim_id, param_id)
@@ -3574,7 +3599,7 @@ def _determine_positions_of_transitions(current_transitions,
             while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:# object_states.shape[1]:#
                 # if object_state > 4:
                 #     print(555, object_state, object_pos)
-                if (object_states[0, object_pos, sim_id, param_id] ==
+                if (object_states[0, 0, object_pos, sim_id, param_id] ==
                         start_state):
 
                     if current_nb_state_objects == random_object_pos:
@@ -3593,28 +3618,6 @@ def _determine_positions_of_transitions(current_transitions,
                       #                          param_id]),
                       # all_transition_states.shape[0]
                       )
-                print(object_states[0, 0, sim_id, param_id],
-                      object_states[0, 1, sim_id, param_id],
-                      object_states[0, 2, sim_id, param_id],
-                      object_states[0, 3, sim_id, param_id],
-                      object_states[0, 4, sim_id, param_id],
-                      object_states[0, 5, sim_id, param_id],
-                      object_states[0, 6, sim_id, param_id],
-                      object_states[0, 7, sim_id, param_id],
-                      object_states[0, 8, sim_id, param_id],
-                      object_states[0, 9, sim_id, param_id],
-                      object_states[0, 10, sim_id, param_id],
-                      object_states[0, 11, sim_id, param_id],
-                      object_states[0, 12, sim_id, param_id],
-                      object_states[0, 13, sim_id, param_id],
-                      object_states[0, 14, sim_id, param_id],
-                      object_states[0, 15, sim_id, param_id],
-                      object_states[0, 16, sim_id, param_id],
-                      object_states[0, 17, sim_id, param_id],
-                      object_states[0, 18, sim_id, param_id],
-                      object_states[0, 19, sim_id, param_id],
-                      object_states[0, 20, sim_id, param_id],
-                      object_states[0, 21, sim_id, param_id])
         else:
             # print(nb_objects_all_states[1, sim_id, param_id],
             #       nb_objects_all_states[2, sim_id, param_id],
@@ -3655,12 +3658,12 @@ def _determine_positions_of_transitions(current_transitions,
             #     if current_transitions[sim_id, param_id] != 11:
             #         print(current_transitions[sim_id, param_id])
 
-            # if object_states[0, object_pos, sim_id, param_id] != 2:
-            #     if object_states[0, object_pos, sim_id, param_id] != 5:
-            #         print(object_states[0, object_pos, sim_id, param_id])
+            # if object_states[0, 0, object_pos, sim_id, param_id] != 2:
+            #     if object_states[0, 0, object_pos, sim_id, param_id] != 5:
+            #         print(object_states[0, 0, object_pos, sim_id, param_id])
             # print(1111)
             while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:
-                if (object_states[0, object_pos, sim_id, param_id] ==
+                if (object_states[0, 0, object_pos, sim_id, param_id] ==
                         start_state):
 
                     # print(2222)
@@ -3887,11 +3890,11 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
 
             nb_objects = first_last_idx_with_object[1,sim_id, param_id] + 1
             (object_pos,
-             last_object_pos) = _get_first_and_last_object_pos(nb_objects,
-                                                            nb_parallel_cores[sim_id, param_id],
-                                                            core_id)
+             last_object_pos) = _get_first_and_last_object_pos(
+                nb_objects, nb_parallel_cores[sim_id, param_id], core_id)
             while object_pos < last_object_pos:
-                object_state = object_states[0, object_pos, sim_id, param_id]
+                object_state = int(object_states[0, 0, object_pos,
+                                                 sim_id, param_id])
                 if object_state == 0:
                     object_pos += 1
                     continue
@@ -4002,7 +4005,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                         new_property_val = threshold
 
                         # # HARD CODE CATASTROPHE UPON REACHING MAX VALUE
-                        # object_states[0, object_pos,
+                        # object_states[0, 0, object_pos,
                         #                  sim_id, param_id] = 2
                         #
                         # cuda.atomic.add(nb_objects_all_states,
@@ -4088,7 +4091,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
 
                             # new_property_val = math.nan
                             # # HARD CODE LOSS OF MT UPON REACHING 0 length
-                            # object_states[0, object_pos,
+                            # object_states[0, 0, object_pos,
                             #                  sim_id, param_id] = 0
                             # properties_array[0, 0,
                             #                  object_pos,
@@ -4124,7 +4127,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     #                  sim_id, param_id], new_property_val)
 
                     # if (int(property_nb) > 0) & (new_property_val > 30):
-                    #     print(111, object_states[0, object_pos, sim_id, param_id],
+                    #     print(111, object_states[0, 0, object_pos, sim_id, param_id],
                     #           new_property_val,
                     #           properties_array[0, int(property_nb), object_pos,
                     #                            sim_id, param_id],
@@ -4135,7 +4138,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     #           threshold, max_value[0],
                     #           len(max_value), max_value[1])
 
-                    # if object_states[0, object_pos,
+                    # if object_states[0, 0, object_pos,
                     #                      sim_id, param_id] > 0:
                     _track_object_property_changes(object_pos, property_nb,
                                                    new_property_val,
@@ -4176,7 +4179,7 @@ def _get_random_mt_at_position(position, object_states, properties_array,
     nb_of_target_objects = 0
     target_state = 3
     while object_pos < last_object_pos:
-        if object_states[0, object_pos, sim_id, param_id] == target_state:
+        if object_states[0, 0, object_pos, sim_id, param_id] == target_state:
             # check whether the starting point of the object is before the
             # target position
             object_pos = properties_array[0, object_pos, sim_id, param_id]
@@ -4374,7 +4377,17 @@ def _update_object_states(current_transitions, all_transition_states,
         # if end_pos == 20:
         #     return
 
-        object_states[0, transition_position,sim_id, param_id] = end_state
+        object_states[0, 0, transition_position,sim_id, param_id] = end_state
+
+        # set time of object creation
+        if (object_states.shape[0] > 1) & (start_state == 0):
+            object_states[1, 0, transition_position,
+                          sim_id, param_id] = times[0, sim_id, param_id]
+
+        # remove time of object creation
+        if (object_states.shape[0] > 1) & (end_state == 0):
+            object_states[1, 0, transition_position, sim_id, param_id] = 0
+
         # change the object counter according to the executed transition
         # don't apply standard changes for cutting
         # (creation on object[n, 1,0] not nan))
@@ -4394,7 +4407,7 @@ def _update_object_states(current_transitions, all_transition_states,
                     # set as parameter number of resource for transition + 1 so
                     # that 0 indicates not generated by a resource limited
                     # object generation
-                    object_states[1, transition_position,
+                    object_states[0, 1, transition_position,
                                   sim_id, param_id] = transition_nb + 1
                     nb_objects_all_states[1, int(transition_parameters[
                                                      transition_nb, 1]),
@@ -4403,7 +4416,7 @@ def _update_object_states(current_transitions, all_transition_states,
                 # MTs forming on top of it),
                 # set the transition number for the current MT
                 if transition_parameters[int(transition_nb), 2] == 1:
-                    object_states[2, transition_position,
+                    object_states[0, 2, transition_position,
                                   sim_id, param_id] = transition_nb + 1
 
             if end_state != 0:
@@ -4414,28 +4427,31 @@ def _update_object_states(current_transitions, all_transition_states,
                 # removed
                 # to get the generation method, use the object state in the
                 # second dimension
-                if object_states[1, transition_position,
+                if object_states[0, 1, transition_position,
                                  sim_id, param_id] != 0:
                     # object states save the transition number,
                     # not the parameter number directly
                     # therefore the parameter number has to be obtained from
                     # transition_parameters.
                     if not math.isnan(
-                            transition_parameters[int(object_states[
+                            transition_parameters[int(object_states[0,
                                                           1, transition_position,
                                                           sim_id, param_id] - 1),
                                                   1]):
-                        nb_objects_all_states[1,
-                                              int(transition_parameters[
-                                                      object_states[
-                                                          1, transition_position,
-                                                          sim_id, param_id] - 1, 1]),
+                        nb_objects_all_states[
+                            1, int(transition_parameters[
+                                       int(object_states[0, 1,
+                                                         transition_position,
+                                                         sim_id, param_id]) - 1,
+                                       1]),
                                               sim_id, param_id] -= 1
-                    object_states[1, transition_position,
+                    object_states[0,1, transition_position,
                                   sim_id, param_id] = 0
 
-                if object_states[2, transition_position, sim_id, param_id] != 0:
-                    object_states[2, transition_position, sim_id, param_id] = 0
+                if object_states[0,2, transition_position,
+                                 sim_id, param_id] != 0:
+                    object_states[0,2, transition_position,
+                                  sim_id, param_id] = 0
 
         # if objects are cut creation_on_objects for the transition is not
         # nan at idx 1 and 2 and contain transition maps at these indices
@@ -4455,6 +4471,7 @@ def _update_object_states(current_transitions, all_transition_states,
         # change property values based on transitions
         elif start_state == 0:
 
+
             params_prop_dependence = params_prop_dependence[
                 int(transition_parameters[transition_nb, 0])]
             # check if the idx for creating a new object is higher than
@@ -4472,9 +4489,11 @@ def _update_object_states(current_transitions, all_transition_states,
              last_property_nb) = _get_first_and_last_object_pos(
                 nb_properties, nb_parallel_cores[sim_id, param_id], core_id)
 
-            # set start of lifetime for objects
-            local_object_lifetime_array[transition_position, 0,
-                                        sim_id, param_id] = 0
+            if ((local_object_lifetime_array.shape[0] > 1) |
+                    ((local_object_lifetime_array.shape[1] > 1))):
+                # set start of lifetime for objects
+                local_object_lifetime_array[transition_position, 0,
+                                            sim_id, param_id] = 0
 
             # property_nb = 0
             # while property_nb < property_start_values.shape[0]:
@@ -4493,6 +4512,8 @@ def _update_object_states(current_transitions, all_transition_states,
                         rng_states, simulation_factor, parameter_factor,
                         sim_id, param_id, core_id)
 
+                    # print(21, times[0, sim_id, param_id],
+                    #       timepoint_array[0, sim_id, param_id])
                     # if the current transition allows inheritance of
                     # orientation, inherit orientation
                     # (index 2 of object_states)
@@ -4508,12 +4529,14 @@ def _update_object_states(current_transitions, all_transition_states,
                             rng_states, simulation_factor, parameter_factor,
                             sim_id, param_id, core_id)
 
-                        if object_states[2, template_object_position,
+                        if object_states[0,2, template_object_position,
                                          sim_id, param_id] != 0:
-                            object_states[2, transition_position,
-                                          sim_id, param_id] = object_states[
+                            object_states[0,2, transition_position,
+                                          sim_id, param_id] = object_states[0,
                                 2, template_object_position, sim_id, param_id]
 
+                    # print(22, times[0, sim_id, param_id],
+                    #       timepoint_array[0, sim_id, param_id])
                     # # check whether property value was calculated correctly
                     # if core_id == 0:
                     #     if round(property_val,4) != round(property_val_new,4):
@@ -4641,7 +4664,7 @@ def _update_object_states(current_transitions, all_transition_states,
 
 
                 # if (int(property_nb) > 0) & (property_val > 30):
-                #     print(222, object_states[0, int(transition_position), sim_id, param_id],
+                #     print(222, object_states[0, 0, int(transition_position), sim_id, param_id],
                 #           property_val,
                 #           properties_array[0, int(property_nb), int(transition_position),
                 #                            sim_id, param_id])
@@ -4658,6 +4681,8 @@ def _update_object_states(current_transitions, all_transition_states,
                                                times,
                                                sim_id, param_id)
 
+                # print(23, times[0, sim_id, param_id],
+                #       timepoint_array[0, sim_id, param_id])
                 properties_array[0, property_nb,
                                  int(transition_position),
                                  sim_id, param_id] = property_val
@@ -4667,6 +4692,7 @@ def _update_object_states(current_transitions, all_transition_states,
         elif (end_state == 0) & (core_id == 0):
             # if the removed position is smaller than the first idx with object
             # set the removed position as smallest number (as approximation)
+
 
             if core_id == 0:
                 if transition_position < first_last_idx_with_object[0,sim_id,
@@ -5057,21 +5083,21 @@ def _cut_object(transition_position, transition_nb,
     #     property_nb_tmp += 1
 
     # reduce object number for state of the cut object
-    nb_objects_all_states[0, object_states[0, int(object_position),
-                                           sim_id, param_id],
+    nb_objects_all_states[0, int(object_states[0, 0, int(object_position),
+                                               sim_id, param_id]),
                           sim_id, param_id] -= 1
 
     # increase object number for target states of object
     # Before cut is the new object (new tip position)
     state_before_cut = creation_on_objects[transition_nb, 1,
-                                           object_states[
+                                           int(object_states[0,
                                                0, int(object_position),
-                                               sim_id, param_id]-1]
+                                               sim_id, param_id]) - 1]
     # After cut is the old object (same tip position)
     state_after_cut = creation_on_objects[transition_nb, 2,
-                                           object_states[
+                                           int(object_states[0,
                                                0, int(object_position),
-                                               sim_id, param_id]-1]
+                                               sim_id, param_id]) - 1]
 
     if state_before_cut == 0:
         print(777770)
@@ -5089,7 +5115,7 @@ def _cut_object(transition_position, transition_nb,
                            sim_id,
                            param_id] = math.nan
             property_nb_tmp -= 1
-        # object_states[0, transition_position, sim_id, param_id] = 0
+        # object_states[0, 0, transition_position, sim_id, param_id] = 0
         # if transition_position == first_last_idx_with_object[1, ]
 
     if state_after_cut == 0:
@@ -5110,10 +5136,15 @@ def _cut_object(transition_position, transition_nb,
                            param_id] = math.nan
             property_nb_tmp -= 1
         nb_objects_all_states[0,
-                              int(object_states[0, object_position,
+                              int(object_states[0, 0, object_position,
                                                 sim_id, param_id]),
                               sim_id, param_id] -= 1
-        object_states[0, object_position, sim_id, param_id] = 0
+
+        # remove time of object creation
+        if (object_states.shape[0] > 1):
+            object_states[1, 0, object_position, sim_id, param_id] = 0
+
+        object_states[0, 0, object_position, sim_id, param_id] = 0
     else:
         nb_objects_all_states[0, int(state_after_cut),
                               sim_id, param_id] += 1
@@ -5125,30 +5156,30 @@ def _cut_object(transition_position, transition_nb,
             nb_objects_all_states[1, int(transition_parameters[transition_nb, 1]),
                                   sim_id, param_id] += 1
 
-            object_states[1, transition_position,
+            object_states[0,1, transition_position,
                           sim_id, param_id] = (transition_nb + 1)
 
         # # if the current transition should be tracked (and inherited to
         # # MTs forming on top of it),
         # # set the transition number for the current MT
         # if transition_parameters[int(transition_nb), 2] == 1:
-        #     object_states[2, transition_position,
+        #     object_states[0,2, transition_position,
         #                   sim_id, param_id] = transition_nb + 1
 
     # print(333, state_before_cut, state_after_cut,
-    #       transition_position, object_states[0, transition_position,
+    #       transition_position, object_states[0, 0, transition_position,
     #               sim_id, param_id],
-    #       object_position,object_states[0, object_position,
+    #       object_position,object_states[0, 0, object_position,
     #               sim_id, param_id],  density_sum, threshold)
     # change object state of old object (that was cut)
 
-    object_states[0, object_position,
+    object_states[0, 0, object_position,
                   sim_id, param_id] = state_after_cut
 
 
     # change object state of new object
     # (new object end(tip) that was formed)
-    object_states[0, transition_position,
+    object_states[0, 0, transition_position,
                   sim_id, param_id] = state_before_cut
 
     nb_objects_all_states[0, int(state_before_cut),
@@ -5156,8 +5187,8 @@ def _cut_object(transition_position, transition_nb,
 
     # if length_tmp > 20:
     #     print(300001,
-    #           object_states[0, object_position, sim_id, param_id],
-    #           object_states[0, transition_position,sim_id, param_id]
+    #           object_states[0, 0, object_position, sim_id, param_id],
+    #           object_states[0, 0, transition_position,sim_id, param_id]
     #           )
     # check if the idx for creating a new object is higher than
     # the currently highest idx
@@ -5193,7 +5224,7 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
     # pushes the density sum above the threshold
     object_position = 0
     while object_position <= first_last_idx_with_object[1, sim_id, param_id]+20:
-        if object_states[0, object_position, sim_id, param_id] > 0:
+        if object_states[0, 0, object_position, sim_id, param_id] > 0:
             # check if property value is zero
 
             # if properties_array[0, target_property_nb,
@@ -5325,8 +5356,8 @@ def _increase_lowest_no_object_idx(first_last_idx_with_object,
                                    object_states, sim_id, param_id):
     # if so, go forward from that position until the next empty idx is found
     object_pos = int(first_last_idx_with_object[0,sim_id, param_id])
-    while object_pos < object_states.shape[1]:
-        if object_states[0, object_pos, sim_id, param_id] == 0:
+    while object_pos < object_states.shape[2]:
+        if object_states[0, 0, object_pos, sim_id, param_id] == 0:
             break
         object_pos = object_pos + 1
     first_last_idx_with_object[0,sim_id, param_id] = object_pos
@@ -5336,7 +5367,7 @@ def _reduce_highest_object_idx(first_last_idx_with_object,
     # if so, go backward from that position until the next object is found
     object_pos = int(first_last_idx_with_object[1,sim_id, param_id])
     while object_pos > 0:
-        if object_states[0, object_pos, sim_id, param_id] > 0:
+        if object_states[0, 0, object_pos, sim_id, param_id] > 0:
             break
         object_pos = object_pos - 1
     first_last_idx_with_object[1,sim_id, param_id] = object_pos
@@ -5403,8 +5434,9 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
 
                 if remove_object:
 
-                    object_state_to_remove = object_states[0, int(object_pos),
-                                                           sim_id, param_id]
+                    object_state_to_remove = int(object_states[0, 0,
+                                                           int(object_pos),
+                                                           sim_id, param_id])
 
                     if nb_parallel_cores[sim_id, param_id] > 1:
                         cuda.atomic.add(nb_objects_all_states,
@@ -5429,28 +5461,36 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                     # if object was generated by a resource limited generation
                     # transition, reduce number of objects generated from that
                     # transition and set object generation method to 0
-                    if object_states[1, int(object_pos),
+                    if object_states[0,1, int(object_pos),
                                      sim_id, param_id] != 0:
                         nb_objects_all_states[1,
                                               int(transition_parameters[
-                                                      object_states[
+                                                      int(object_states[0,
                                                           1, int(object_pos),
-                                                          sim_id, param_id] - 1,
-                                                      1]),
+                                                          sim_id, param_id])
+                                                      - 1, 1]),
                                               sim_id, param_id] -= 1
                         # nb_objects_all_states[1,
-                        #                       object_states[1,
+                        #                       int(object_states[0,1,
                         #                                     int(object_pos),
-                        #                                     sim_id, param_id]-1,
+                        #                                     sim_id, param_id])
+                        #                                     -1,
                         #                       sim_id, param_id] -= 1
 
-                        object_states[1, int(object_pos),
+                        object_states[0,1, int(object_pos),
                                       sim_id, param_id] = 0
 
-                    if object_states[2, int(object_pos), sim_id, param_id] != 0:
-                        object_states[2, int(object_pos), sim_id, param_id] = 0
+                    if object_states[0,2, int(object_pos),
+                                     sim_id, param_id] != 0:
+                        object_states[0,2, int(object_pos),
+                                      sim_id, param_id] = 0
 
-                    object_states[0, int(object_pos),
+                    # remove time of object creation
+                    if (object_states.shape[0] > 1):
+                        object_states[1, 0, int(object_pos),
+                                      sim_id, param_id] = 0
+
+                    object_states[0, 0, int(object_pos),
                                   sim_id, param_id] = 0
                     property_nb = properties_array.shape[1] - 1
                     while property_nb > 0:
@@ -5518,11 +5558,16 @@ def _save_values_with_temporal_resolution(timepoint_array, times,
                                                       core_id)
     while object_pos < last_object_pos:
         if object_pos > 0:
-            object_state = object_states[0, object_pos, sim_id, param_id]
 
-            object_states[timepoint_idx+3,
-                        object_pos,
-                        sim_id, param_id] = object_state
+            object_states[0, timepoint_idx+3,
+                          object_pos,
+                          sim_id, param_id] = object_states[0, 0, object_pos,
+                                                            sim_id, param_id]
+            # save creation time of object
+            object_states[1, timepoint_idx+3,
+                          object_pos,
+                          sim_id, param_id] = object_states[1, 0, object_pos,
+                                                            sim_id, param_id]
 
             property_nb = 0
             while property_nb < properties_array.shape[1]:
