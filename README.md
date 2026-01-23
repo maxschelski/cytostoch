@@ -36,13 +36,16 @@ The installation should take several minutes, if mamba and git have already been
 
 # Demo
 
-A script to run simulations corresponding to Fig. 4a is included in the \script folder ("Figure4a_simulation.py")
-In line 407 you should enter an absolute path for where you want the simulation data to be saved.
+A script to run simulations corresponding to Fig. 4a is included in the \script folder ("Figure4a_simulation.py").
+<br />In line 407 you should enter an absolute path for where you want the simulation data to be saved.
 <br/>Cytostoch will create the folder "Fig4a_simulation" at your defined path and will save all the output files in there.
 <br/>Cytostoch also saves different meta data including a pickled simulation object.
-<br />The defined data extractions will extract the following data from the endpoint of the simulation - all saved as "data.feather" in the respective folders:
+<br/>The data extractions defined in the script will extract the following data from the endpoint of the simulation - all saved as "data.feather" in the respective folders:
 1. Global statistics (e.g. number of MTs) in folder "global"
 2. Density across simulated neurite from all states summed in the folder "local_density_all"
 3. Density of stable MTs across simulated neurite from all states summed in the folder "local_stable_density"
 4. Density of unstable MTs across simulated neurite from all states summed in the folder "local_unstable_density"
+The data is saved for the 2000 simulations run in the script.
 <br/>Using an NVIDIA RTX4090 GPU the run time should be around 9 min.
+
+<br/>This data can then be further processed in Python using pandas.
