@@ -4,7 +4,9 @@ Programmed in a generalized fashion, to be used for stochastically simulating an
 
 The example under \scripts contains a simple simulation of MTs in the neurite running on a GPU.
 
-Note: Execution on CPUs currently not supported. Will be added again in the future.
+In order to run scripts, an NVIDIA GPU must be available at the machine.
+
+Note: Execution on CPUs currently not supported. Will be added in the future.
 
 # Installation
 
@@ -16,7 +18,7 @@ The package was developed and tested in Windows.
 > git clone https://github.com/maxschelski/cytostoch.git
 4. Navigate into the folder of the repository (cytostoch):
 > cd cytostoch
-5. Create environment for cytotorch with Anaconda:
+5. Create environment for cytostoch with Anaconda:
 > conda env create -f environment.yml
 6. Activate environment in anaconda:
 > conda activate cytostoch
