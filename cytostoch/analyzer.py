@@ -177,15 +177,14 @@ class Analyzer():
 
         """
 
-
         if self.simulation is None:
             object_states_array = torch.load(os.path.join(self.data_folder,
                                                     "object_states.pt"))
         else:
             object_states_array = self.simulation.object_states
 
-        object_states = object_states_array[:, 0]
-        orientation = object_states_array[:, 2]
+        object_states = object_states_array[:1, 0]
+        orientation = object_states_array[:1, 2]
 
         # if a target transition_nb for the desired orientation is defined
         # only leave positions with that number as nonzero
@@ -201,10 +200,10 @@ class Analyzer():
         orientation_data = {}
         # length_decay_data["time"] = (torch.Tensor(range(len(all_lengths_in_range)))
         #                              * time_resolution).unsqueeze(1).unsqueeze(1).expand(all_lengths_in_range.shape)
-        orientation_data["fraction"] = relative_orientation.unsqueeze(1)[:-1]
+        orientation_data["fraction"] = relative_orientation.unsqueeze(1)
 
         all_data = {}
-        all_data["orientation_fraction"] = orientation_data
+        all_data["orientation"] = orientation_data
 
         simulation.SSA._save_data(all_data, self.data_folder, 0)
 
@@ -238,12 +237,12 @@ class Analyzer():
         elif max_pos is None:
             max_pos = self.simulation.properties[0].max_value
 
-        if (time_resolution is None) & (self.simulation is None):
-            raise ValueError("For the photoconversion simulation, either the "
-                             "simulation object or the time_resolution "
-                             "need to be defined.")
-        elif time_resolution is None:
-            time_resolution = self.simulation.time_resolution
+        # if (time_resolution is None) & (self.simulation is None):
+        #     raise ValueError("For the photoconversion simulation, either the "
+        #                      "simulation object or the time_resolution "
+        #                      "need to be defined.")
+        # elif time_resolution is None:
+        #     time_resolution = self.simulation.time_resolution
 
         # get absolute start and end pos
         range_start_abs = range_start * max_pos
@@ -263,9 +262,9 @@ class Analyzer():
         first_timepoint_idx_props = 1
         properties = properties_array[first_timepoint_idx_props]
 
-        first_false_position = torch.count_nonzero(
-            object_states[0,first_timepoint_idx_props], dim=0)
-        max_nb_objects = first_false_position.max()
+        # first_false_position = torch.count_nonzero(
+        #     object_states[0, first_timepoint_idx_states], dim=0)
+        # max_nb_objects = first_false_position.max()
 
         start_length_in_range = np.zeros(object_states.shape[2:])
         end_length_in_range = np.zeros(object_states.shape[2:])
@@ -287,7 +286,8 @@ class Analyzer():
         _object_length_in_range[nb_SM, nb_cc](start_length_in_range,
                                               end_length_in_range,
                                               range_start_abs, range_end_abs,
-                                              0, int(max_nb_objects),
+                                              # 0, int(max_nb_objects),
+                                              0, object_states.shape[2],
                                               to_cuda(properties[0]),
                                               to_cuda(properties_sum),
                                               nb_parallel_cores)
@@ -341,7 +341,9 @@ class Analyzer():
 
             properties_sum[object_mask] = 0
             # reduce end_pos in range if properties_sum is below it
-            end_length_in_range[properties_sum < end_length_in_range] = properties_sum[properties_sum < end_length_in_range]
+            end_length_in_range[properties_sum <
+                                end_length_in_range] = properties_sum[properties_sum <
+                                                                      end_length_in_range]
             # if the property sum is below the start pos in range, the end pos
             # is set to 0, since nothing of the object in the initial range is
             # left
@@ -695,7 +697,7 @@ class Analyzer():
             # concatenate newly enlarged array to previous arrays
             new_data_list.append(new_data)
 
-        data_concat = torch.concat([data_concat, *new_data_list])
+        data_concat = torch.concat([data_concat, *new_data_list], dim=-1)
 
         return data_concat
 
@@ -875,6 +877,7 @@ class Analyzer():
 
     def _save_all(self, all_data, time_array, parameters, data_folder):
         data_shapes = None
+
         for nb_datapoints, data_dict in all_data.items():
             # get datashapes
             all_data_shapes = [data.shape for data in data_dict.values()]
@@ -887,7 +890,21 @@ class Analyzer():
             if len(data_shapes) == 0:
                 data_shapes = [shape for shape in all_data_shapes]
 
-            data_shape = data_shapes[0]
+            data_shape = list(data_shapes[0])
+
+            # check if data shape has more parameters than parameters allow
+            # this is a legacy bug
+            nb_parameter_vals = list(parameters.values())[0].shape[-1]
+
+            too_many_param_vals_in_data_shape = False
+            if data_shape[-1] > nb_parameter_vals:
+                print("WARNING: The data contains "
+                      f"{data_shape[-1] - nb_parameter_vals} more parameter "
+                      f"values than expected from the defined parameter values. "
+                      f"The data corresponding to the superfluous last "
+                      f"parameter values was removed.")
+                too_many_param_vals_in_data_shape = True
+                data_shape[-1] = nb_parameter_vals
 
             # prepare data to be saved in dataframe
             # for that needs to be of shape (datapoints, columns)
@@ -911,7 +928,7 @@ class Analyzer():
             while len(time_array.shape) < len(data_shape):
                 time_array = time_array.unsqueeze(-1)
 
-            data_values.append(time_array.cpu().expand(data_shape).flatten().unsqueeze(1))
+            data_values.append(time_array[:data_shape[0],:,:,:1].cpu().expand(data_shape).flatten().unsqueeze(1))
             column_names.append("time")
             # add information about simulation number
             simulation_array_shape = [1 for _ in data_shape]
@@ -936,7 +953,6 @@ class Analyzer():
                 # print(parameter.shape, data_shape)
                 # print(torch.Tensor(parameter).unsqueeze(2).unsqueeze(1).expand(data_shape).shape)
                 # print(torch.Tensor(parameter).unsqueeze(1).unsqueeze(2).shape)
-
                 # ONLY TAKE PARAMETER VALUE BEFORE TIMESWITCH!
                 if len(parameter.shape) > 2:
                     parameter = parameter[:, :, 0]
@@ -961,9 +977,18 @@ class Analyzer():
                     data_shape).flatten().unsqueeze(1))
                 column_names.append(name)
 
+            # if there are too many parameter values in the data, remove the
+            # data for the last parameter value, this is a legacy bug
+            # for some older simulations
+            if too_many_param_vals_in_data_shape:
+                data_slice = [slice(None) for _ in range(len(data_shape))]
+                data_slice[-1] = slice(nb_parameter_vals)
 
             # now add all data
             for column_name, data in data_dict.items():
+                # remove data corresponding to undefined parameter values
+                if too_many_param_vals_in_data_shape:
+                    data = data[data_slice]
                 data_values.append(data.cpu().expand((data.shape[0],
                                                       *data_shape[1:]))
                                    .flatten().unsqueeze(1))

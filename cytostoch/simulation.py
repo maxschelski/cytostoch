@@ -16,6 +16,7 @@ import re
 import socket
 import datetime
 import itertools
+import itertools
 
 # NUMBA_DEBUG=1
 # NUMBA_DEVELOPER_MODE = 1
@@ -1468,6 +1469,12 @@ class SSA():
             if (nb_batches > 1) & (nb_parameter_combinations % nb_batches != 0):
                 nb_batches += 1
 
+            missing_nb_batches = (nb_parameter_combinations - 
+                                  (nb_batches * param_combinations_per_batch))
+
+            if missing_nb_batches > 0:
+                nb_batches += missing_nb_batches
+
             simulation_numba._decorate_all_functions_for_gpu(self)
             object_states_batches = None
             properties_batches_array = None
@@ -1582,6 +1589,7 @@ class SSA():
                                         local_resolution,
                                        local_density_size, nb_simulations,
                                        param_combinations_per_batch,
+                                        nb_parameter_combinations,
                                         save_initial_state,
                                         nb_batches,
                                         convert_array, to_cuda,rng_states,
@@ -1596,17 +1604,18 @@ class SSA():
                 #   first_last_idx_with_object
 
                 complete_object_states = torch.concatenate([
-                    complete_object_states, object_states_batch])
+                    complete_object_states, object_states_batch], dim=-1)
 
                 complete_property_array = torch.concatenate([
-                    complete_property_array, property_array_batch])
+                    complete_property_array, property_array_batch], dim=-1)
 
                 complete_first_last_idx_with_object_batch = torch.concatenate([
                     complete_first_last_idx_with_object_batch,
-                    first_last_idx_with_object_batch])
+                    first_last_idx_with_object_batch], dim=-1)
 
                 complete_nb_obj_all_states_batch = torch.concatenate([
-                    complete_nb_obj_all_states_batch, nb_obj_all_states_batch])
+                    complete_nb_obj_all_states_batch, nb_obj_all_states_batch],
+                dim=-1)
 
             if self.save_results:
                 # save all files
@@ -1733,7 +1742,7 @@ class SSA():
                        max_number_objects, start_save_time, start,
                        time_resolution, min_time, local_resolution,
                        local_density_size, nb_simulations,
-                       param_combinations_per_batch,
+                       param_combinations_per_batch, nb_parameter_combinations,
                        save_initial_state, nb_batches,
                        convert_array, to_cuda, rng_states,
                        simulation_factor, parameter_factor,
@@ -1744,13 +1753,19 @@ class SSA():
                                 param_combinations_per_batch)
         end_parameter_comb = (start_parameter_comb +
                               param_combinations_per_batch)
+        # prevent the end parameter combination to be larger than the actual
+        # available number of parameters
+        end_parameter_comb = min(end_parameter_comb,
+                                 nb_parameter_combinations)
         param_slice = slice(start_parameter_comb, end_parameter_comb)
-
 
         parameter_value_array = self._get_parameter_value_array(param_shape_batch,
                                                                 nb_timepoints,
                                                                 param_slice)
 
+        print(start_parameter_comb, end_parameter_comb)
+        # print(parameter_value_array.shape)
+        # dasd
         # for numberr in range(parameter_value_array.shape[0]):
         #     print(parameter_value_array[numberr])
 
@@ -2577,6 +2592,18 @@ class SSA():
         print("Saving simulation object...")
         # pickle the entire simulation object
         file_path = os.path.join(self.data_folder, "SSA.pkl")
+
+        # delete large data to keep pickled file small
+        for one_property in self.properties:
+            one_property.array = torch.Tensor([])
+
+        param_names_to_delete = ["object_states",
+                                 "creation_source",
+                                 "local_object_lifetime_array"]
+        for param_name in param_names_to_delete:
+            if param_name in dir(self):
+                delattr(self, param_name)
+
         with open(file_path, "wb") as file:
             dill.dump(self, file, fix_imports=False)
 
@@ -2905,7 +2932,7 @@ class SSA():
         #                          " have to be the same for all parameters.")
         #     nb_timepoints = len(all_timepoints_param_vals)
 
-        if self.two_combined_parameter_changes:
+        if self.two_combined_parameter_changes | all_parameter_combinations:
             all_parameter_arrays = []
             for timepoint in range(nb_timepoints):
                 timepoint_param_vals = []
@@ -2920,41 +2947,47 @@ class SSA():
                 # to get all combinations of parameter values at that timepoint
                 # go through the list and combine with all downstream params
                 all_combinations = []
-                for param_nb, param_vals in enumerate(timepoint_param_vals):
-                    # for each combination go through all parameters that come
-                    # later in the list
-                    if len(param_vals) == 1:
-                        continue
-                    for sub_param_nb in range(param_nb,
-                                              len(timepoint_param_vals)):
-                        # if only one param value, there is no need to combine
-                        # values
-                        if len(timepoint_param_vals[sub_param_nb]) == 1:
+                if self.two_combined_parameter_changes:
+                    for param_nb, param_vals in enumerate(timepoint_param_vals):
+                        # for each combination go through all parameters that come
+                        # later in the list
+                        if len(param_vals) == 1:
                             continue
-                        # if sub_param_nb and param_nb are the same,
-                        # single parameter changes will be added
-                        list_for_combination = []
-                        for (current_param_nb,
-                             current_param_vals) in enumerate(timepoint_param_vals):
-                            # before or after the target param val to combine
-                            # values with, just add the first value
-                            if current_param_nb not in [param_nb, sub_param_nb]:
-                                list_for_combination.append([current_param_vals[0]])
+                        for sub_param_nb in range(param_nb,
+                                                  len(timepoint_param_vals)):
+                            # if only one param value, there is no need to combine
+                            # values
+                            if len(timepoint_param_vals[sub_param_nb]) == 1:
                                 continue
-                            list_for_combination.append(current_param_vals[1:])
-                        combinations = itertools.product(*list_for_combination)
-                        combinations = list(combinations)
-                        # print("\n", list(combinations))
-                        all_combinations.extend(combinations)
-                # the parameter combinations without any changes is still
-                # missing from the list
-                last_combination = [param_vals[0]
-                                    for param_vals in timepoint_param_vals]
-                all_combinations.append(last_combination)
-                all_combinations = np.array(all_combinations)
+                            # if sub_param_nb and param_nb are the same,
+                            # single parameter changes will be added
+                            list_for_combination = []
+                            for (current_param_nb,
+                                 current_param_vals) in enumerate(timepoint_param_vals):
+                                # before or after the target param val to combine
+                                # values with, just add the first value
+                                if current_param_nb not in [param_nb, sub_param_nb]:
+                                    list_for_combination.append([current_param_vals[0]])
+                                    continue
+                                list_for_combination.append(current_param_vals[1:])
+                            combinations = itertools.product(*list_for_combination)
+                            combinations = list(combinations)
+                            # print("\n", list(combinations))
+                            all_combinations.extend(combinations)
+                    # the parameter combinations without any changes is still
+                    # missing from the list
+                    last_combination = [param_vals[0]
+                                        for param_vals in timepoint_param_vals]
+                    all_combinations.append(last_combination)
+                    all_combinations = np.array(all_combinations)
+                elif all_parameter_combinations:
+                    all_combinations = list(itertools.product(*timepoint_param_vals))
+                    all_combinations = np.array(all_combinations)
+
                 all_parameter_arrays.append(all_combinations)
 
-        print(single_parameter_changes, all_parameter_combinations, self.two_combined_parameter_changes)
+
+
         nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
             all_timepoints_param_vals = model_parameters.values
@@ -3012,6 +3045,7 @@ class SSA():
                     # model_parameters.value_array = array
                 elif all_parameter_combinations:
                     # NOT WORKING AT THE MOMENT!
+                    print(all_dimensions, dimension, param_vals.shape)
                     array_dimension = dimension + 2
                     expand_dimensions = copy.copy(all_dimensions)
                     expand_dimensions.remove(array_dimension)

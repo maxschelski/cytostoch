@@ -539,7 +539,6 @@ class DataExtraction():
 
         return all_data
 
-
     def _execute_operation(self, state_groups, simulation_object, **all_kwargs):
         all_data = {}
         for group_name, state_group in state_groups.items():
@@ -562,7 +561,6 @@ class DataExtraction():
                     # add auxiliary information once
                     if name not in all_data.keys():
                         all_data[name] = data_vals
-
 
         return all_data
 
@@ -836,6 +834,7 @@ class DataExtraction():
             # then get the maximum of all simulations
             max_nb_objects = first_false_position.max()
 
+
             idx = idx.cpu()#.to("cuda")
 
             # set all properties of objects outside of mask to NaN
@@ -851,12 +850,12 @@ class DataExtraction():
 
             idx = idx[0].unsqueeze(0).unsqueeze(2).expand(lifetime_array.shape)
 
-            lifetime_array = torch.gather(lifetime_array, dim=1,
-                                          index=idx)
+            lifetime_array = torch.gather(lifetime_array, dim=1, index=idx)
             lifetime_array = lifetime_array[0,:max_nb_objects]
         else:
             first_false_position = torch.count_nonzero(object_states, dim=1)
             max_nb_objects = first_false_position.max()
+
 
         resolution = simulation_object.local_lifetime_resolution
 

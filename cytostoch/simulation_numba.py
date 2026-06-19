@@ -122,7 +122,6 @@ def _execute_simulation_gpu(object_states, properties_array, times,
     # a &=~ (1<<31)
     # a |= (1<<31)
 
-
     nb_processes = cuda.gridsize(1)
     thread_id = cuda.grid(1)
     grid = cuda.cg.this_grid()
@@ -364,7 +363,7 @@ def _execute_simulation_gpu(object_states, properties_array, times,
 
             if success == 0:
                 if core_id == 0:
-                    print(969696969)
+                    print(969696969, sim_id)
                 break
 
             if success == 2:
@@ -1084,16 +1083,15 @@ def _run_iteration(object_states, properties_array , times,
         # instead execute the actions until the timepoint for saving. Then change
         # reaction times to the time from the saved timepoint until the transition
         # timepoint and execute actions and transitions normally.
-        reaction_time_tmp = next_timepoint - times[0, sim_id, param_id]
 
-        if reaction_time_tmp < 0:
-            print(2223333, reaction_time_tmp,
-                  times[0, sim_id, param_id],
-                  timepoint_array[0, sim_id, param_id] *
-                  time_resolution[0] +
-                  time_resolution[0],
-                  reaction_times[sim_id, param_id]
-                  )
+        # It is possible that reaction times move the time more than one
+        # timepoint forward. Therefore it has to be calculated what the highest
+        # full timepoint is that is reached by adding reaction times
+        next_timepoint = math.floor((times[0, sim_id, param_id] +
+                                     reaction_times[sim_id, param_id])
+                                    / time_resolution[0]) * time_resolution[0]
+
+        reaction_time_tmp = next_timepoint - times[0, sim_id, param_id]
 
         _execute_actions_on_objects(parameter_value_array, action_parameters,
                                     action_state_array,
@@ -1239,7 +1237,7 @@ def _run_iteration(object_states, properties_array , times,
 
     if math.isnan(all_transition_positions[sim_id, param_id]):
         if core_id == 0:
-            print(all_transition_positions[sim_id, param_id],
+            print(1111111, all_transition_positions[sim_id, param_id],
                   sim_id, param_id, core_id,
                   nb_parallel_cores[sim_id, param_id])
         return 0
@@ -1287,6 +1285,16 @@ def _run_iteration(object_states, properties_array , times,
                     local_resolution,
                     nb_parallel_cores,  core_id, sim_id, param_id)
 
+    if (times[0, sim_id, param_id] > next_timepoint) & (core_id == 0) & (sim_id == 14):
+        print(2342233,
+              sim_id, param_id,
+              times[0, sim_id, param_id],
+              timepoint_array[0, sim_id, param_id] *
+              time_resolution[0] +
+              time_resolution[0],
+              reaction_times[sim_id, param_id]
+              )
+
     if core_id == 0:
         times[0, sim_id, param_id] = (times[0, sim_id, param_id] +
                                       reaction_times[sim_id, param_id])
@@ -1296,7 +1304,10 @@ def _run_iteration(object_states, properties_array , times,
 
     if math.isnan(times[0, sim_id, param_id]):
         if core_id == 0:
-            print(sim_id, nb_objects_all_states[0, 0, sim_id, param_id])
+            print(2222222, 
+                  sim_id, param_id,
+                  nb_objects_all_states[0, 0, sim_id, param_id],
+                  reaction_times[sim_id, param_id])
         return 0
 
     thread_masks[0, sim_id, param_id] = 0
@@ -2080,6 +2091,8 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                     #                                 - 1] + 1)
                     #                         )
                     # use last end as new start
+                    # Move the start position if some properties should not
+                    # be considered
                     start = end
                     while property_nb <= max(0, target_property-1):
                         start += properties_array[0, property_nb,
@@ -3402,7 +3415,6 @@ def _get_tau(total_rates, first_last_idx_with_object, object_states,
                                                              (math.pow(tmax,2) -
                                                               math.pow(tmin,2)))
                                                             / 2)
-
                         property_idx += 1
                 object_nb += 1
 
@@ -3425,8 +3437,8 @@ def _get_tau(total_rates, first_last_idx_with_object, object_states,
                 # and a relatively large tau_guess. Once more objects are
                 # present, a smaller tau makes a negative root much less likely.
                 new_tau_guess_sqrt = cmath.sqrt(math.pow(first_order,2) -
-                                               4*total_second_order*
-                                               total_constant).real
+                                                4 * total_second_order *
+                                                total_constant).real
                 new_tau_guess_min = - first_order - new_tau_guess_sqrt
                 new_tau_guess_max = - first_order + new_tau_guess_sqrt
                 if new_tau_guess_min < 0:
@@ -3437,7 +3449,6 @@ def _get_tau(total_rates, first_last_idx_with_object, object_states,
                 new_tau_guess = new_tau_guess / (2 * total_second_order)
             else:
                 new_tau_guess = - total_constant/first_order
-
 
             # check whether error is small enough to stop
             tau_error = abs(tau_guess - new_tau_guess) / tau_guess
@@ -3950,7 +3961,6 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                                                             param_id]),
                                                           param_id]
 
-
                     # the first index is the actual threshold value in any case
                     # if the second index is not nan, then follows the operation
                     # (whether other values should be added (1) or subtracted
@@ -4087,9 +4097,13 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                         # if threshold was defined as None, it is now NaN
                         # and therefore the comparison will always be False
                         if new_property_val < threshold:
+                            # print(object_pos, new_property_val, threshold,
+                            #       object_states[1, 0, object_pos,
+                            #                     sim_id, param_id]
+                            #       )
                             new_property_val = threshold
 
-                            # new_property_val = math.nan
+                            # # new_property_val = math.nan
                             # # HARD CODE LOSS OF MT UPON REACHING 0 length
                             # object_states[0, 0, object_pos,
                             #                  sim_id, param_id] = 0
@@ -4115,6 +4129,14 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                             # cuda.atomic.add(nb_objects_all_states,
                             #                 (0, 0,
                             #                       sim_id, param_id), 1)
+                            #
+                            # if object_pos < first_last_idx_with_object[
+                            #     0, sim_id,
+                            #     param_id]:
+                            #
+                            #     cuda.atomic.min(first_last_idx_with_object,
+                            #                     (0, sim_id, param_id),
+                            #                     object_pos)
 
                     # set the property val to the property val within the
                     # [min_value, max_value] limits
@@ -4147,9 +4169,12 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                                                  local_lifetime_resolution,
                                                    times,
                                                    sim_id, param_id)
-                    properties_array[0, int(property_nb),
-                                     object_pos,
-                                     sim_id, param_id] = new_property_val
+
+                    if object_states[0, 0, object_pos,
+                                  sim_id, param_id] > 0:
+                        properties_array[0, int(property_nb),
+                                         object_pos,
+                                         sim_id, param_id] = new_property_val
 
                     action_property_nb += 1
                 object_pos += 1
@@ -4471,6 +4496,8 @@ def _update_object_states(current_transitions, all_transition_states,
         # change property values based on transitions
         elif start_state == 0:
 
+            # if core_id == 0:
+            #     print(transition_position)
 
             params_prop_dependence = params_prop_dependence[
                 int(transition_parameters[transition_nb, 0])]
