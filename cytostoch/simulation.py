@@ -298,6 +298,8 @@ class SSA():
                         nb_simulations_same_name=nb_simulations_same_name,
                         bug_fixing = bug_fixing)
 
+        return self.data_folder
+
     def save(self, time_resolution, max_time):
         analysis = analyzer.Analyzer(simulation=self)
         analysis.start(time_resolution, max_time,
@@ -462,7 +464,7 @@ class SSA():
 
         # the first dimension is the number of the parameter for the rate
         # the second dimensions is the number of the parameter for resources
-        transition_parameters = np.full((nb_transitions, 3), np.nan,
+        transition_parameters = np.full((nb_transitions, 4), np.nan,
                                         dtype=self.data_type)
         for nb, transition in enumerate(self.transitions):
             transition_parameters[nb, 0] = transition.parameter.number
@@ -477,6 +479,15 @@ class SSA():
                     (transition.start_state is None)):
                 if transition.track_creation_sources:
                     transition_parameters[nb, 2] = 1
+            if (hasattr(transition, "orientation") &
+                    (transition.start_state is None)):
+                if transition.orientation is not None:
+                    orientation_dict = {"forward": 1,
+                                        "reverse": 2,
+                                        "random": 3,
+                                        "inherit": 4}
+                    orientation = orientation_dict[transition.orientation.lower()]
+                    transition_parameters[nb, 3] = orientation
         return transition_parameters
 
     def _get_transition_state_arrays(self):
@@ -1041,7 +1052,8 @@ class SSA():
         """
 
         # get normalized path
-        data_folder = os.path.abspath(data_folder)
+        self.data_folder = os.path.abspath(data_folder)
+        data_folder = self.data_folder
 
         sim_summary_file = os.path.join(self.simulations_summary_path,
                                         self.simulations_summary_table_name)
@@ -1294,6 +1306,7 @@ class SSA():
 
         transition_parameters = self._get_transition_parameters()
 
+
         all_transition_states = self._get_transition_state_arrays()
         get_set_zero_array = self._get_transition_set_to_zero_properties()
         all_transition_set_to_zero_properties = get_set_zero_array
@@ -1543,7 +1556,6 @@ class SSA():
                     self.initial_nb_obj_all_states, dim=-1,
                     index=indices).unsqueeze(-1).repeat(repeats)
 
-
             # are property arrays expanded upon definition?
             # are parameter value arrays expanded upon definition?
 
@@ -1556,7 +1568,6 @@ class SSA():
             complete_property_array = torch.Tensor([])
             complete_first_last_idx_with_object_batch = torch.Tensor([])
             complete_nb_obj_all_states_batch = torch.Tensor([])
-
 
             for batch_nb in tqdm.tqdm(range(nb_batches)):
                 (object_states_batch,
@@ -1647,6 +1658,7 @@ class SSA():
 
             print("Starting simulation...")
             start = time.time()
+
 
             _execute_sim = simulation_numba._execute_simulation_cpu
             _execute_sim(convert_array(object_states),
@@ -1757,13 +1769,14 @@ class SSA():
         # available number of parameters
         end_parameter_comb = min(end_parameter_comb,
                                  nb_parameter_combinations)
+
         param_slice = slice(start_parameter_comb, end_parameter_comb)
 
         parameter_value_array = self._get_parameter_value_array(param_shape_batch,
                                                                 nb_timepoints,
                                                                 param_slice)
 
-        print(start_parameter_comb, end_parameter_comb)
+        # print(start_parameter_comb, end_parameter_comb)
         # print(parameter_value_array.shape)
         # dasd
         # for numberr in range(parameter_value_array.shape[0]):
@@ -1888,8 +1901,11 @@ class SSA():
         else:
             nb_dims_time_track = 1
 
+        nb_properties_tracked_in_states = 4
+        # Last index in second dimension is orientation
         object_states = np.zeros((nb_dims_time_track,
-                                  nb_timepoints + 3,
+                                  nb_timepoints +
+                                  nb_properties_tracked_in_states,
                                   self.object_states.shape[0],
                                   *param_shape_batch),
                                  dtype=np.float32)
@@ -2147,7 +2163,8 @@ class SSA():
         # plt.figure()
         # plt.plot(local_density_batches.mean(axis=1))
 
-        self.object_states = object_states_batch[:, 3:]
+        self.object_states = object_states_batch[:, 4:]
+        self.orientation = object_states_batch[0, 3]
         self.creation_source = object_states_batch[0, 2]
 
         # print(np.unique(object_states_batch[0]))
@@ -3358,6 +3375,11 @@ class SSA():
             file_path = os.path.join(self.data_folder,
                                         "states_" + str(iteration_nb) + ".pt")
             torch.save(object_state_array, file_path)
+
+        # object_state_array = torch.concat(self.object_states_buffer)
+        file_path = os.path.join(self.data_folder,
+                                    "orientation_" + str(iteration_nb) + ".pt")
+        torch.save(self.orientation, file_path)
         self.object_states_buffer = []
 
     def _concat_data_from_buffer(self):

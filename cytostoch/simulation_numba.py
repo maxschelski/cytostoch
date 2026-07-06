@@ -1209,7 +1209,8 @@ def _run_iteration(object_states, properties_array , times,
     if core_id == 0:
         _determine_next_transition(total_rates, current_transition_rates,
                                    current_transitions, sim_id, param_id,
-                                   rng_states, simulation_factor, parameter_factor)
+                                   rng_states, simulation_factor,
+                                   parameter_factor)
 
     if nb_parallel_cores[sim_id, param_id] > 1:
         cuda.syncwarp(thread_masks[0,sim_id, param_id])
@@ -2095,9 +2096,14 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                     # be considered
                     start = end
                     while property_nb <= max(0, target_property-1):
-                        start += properties_array[0, property_nb,
+                        property_val = properties_array[0, property_nb,
                                                   object_pos,
                                                   sim_id, param_id]
+                        # the position (property_nb ==0)
+                        # should not be multiplied by the orientation
+                        if (object_states[0, 3, object_pos, sim_id, param_id] != 0) & (property_nb > 0):
+                            property_val *= object_states[0, 3, object_pos, sim_id, param_id]
+                        start += property_val
                         property_nb += 1
 
                     # print(1, property_nb, target_property, start, end)
@@ -2127,9 +2133,13 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                     #                                 creation_property]))
 
                     while property_nb <= max_property:
-                        end += properties_array[0, property_nb,
-                                                object_pos,
-                                                sim_id, param_id]
+                        property_val = properties_array[0, property_nb,
+                                                  object_pos,
+                                                  sim_id, param_id]
+                        if object_states[0, 3, object_pos, sim_id, param_id] != 0:
+                            property_val *= object_states[0, 3, object_pos,
+                                                          sim_id, param_id]
+                        end += property_val
                         property_nb += 1
 
                     # print(2, max_property, end)
@@ -2144,6 +2154,15 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                     # if not math.isnan(property_extreme_values[1, 0, 0]):
                     #     end = min(property_extreme_values[1, 0, 0], end)
                     # start = max(start, -local_resolution)
+                    # if the orientation is opposite, property vals reduced
+                    # the end value and therefore end is smaller than
+                    # start, therefore switch end and start so that start is
+                    # smaller than end again for the density calculation below
+                    if object_states[0, 3, object_pos, sim_id, param_id] == -1:
+                        end_tmp = end
+                        end = start
+                        start = end_tmp
+
                     start = max(start, 0)
                     # x_start = int(math.ceil(start / local_resolution))
                     x_start = int(math.floor(start / local_resolution))
@@ -2248,6 +2267,15 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                         # cuda.atomic.add(total_density,
                         #                 (target_property, sim_id, param_id),
                         #                 density_from_object)
+
+                    # if the orientation is opposite, property vals reduced
+                    # the end value and therefore end was smaller than
+                    # start, therefore end and start were switched so that start
+                    # was smaller than end again for the density calculation
+                    # now switch back, since the actual end point of the object
+                    # is the start point of the new iteration for this object
+                    if object_states[0, 3, object_pos, sim_id, param_id] == -1:
+                        end = end_tmp
                 creation_property += 1
         object_pos += 1
 
@@ -2349,6 +2377,8 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                 param_id]
         if start_state == 0:
             # for state 0, the number of objects in state 0 does not matter
+            # But if the generation of new objects depends on the number
+            # of objects present, this density has to be calculated
             if not math.isnan(creation_on_objects[transition_nb, 0, 0]):
                 density_sum = 0
                 # if only one density was measured (of all combined properties)
@@ -2625,14 +2655,23 @@ def _get_rate_of_density_dependent_transition(params_prop_dependence,
             while dependence_prop_nb < params_prop_dependence.shape[0]:
                 if math.isnan(params_prop_dependence[dependence_prop_nb]):
                     # first nan indicates that there
-                    # are more properties to consider
+                    # are no more properties to consider
                     break
-                end_position += properties_array[0,
-                                                 int(params_prop_dependence[
-                                                         dependence_prop_nb]),
-                                                 object_nb,
-                                                 sim_id, param_id]
 
+                if int(params_prop_dependence[dependence_prop_nb]) == 0:
+                    end_position += properties_array[0,
+                                                     int(params_prop_dependence[
+                                                             dependence_prop_nb]),
+                                                     object_nb,
+                                                     sim_id, param_id]
+                else:
+                    end_position += (object_states[0, 3, object_nb,
+                                                   sim_id, param_id] *
+                                     properties_array[0,
+                                                     int(params_prop_dependence[
+                                                             dependence_prop_nb]),
+                                                     object_nb,
+                                                     sim_id, param_id])
                 dependence_prop_nb += 1
 
             end_position = math.floor(end_position / local_resolution)
@@ -2695,7 +2734,7 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
             # otherwise take the end value as the starting state
 
             if math.isnan(params_prop_dependence[0]):
-                base_value =  parameter_value_array[int(
+                base_value = parameter_value_array[int(
                                        params_prop_dependence[1]),
                                                          int(timepoint_array[
                                                                  0, sim_id,
@@ -2732,11 +2771,26 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
                     # first nan indicates that there
                     # are more properties to consider
                     break
-                end_position += properties_array[0,
-                                                 int(params_prop_dependence[
-                                                         dependence_prop_nb]),
-                                                 object_nb,
-                                                 sim_id, param_id]
+
+                if int(params_prop_dependence[dependence_prop_nb]) == 0:
+                    # position should always be added without modification
+                    # by orientation
+                    end_position += properties_array[0,
+                                                     int(params_prop_dependence[
+                                                             dependence_prop_nb]),
+                                                     object_nb,
+                                                     sim_id, param_id]
+                else:
+                    # account for difference in orientation by decreasing
+                    # the end position value for length properties
+                    end_position += (object_states[0, 3, object_nb,
+                                                   sim_id, param_id] *
+                                     properties_array[0,
+                                                      int(params_prop_dependence[
+                                                             dependence_prop_nb]),
+                                                     object_nb,
+                                                     sim_id, param_id])
+
 
                 # print(object_states[0, 0, object_nb, sim_id, param_id],
                 #       params_prop_dependence[dependence_prop_nb],
@@ -3858,8 +3912,6 @@ def _track_object_property_changes(object_nb, property_nb, new_value,
             local_object_lifetime_array[object_nb, int(end_idx) + 1,
                                         sim_id, param_id] = 0
 
-
-
 def _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 action_state_array,
                                 properties_array,
@@ -3881,7 +3933,6 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 times):
     # execute actions on objects depending on state, before changing state
     action_nb = 0
-
 
     while action_nb < action_parameters.shape[0]:
         action_parameter = int(action_parameters[action_nb])
@@ -3951,6 +4002,13 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
 
                     # check whether the property value is above the max val
                     # similarly as for the min val condition
+
+                    # property_extreme_values array setup, at the 3rd dimension
+                    # index 0 is threshold value or parameter value number
+                    #       is it always the parameter value number?
+                    # index 1 is closed (1) or not (0)
+                    # index 2 is same dimension forward (1) or not
+                    # index 3 and higher are the properties that should be added
                     max_value = property_extreme_values[1, int(property_nb)]
                     if math.isnan(max_value[0]):
                         threshold = math.nan
@@ -3972,7 +4030,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     # property values should also be considered for the
                     # threshold. For operation == 1, this means that the sum of
                     # property 0, 1 and 3 should not go above the threshold
-                    # this is echecked by subtracting (for operation = 1) the
+                    # this is checked by subtracting (for operation = 1) the
                     # additional properties from the threshold, to obtain the
                     # actual maximum value (threshold) for the current property.
                     if max_value[1] == 0:
@@ -3991,27 +4049,48 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                         threshold = threshold
                     else:
                         max_value_nb = 3
-                        while max_value_nb < len(max_value):
-                            val_property_nb = max_value[max_value_nb]
-                            if math.isnan(val_property_nb):
-                                break
-                            if max_value[2] == 1:
-                                threshold = threshold - properties_array[0, int(val_property_nb),
-                                                                         object_pos,
-                                                                         sim_id,
-                                                                         param_id]
-                            if max_value[2] == -1:
-                                threshold = threshold + properties_array[0, int(val_property_nb),
-                                                                         object_pos,
-                                                                         sim_id,
-                                                                         param_id]
-                            max_value_nb += 1
-                    #
+                        # for reverse oriented objects, the threshold is
+                        # not changed
+                        if (object_states[0, 3, object_pos, sim_id, param_id] == 1):
+                            while max_value_nb < len(max_value):
+                                val_property_nb = max_value[max_value_nb]
+                                if math.isnan(val_property_nb):
+                                    break
+                                # values are subtracted from max threshold
+                                # since it should get more restrictive with
+                                # other property values already extending the
+                                # object towards the max threshold
+                                if max_value[2] == 1:
+                                    threshold = (threshold -
+                                                 properties_array[0,
+                                                                  int(val_property_nb),
+                                                                  object_pos,
+                                                                  sim_id,
+                                                                  param_id])
+                                if max_value[2] == -1:
+                                    # thus far not used.
+                                    threshold = (threshold +
+                                                 properties_array[0,
+                                                                  int(val_property_nb),
+                                                                  object_pos,
+                                                                 sim_id,
+                                                                 param_id])
+                                max_value_nb += 1
+
                     # if (sim_id == 356) & (object_pos == 4):
                     #     print(333, threshold, new_property_val,
                     #           len(max_value), max_value[0], max_value[1],
                     #           max_value[2], max_value[3])
-                    if new_property_val >= threshold:
+
+                    # for reverse oriented objects, the max value can only
+                    # be reached by the property_nb 0, the position, since
+                    # all other properties extend the object in the opposite
+                    # direction
+                    if ((new_property_val >= threshold) &
+                            ((property_nb == 0) | (object_states[0, 3,
+                                                                 object_pos,
+                                                                 sim_id,
+                                                                 param_id] != -1))):
                         new_property_val = threshold
 
                         # # HARD CODE CATASTROPHE UPON REACHING MAX VALUE
@@ -4075,28 +4154,46 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                             threshold = threshold
                         else:
                             min_value_nb = 3
-                            while min_value_nb < len(min_value):
-                                val_property_nb = min_value[min_value_nb]
-                                if math.isnan(val_property_nb):
-                                    break
-                                # if property values are added, the threshold should
-                                # be reduced by the other property values
-                                # (since higher other property values means that the
-                                # threshold "is reached earlier")
-                                if min_value[2] == 1:
-                                    threshold = threshold - properties_array[
-                                        0, int(val_property_nb), object_pos,
-                                        sim_id, param_id]
-                                if min_value[2] == -1:
-                                    threshold = threshold + properties_array[0, int(val_property_nb),
-                                                                             object_pos,
-                                                                             sim_id,
-                                                                             param_id]
-                                min_value_nb += 1
+                            # threshold value is only changed for reverse
+                            # oriented objects, since only they can grow towards
+                            # the min threshold
+                            if (object_states[0, 3, object_pos, sim_id, param_id] == -1):
+                                while min_value_nb < len(min_value):
+                                    val_property_nb = min_value[min_value_nb]
+                                    if math.isnan(val_property_nb):
+                                        break
+                                    # if property values are added, the threshold should
+                                    # be reduced by the other property values
+                                    # (since higher other property values means that the
+                                    # threshold "is reached earlier")
+                                    # index 2 is always 1 thus far
+                                    # values have to be added because the min
+                                    # threshold becomes larger, therefore more
+                                    # restrictive if the object already has
+                                    # some other properties
+                                    if min_value[2] == 1:
+                                        threshold = threshold + properties_array[
+                                            0, int(val_property_nb), object_pos,
+                                            sim_id, param_id]
+                                    if min_value[2] == -1:
+                                        # thus far not used.
+                                        threshold = threshold - properties_array[0, int(val_property_nb),
+                                                                                 object_pos,
+                                                                                 sim_id,
+                                                                                 param_id]
+                                    min_value_nb += 1
 
                         # if threshold was defined as None, it is now NaN
                         # and therefore the comparison will always be False
-                        if new_property_val < threshold:
+
+                        # For reverse, all property changes are relevant
+                        # for non reverse objects, only position changes are relevant
+                        if ((new_property_val < threshold) &
+                                ((property_nb == 0) | (object_states[0, 3,
+                                                                     object_pos,
+                                                                     sim_id,
+                                                                     param_id] != 1))):
+                        # if new_property_val < threshold:
                             # print(object_pos, new_property_val, threshold,
                             #       object_states[1, 0, object_pos,
                             #                     sim_id, param_id]
@@ -4162,6 +4259,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
 
                     # if object_states[0, 0, object_pos,
                     #                      sim_id, param_id] > 0:
+
                     _track_object_property_changes(object_pos, property_nb,
                                                    new_property_val,
                                                    properties_array,
@@ -4196,22 +4294,23 @@ def _get_random_mt_at_position(position, object_states, properties_array,
     nb_objects = first_last_idx_with_object[1,sim_id, param_id] + 1
 
     nb_objects_per_core = int(nb_objects / nb_parallel_cores[sim_id, param_id])
-    (object_pos,
+    (object_nb,
      last_object_pos) = _get_first_and_last_object_pos(nb_objects,
                                                        nb_parallel_cores[
                                                            sim_id, param_id],
                                                        core_id)
     nb_of_target_objects = 0
     target_state = 3
-    while object_pos < last_object_pos:
-        if object_states[0, 0, object_pos, sim_id, param_id] == target_state:
+    while object_nb < last_object_pos:
+        if object_states[0, 0, object_nb, sim_id, param_id] == target_state:
             # check whether the starting point of the object is before the
             # target position
-            object_pos = properties_array[0, object_pos, sim_id, param_id]
+            object_pos = properties_array[0, object_nb, sim_id, param_id]
+            # if object_states[0,3, obj]
             if object_pos < position:
                 property_nb = 1
                 while property_nb < properties_array.shape[0]:
-                    object_pos += properties_array[property_nb, object_pos,
+                    object_pos += properties_array[property_nb, object_nb,
                                                  sim_id, param_id]
                 if object_pos >= position:
                     # if the end position of the object is at least at
@@ -4219,7 +4318,7 @@ def _get_random_mt_at_position(position, object_states, properties_array,
                     # the target objects
                     target_object_nbs[nb_objects_per_core * core_id +
                                       nb_of_target_objects,
-                                      sim_id, param_id] = object_pos
+                                      sim_id, param_id] = object_nb
                     nb_of_target_objects += 1
                     # add one to the total count of objects
                     cuda.atomic.add(target_object_nbs,
@@ -4522,6 +4621,35 @@ def _update_object_states(current_transitions, all_transition_states,
                 local_object_lifetime_array[transition_position, 0,
                                             sim_id, param_id] = 0
 
+            # Position 3 in transition_parameters defines orientation
+            # orientation_dict = {"plus-end-out": 1,
+            #                     "plus-end-in": 2,
+            #                     "random": 3,
+            #                     "inherit": 4}
+            # get orientation of object as defined
+            if (transition_parameters[transition_nb, 3] == 1):
+                object_states[0, 3, transition_position, sim_id, param_id] = 1
+            elif (transition_parameters[transition_nb, 3] == 2):
+                object_states[0, 3, transition_position, sim_id, param_id] = -1
+            elif (transition_parameters[transition_nb, 3] == 3):
+                # get random orientation with 50/50 chance
+                random_nb = _get_random_number(sim_id, param_id,
+                                               rng_states,
+                                               simulation_factor,
+                                               parameter_factor)
+                if random_nb > 0.5:
+                    object_states[0, 3, transition_position,
+                                  sim_id, param_id] = -1
+                else:
+                    object_states[0, 3, transition_position,
+                                  sim_id, param_id] = 1
+            elif (math.isnan(transition_parameters[transition_nb, 3])):
+                # if orientation is not defined, use forward direction
+                # otherwise density and position calculations would be
+                # problematic
+                object_states[0, 3, transition_position,
+                              sim_id, param_id] = 1
+
             # property_nb = 0
             # while property_nb < property_start_values.shape[0]:
             while property_nb < last_property_nb:
@@ -4542,9 +4670,17 @@ def _update_object_states(current_transitions, all_transition_states,
                     # print(21, times[0, sim_id, param_id],
                     #       timepoint_array[0, sim_id, param_id])
                     # if the current transition allows inheritance of
-                    # orientation, inherit orientation
-                    # (index 2 of object_states)
-                    if transition_parameters[transition_nb, 2] == 2:
+                    # creation source (index 2 of object_states) or orientation
+                    # (index 3 of object_states), inherit orientation and/or
+                    # creation source
+
+                    # Position 3 in transition_parameters
+                    # orientation_dict = {"plus-end-out": 1,
+                    #                     "plus-end-in": 2,
+                    #                     "random": 3,
+                    #                     "inherit": 4}
+                    if ((transition_parameters[transition_nb, 2] == 2) |
+                            (transition_parameters[transition_nb, 3] == 4)):
                         target_property_nbs = creation_on_objects[transition_nb,
                                                                   0]
 
@@ -4556,11 +4692,19 @@ def _update_object_states(current_transitions, all_transition_states,
                             rng_states, simulation_factor, parameter_factor,
                             sim_id, param_id, core_id)
 
-                        if object_states[0,2, template_object_position,
-                                         sim_id, param_id] != 0:
+                        # inherit creation source if required
+                        if ((transition_parameters[transition_nb, 2] == 2) &
+                                (object_states[0,2, template_object_position,
+                                               sim_id, param_id] != 0)):
                             object_states[0,2, transition_position,
                                           sim_id, param_id] = object_states[0,
                                 2, template_object_position, sim_id, param_id]
+
+                        # inherit orientation if required
+                        if (transition_parameters[transition_nb, 3] == 4):
+                            object_states[0, 3, transition_position,
+                                          sim_id, param_id] = object_states[0,
+                                3, template_object_position, sim_id, param_id]
 
                     # print(22, times[0, sim_id, param_id],
                     #       timepoint_array[0, sim_id, param_id])
@@ -5257,18 +5401,29 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
             # if properties_array[0, target_property_nb,
             #                   object_position,
             #                   sim_id, param_id] > 0:
-            property_nb = 0
             # start position is the sum of all properties before
             # the target property, for the end position
             # add the target property to that
-            start = 0
+
+            # the position (property nb == 0) should not be multiplied by
+            # the orientation
+            start = properties_array[0, 0, object_position,
+                                     sim_id, param_id]
+            property_nb = 1
             while property_nb < target_property_nbs[0]:
-                start += properties_array[0, property_nb, object_position,
-                                          sim_id, param_id]
+                start += (object_states[0, 3, object_position, sim_id, param_id]
+                          * properties_array[0, property_nb, object_position,
+                                             sim_id, param_id])
                 property_nb += 1
+            # for reverse oriented objects, start has to be after the beginning
+            # of the range
+            if object_states[0, 3, object_position, sim_id, param_id] == -1:
+                start_in_range = start > ((x_pos-1) * local_resolution)
+            else:
+                start_in_range = start < ((x_pos + 1) * local_resolution)
 
             # start has to be before the end of the x pos range
-            if start < ((x_pos + 1) * local_resolution):
+            if start_in_range:
 
                 end = start
                 # index = 1
@@ -5286,12 +5441,27 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                     if not math.isnan(properties_array[0, property_nb,
                                                        object_position,
                                                        sim_id, param_id]):
-                        end += properties_array[0, property_nb, object_position,
-                                                sim_id, param_id]
+                        end += (object_states[0, 3, object_position, sim_id, param_id]
+                                * properties_array[0, property_nb, object_position,
+                                                sim_id, param_id])
                     index += 1
 
+                # for reverse oriented objects, end has to be before the end
+                # of the range
+                if object_states[0, 3, object_position, sim_id, param_id] == -1:
+                    end_in_range = end < ((x_pos + 1) * local_resolution)
+                else:
+                    end_in_range = end > ((x_pos-1) * local_resolution)
+
                 # end has to be after the beginning of the range
-                if end > ((x_pos-1) * local_resolution):
+                if end_in_range:
+                    # now for reverse oriented objects, flip start and end to
+                    # allow same calculations
+                    if (object_states[0, 3, object_position, sim_id, param_id]
+                            == -1):
+                        end_tmp = end
+                        end = start
+                        start = end_tmp
                     # end = start + properties_array[0, target_property_nb,
                     #                                object_position,
                     #                                sim_id, param_id]
@@ -5442,14 +5612,25 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
             if math.isnan(combined_property_vals):
                 object_pos += 1
             else:
-                property_idx = 1
-                while property_idx < properties.shape[0]:
-                    property_nb = int(properties[property_idx])
-                    property_val = properties_array[0, property_nb,
-                                                    int(object_pos),
-                                                    sim_id, param_id]
-                    combined_property_vals += property_operation * property_val
-                    property_idx += 1
+                # Object removal is for removing objects
+                # that are completely out of the region.
+                # For forward oriented objects this means that the position
+                # plus length have to be out of the region.
+                # For reverse oriented objects only the position is relevant.
+                # Thus, to get something lower or higher than the threshold,
+                # reverse oriented objects just compare start position
+                if ((object_states[0, 3, int(object_pos),sim_id, param_id] == 1)
+                        | (object_states[0, 3, int(object_pos),sim_id, param_id]
+                           == 0)):
+                    property_idx = 1
+                    while property_idx < properties.shape[0]:
+                        property_nb = int(properties[property_idx])
+                        property_val = properties_array[0, property_nb,
+                                                        int(object_pos),
+                                                        sim_id, param_id]
+                        # multiply combination with
+                        combined_property_vals += (property_operation * property_val)
+                        property_idx += 1
                 # check whether combined property values
                 # are above or below threshold
                 if threshold_operation == 1:
@@ -5510,6 +5691,11 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                     if object_states[0,2, int(object_pos),
                                      sim_id, param_id] != 0:
                         object_states[0,2, int(object_pos),
+                                      sim_id, param_id] = 0
+
+                    if object_states[0, 3, int(object_pos),
+                                     sim_id, param_id] != 0:
+                        object_states[0, 3, int(object_pos),
                                       sim_id, param_id] = 0
 
                     # remove time of object creation
@@ -5586,12 +5772,12 @@ def _save_values_with_temporal_resolution(timepoint_array, times,
     while object_pos < last_object_pos:
         if object_pos > 0:
 
-            object_states[0, timepoint_idx+3,
+            object_states[0, timepoint_idx+4,
                           object_pos,
                           sim_id, param_id] = object_states[0, 0, object_pos,
                                                             sim_id, param_id]
             # save creation time of object
-            object_states[1, timepoint_idx+3,
+            object_states[1, timepoint_idx+4,
                           object_pos,
                           sim_id, param_id] = object_states[1, 0, object_pos,
                                                             sim_id, param_id]

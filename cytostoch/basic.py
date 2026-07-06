@@ -108,7 +108,7 @@ def _get_first_and_last_object_pos(nb_objects, nb_parallel_cores, core_id):
 def _get_local_and_total_density(local_density,
                                  local_resolution,
                                  start_nb_object, end_nb_object,
-                                 position_array, length_array,
+                                 position_array, length_array, orientation_array,
                                  timepoint, nb_parallel_cores,
                                  end_density):
 
@@ -157,8 +157,18 @@ def _get_local_and_total_density(local_density,
                 # - local_resolution to 0
                 # while the last position, is the amount of MTs from
                 # x_max to local_resolution to x_max
-                end = start + length_array[timepoint, object_pos,
-                                           sim_id, param_id]
+                end = (start +
+                       orientation_array[0, object_pos, sim_id, param_id]
+                       * length_array[timepoint, object_pos, sim_id, param_id])
+
+                # switch start and end for reverse oriented objects to keep
+                # the remaining calculations the same, since they depend on
+                # end > start
+                if orientation_array[0, object_pos, sim_id, param_id] == -1:
+                    end_tmp = end
+                    end = start
+                    start = end_tmp
+
                 # if not math.isnan(property_extreme_values[1, 0, 0]):
                 #     end = min(property_extreme_values[1, 0, 0], end)
                 start = max(start, 0)
@@ -171,6 +181,12 @@ def _get_local_and_total_density(local_density,
                     # take the last position possible as the end position
                     x_end = min(x_end, local_density.shape[1] - 1)
                     x_pos = max(x_start, 0)
+
+                    # if orientation_array[object_pos, sim_id, param_id] == -1:
+                    #     x_end_tmp = x_end
+                    #     x_end = x_pos
+                    #     x_pos = x_end_tmp
+
                     first_x = True
                     # track the cumulative density of this object
                     # to get the cumulative local density
@@ -461,7 +477,6 @@ class DataExtraction():
         implemented_operations["global"] = self._operation_global
         implemented_operations["length_distribution"] = self._length_distribution
         implemented_operations["lifetime_to_density"] = self._2D_lifetime_to_1D_density
-
 
         if type(operation) == str:
             if operation not in implemented_operations:
@@ -834,7 +849,6 @@ class DataExtraction():
             # then get the maximum of all simulations
             max_nb_objects = first_false_position.max()
 
-
             idx = idx.cpu()#.to("cuda")
 
             # set all properties of objects outside of mask to NaN
@@ -976,9 +990,22 @@ class DataExtraction():
             length_array = position_array.clone()
             length_array[:] = resolution/1000
 
+        print("Length array shape: ", length_array.shape)
+
+        if hasattr(simulation_object, "orientation"):
+            orientation = np.expand_dims(simulation_object.orientation, axis=0)
+        else:
+            orientation = torch.ones(length_array.shape)
+
+        orientation = torch.Tensor(orientation).cuda()
+
         if state_numbers is not None:
             # get mask for all objects in defined state
             object_states = simulation_object.object_states[0]
+            # object_states[orientation == 1] = 0
+
+            # object_states[position_array > 30] = 0
+
             # if regular_print:
             #     object_states = simulation_object.object_states
             # else:
@@ -1003,10 +1030,21 @@ class DataExtraction():
 
             idx = idx.to("cuda")
 
+            # positions_reverse = np.array(position_array[orientation == -1].cpu())
+            # positions_reverse = positions_reverse[~np.isnan(positions_reverse)]
+            #
+            # hist = np.histogram(positions_reverse, bins=40)
+            # plt.figure()
+            # plt.plot(hist[1][1:], hist[0])
+
+            # print("Positions reverse: ", positions_reverse)
+
             # set all properties of objects outside of mask to NaN
             # also use the maximum number of objects of interest for all
             # simulations, to discard all parts of the sorted array that only
             # contains objects which are not of interest
+            # print(position_array[np.expand_dims(orientation, axis=0) == -1])
+
             position_array[mask_inv] = float("nan")
             position_array = torch.gather(position_array, dim=1,
                                           index=idx)
@@ -1016,9 +1054,14 @@ class DataExtraction():
             length_array = torch.gather(length_array, dim=1, index=idx)
             length_array = length_array[:, :max_nb_objects]
 
+            orientation[mask_inv] = float("nan")
+            orientation = torch.gather(orientation, dim=1, index=idx)
+            orientation = orientation[:, :max_nb_objects]
+
         positions = np.array(position_array.cpu())
         lengths = np.array(length_array.cpu())
         # only if at least one element is True, analyze the data
+
         if mask.sum() > 0:
 
             # create boolean data array later by expanding each microtubule in space
@@ -1070,10 +1113,12 @@ class DataExtraction():
                 length_array_cuda = to_cuda(length_array[:,start_nb_object:
                                                            end_nb_object].cpu())
 
+                orientation = to_cuda(orientation[:,start_nb_object:
+                                                    end_nb_object].cpu())
+
                 nb_parallel_cores = 32
 
                 nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
-
 
                 for timepoint in range(object_states.shape[0]):
                     _get_local_and_total_density[nb_SM, nb_cc](local_density,
@@ -1082,6 +1127,7 @@ class DataExtraction():
                                                                end_nb_object,
                                                                position_array_cuda,
                                                                length_array_cuda,
+                                                               orientation,
                                                                timepoint,
                                                                nb_parallel_cores,
                                                                end_density)
@@ -1668,7 +1714,8 @@ class ObjectCreation(StateTransition):
     """
 
     def __init__(self, state, parameter, changed_start_values=None,
-                 creation_on_objects=False, inherit_creation_source=None,
+                 creation_on_objects=False, orientation=None,
+                 inherit_creation_source=None,
                  properties_for_creation=None,
                  resources = None,
                  track_creation_sources=False, name=""):
@@ -1677,6 +1724,7 @@ class ObjectCreation(StateTransition):
         Args:
             state:
             parameter:
+            orientation: Possible values are "plus-end-out", "plus-end-in". "random" or "inherit"
             changed_start_values: List or tuple of ChangedStartValue objects
             creation_on_objects (Bool): Whether objects are created dependent
                 on other objects/object properties.
@@ -1695,6 +1743,7 @@ class ObjectCreation(StateTransition):
         """
         super().__init__(end_state=state, parameter=parameter)
         self.changed_start_values = changed_start_values
+        self.orientation = orientation
         self.creation_on_objects = creation_on_objects
         if (inherit_creation_source is None) & creation_on_objects:
             self.inherit_creation_source = True
