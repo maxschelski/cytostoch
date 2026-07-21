@@ -1054,7 +1054,7 @@ class DataExtraction():
             length_array = torch.gather(length_array, dim=1, index=idx)
             length_array = length_array[:, :max_nb_objects]
 
-            orientation[mask_inv] = float("nan")
+            orientation[mask_inv[:1]] = float("nan")
             orientation = torch.gather(orientation, dim=1, index=idx)
             orientation = orientation[:, :max_nb_objects]
 

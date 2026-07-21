@@ -10,6 +10,10 @@ import numba
 import cytostoch.simulation
 from cytostoch import simulation
 import math
+import shutil
+import seaborn as sb
+import scipy
+import functools
 
 @numba.cuda.jit
 def _get_first_and_last_object_pos(nb_objects, nb_parallel_cores, core_id):
@@ -38,7 +42,7 @@ def _get_first_and_last_object_pos(nb_objects, nb_parallel_cores, core_id):
 def _object_length_in_range(start_length_in_range, end_length_in_range,
                             range_start, range_end,
                             start_nb_object, end_nb_object,
-                            position_array, length_array,
+                            position_array, length_array, orientation,
                             nb_parallel_cores):
 
     nb_processes = numba.cuda.gridsize(1)
@@ -79,7 +83,22 @@ def _object_length_in_range(start_length_in_range, end_length_in_range,
         while object_pos < last_object_pos:
             if ((not math.isnan(length_array[object_pos, sim_id, param_id]))):
                 start = position_array[object_pos, sim_id, param_id]
-                end = start + length_array[object_pos, sim_id, param_id]
+                if orientation is not None:
+                    # if the orientation is opposite, length reduces position
+                    end = (start + orientation[object_pos, sim_id, param_id] *
+                           length_array[object_pos, sim_id, param_id])
+
+                    # if the orientation is opposite, property vals reduced
+                    # the end value and therefore end is smaller than
+                    # start, therefore switch end and start so that start is
+                    # smaller than end again for the density calculation below
+                    if orientation[object_pos, sim_id, param_id] == -1:
+                        end_tmp = end
+                        end = start
+                        start = end_tmp
+                else:
+                    end = (start + length_array[object_pos, sim_id, param_id])
+
                 if (start < range_end) & (end > range_start):
                     # if the object starts after the range start,
                     # the start length in range is 0, since the beginning is
@@ -159,43 +178,576 @@ class Analyzer():
         if self.simulation is not None:
             self.data_folder = self.simulation.data_folder
 
-    def get_global_object_orientation(self, transition_nb_for_orientation=None,
-                                      chance_of_orientation=0.5):
+
+    def _copy_scripts(self, folder, path, figure_script_name, figure_script_path,
+                     figure_layout_path, figure_layout_name, overwrite_script):
         """
+        Function specific to Schelski et al., 2025
 
         Args:
-            transition_nb_for_orientation (int): Number of transition for
-                nucleation that creates the objects of the orientation to be
-                measured.
-            chance_of_orientation (float): For the defined nucleation, the
-                chance (between 0 and 1) that an object has the orientation
-                to be measured. A value of 0.5 means that half of all objects
-                nucleated with this mechanism have the orientation to be
-                measured.
+            path:
+            figure_script_name:
+            figure_script_path:
+            figure_layout_name:
+            overwrite_script:
+
+        Returns:
+
+        """
+        print(folder)
+        # copy script and layout to each folder
+        script_path = os.path.join(path, figure_script_name.replace(".py",
+                                                                    "_" +
+                                                                    folder + ".py"))
+
+        if (not os.path.exists(script_path)) | overwrite_script:
+            shutil.copy(figure_script_path, script_path)
+
+        layout_path = os.path.join(path, figure_layout_name)
+        if not os.path.exists(layout_path):
+            shutil.copy(figure_layout_path, layout_path)
+        new_script_path = os.path.join(path, os.path.basename(__file__))
+        try:
+            new_script_path_repl = new_script_path.replace(".py",
+                                                           "_" + folder + ".py")
+            if os.path.exists(new_script_path_repl):
+                os.remove(new_script_path_repl)
+            shutil.copy(__file__, new_script_path_repl)
+        except:
+            new_script_path_repl = new_script_path.replace(".py",
+                                                           "_" + folder[
+                                                                 :10] + ".py")
+            if os.path.exists(new_script_path_repl):
+                os.remove(new_script_path_repl)
+            shutil.copy(__file__, new_script_path_repl)
+
+
+    def _save_local_data(self, data_path):
+        """
+        Function specific to Schelski et al., 2025
+
+        Args:
+            data_path:
 
         Returns:
 
         """
 
-        if self.simulation is None:
-            object_states_array = torch.load(os.path.join(self.data_folder,
-                                                    "object_states.pt"))
+        def wide_to_long_data(data, populations, columns):
+            long_data = []
+            for population in populations:
+                print(population)
+                new_data = data.copy()
+                new_data["population"] = population
+                for column in columns:
+                    new_data[column] = new_data[column + "_" + population]
+                    for drop_column in new_data.columns:
+                        if drop_column.find(column + "_") != -1:
+                            new_data = new_data.drop(drop_column, axis=1)
+                long_data.append(new_data)
+            return pd.concat(long_data).reset_index()
+
+        data = pd.read_feather(data_path)
+
+        metadata_path = os.path.join(path, "metadata.csv")
+        metadata = pd.read_csv(metadata_path)
+
+        new_data = pd.DataFrame()
+        new_data["simulation_nb"] = data["simulation_nb"]
+        if "param_nb" in data.columns:
+            new_data["param_nb"] = data["param_nb"]
+        for column in data.columns:
+            if (column.startswith("k_") | column.startswith("v_")):
+                new_data[column] = data[column]
+
+        new_data["position"] = data[posthoc_data_analysis +
+                                    "1D_density_position"]
+
+        populations = {"labile_growing_1": "Gu",
+                       "labile_pausing_2": "Pu",
+                       "stable_3": "Ps",
+                       "stable_growing_4": "Gs",
+                       "stable_pausing_5": "Psu"
+                       }
+        total_src_str = posthoc_data_analysis + "1D_density_state_"
+        total_target_str = "MT_density_"
+        for source, target in populations.items():
+            new_data[total_target_str + target] = data[
+                total_src_str + source]
+
+        # unstable_src_str = "local_unstable_density_1D_density_state_"
+        # unstable_target_str = "MT_unstable_density_"
+        # for source, target in populations.items():
+        #     if total_target_str+target not in new_data.columns:
+        #         continue
+        #     if (total_src_str + source) in data.columns:
+        #         new_data[total_target_str + target] = data[total_src_str + source]
+
+        # stable_src_str = "local_stable_density_1D_density_state_"
+        # stable_target_str = "MT_stable_density_"
+        # for source, target in populations.items():
+        #     if total_target_str+target not in new_data.columns:
+        #         continue
+        #     if (total_src_str + source) in data.columns:
+        #         new_data[total_target_str + target] = data[total_src_str + source]
+
+        new_data["solution_type"] = "stochastic"
+        new_data["neurite_length"] = metadata["prop_position_max"].values[0]
+
+        del data
+        print("Start averaging data...")
+        # start = time.time()
+        group_params = [param
+                        for param in new_data.columns
+                        if param.startswith("k_")]
+
+        if "param_nb" in new_data.columns:
+            group_params.append("param_nb")
+        # data = new_data.groupby([*group_params, "v_f", "v_g",
+        #                          "position",
+        #                          "solution_type"]).mean().reset_index()
+        # del new_data
+
+        data = new_data
+
+        # print(time.time() - start)
+        populations = ["Gu", "Pu", "Ps"
+            , "Gs", "Psu"
+                       ]
+        columns = ["MT_density"]
+
+        print("Start conversion to long data...")
+        data = wide_to_long_data(data, populations, columns)
+
+        # print("Start saving data...")
+        # data.to_feather(os.path.join(processed_data_path))
+
+        return data
+
+
+    def save_simulation_data(self, stochastic_path, folder, data_folders,
+                             figure_script_name, figure_script_path,
+                             figure_layout_path, figure_layout_name,
+                             overwrite_script, orig_reference_pos, experiment
+                             ):
+        one_simulation_data = pd.DataFrame()
+
+        path = os.path.join(stochastic_path, folder)
+        self._copy_scripts(folder, path, figure_script_name, figure_script_path,
+                           figure_layout_path, figure_layout_name,
+                           overwrite_script)
+
+        data_path = os.path.join(path, "_data_local_density",
+                                 "data.feather")
+        if os.path.exists(data_path):
+            data = self._save_local_data(data_path)
+            data["type"] = "simulation"
+            data["group"] = "populations"
+            data["position"] /= data["position"].max()
+
+            all_positions = data["position"].drop_duplicates().values
+            new_reference_pos = np.sort(all_positions[all_positions >
+                                                      orig_reference_pos])[
+                0]
+
+            def normalize_on_reference(data):
+                data["MT_density_norm"] = data["MT_density"] / data.loc[
+                    data["position"] == new_reference_pos,
+                    "MT_density"]
+                return data
+
+            data = data.groupby(["group"]).apply(
+                normalize_on_reference).reset_index()
+
+            one_simulation_data = pd.concat([one_simulation_data, data])
+
+        folders = data_folders
+
+        for data_name, folder in folders.items():
+            data_path = os.path.join(path, folder, "data.feather")
+
+            if not os.path.exists(data_path):
+                print("The data for", data_name, "(", folder,
+                      ") was not saved",
+                      "after the simulation.")
+                continue
+            data = pd.read_feather(data_path)
+            metadata_path = os.path.join(path, "metadata.csv")
+            metadata = pd.read_csv(metadata_path)
+
+            position_column = [column for column in data.columns
+                               if column.find("1D_density_position") != -1][
+                0]
+            data_columns = [column for column in data.columns
+                            if ((column.find("1D_density_position") == -1)
+                                & (column.find("1D_density") != -1))]
+
+            for data_column in data_columns:
+                # if len(data_column) > 1:
+                #     data_column = [column for column in data_column
+                #                    if column.find("Total") != -1]
+                # else:
+                #     data_column = data_column[0]
+
+                new_data = pd.DataFrame()
+                new_data["simulation_nb"] = data["simulation_nb"]
+                if "param_nb" in data.columns:
+                    new_data["param_nb"] = data["param_nb"]
+
+                param_columns = []
+                if "param_nb" in new_data.columns:
+                    param_columns.append("param_nb")
+                for column in data.columns:
+                    if (column.startswith("k_") | column.startswith("v_")):
+                        new_data[column] = data[column]
+                        param_columns.append(column)
+
+                new_data["MT_density"] = data[data_column]
+
+                if len(data[position_column].drop_duplicates()) > 1:
+                    new_data["position"] = data[position_column]
+                else:
+                    groups = [*param_columns,
+                              "simulation_nb"]
+                    new_data["position"] = new_data.groupby(groups)[
+                        "simulation_nb"].transform(
+                        lambda x: list(range(len(x))))
+                    new_data["position"] *= data["position_max"].max() / \
+                                            new_data["position"].max()
+
+                new_data["group"] = data_name
+                new_data["details"] = data_column
+                new_data["position"] /= new_data["position"].max()
+                new_data["time"] = data["time"]
+                new_data = new_data.groupby([*param_columns,
+                                             "group", "details",
+                                             "position", "time",
+                                             "simulation_nb"]).mean().reset_index()
+                new_data["type"] = "simulation"
+                all_positions = new_data[
+                    "position"].drop_duplicates().values
+                new_reference_pos = np.sort(all_positions[all_positions >=
+                                                          orig_reference_pos])[
+                    0]
+
+                def normalize_on_reference(data):
+                    all_positions = data[
+                        "position"].drop_duplicates().values
+                    new_reference_pos = np.sort(
+                        all_positions[all_positions >=
+                                      orig_reference_pos])
+                    if len(new_reference_pos) == 0:
+                        return data
+                    new_reference_pos = new_reference_pos[0]
+                    data["MT_density_norm"] = data["MT_density"] / data.loc[
+                        data["position"] == new_reference_pos,
+                        "MT_density"].values[0]
+                    return data
+
+                new_data = new_data.groupby(
+                    [*param_columns, "group",
+                     "details",
+                     "simulation_nb"]).apply(
+                    normalize_on_reference).reset_index(drop=True)
+
+                one_simulation_data = pd.concat(
+                    (one_simulation_data, new_data))
+
+        if len(one_simulation_data) > 0:
+            one_simulation_data.reset_index(drop=True).to_feather(
+                os.path.join(path, "all_MT_distributions.feather"))
+
+            # one_simulation_data.to_csv(
+            #     os.path.join(path, "all_MT_distributions.csv"))
+
+            group_params = [param
+                            for param in one_simulation_data.columns
+                            if param.startswith("k_")]
+            if "param_nb" in one_simulation_data.columns:
+                group_params.append("param_nb")
+
+            one_simulation_data["group"] = one_simulation_data[
+                "group"].fillna(value=0)
+            if "population" not in one_simulation_data.columns:
+                one_simulation_data["population"] = np.nan
+            one_simulation_data["population"] = one_simulation_data[
+                "population"].fillna(value=0)
+
+            one_simulation_data = one_simulation_data.groupby(
+                [*group_params, "v_f", "v_g",
+                 "position", "group", "details",
+                 "population", "type",
+                 "time"]).mean().reset_index()
+
+            one_simulation_data["position_um"] = one_simulation_data[
+                "position"]
+
+            one_simulation_data["position"] = one_simulation_data.groupby(
+                [*param_columns,
+                 "group", "details",
+                 "population", "type", ])["position"].transform(
+                lambda x: x / x.max())
+
+            one_simulation_data["position"] = one_simulation_data[
+                "position"].round(3)
+            # normalization on averages needed. When averaging normalized single
+            # simulations, the result is different than normalizing on the
+            # averages. This is mainly due to
+            if "level_0" in one_simulation_data.columns:
+                one_simulation_data.drop("level_0", axis=1, inplace=True)
+
+            one_simulation_data = one_simulation_data.groupby(
+                [*group_params, "v_f", "v_g", "group", "details",
+                 "population", "type",
+                 "time"]).apply(normalize_on_reference).reset_index(drop=True)
+
+            one_simulation_data.to_csv(os.path.join(path,
+                                                    "all_MT_distributions_mean_" + experiment + ".csv"))
+
+        return one_simulation_data
+
+    def get_simulation_experiment_data(self, experiment,
+                                       base_folder, data_folders,
+                                       orig_reference_pos=0.5):
+        """
+        Function specific to Schelski et al., 2025
+
+        Args:
+            experiment:
+            base_folder:
+            data_folders: dictionary with keys being the short name of the
+                data extraction and values being the folder names
+
+        Returns:
+
+        """
+
+        if data_folders is None:
+            data_folders = {"stable": "_data_local_stable_density",
+                           "unstable": "_data_local_unstable_density",
+                           "growing": "_data_local_growing_tip_density",
+                           "all": "_data_local_density_all",
+                           # "populations" : "_data_local_density",
+                           "modification": "_data_modification_density"}
         else:
-            object_states_array = self.simulation.object_states
+            data_folders = {key[1]: "_data_"+key[0]
+                            for key, _ in data_folders.items()}
+
+        # base_folder = "C:\\Users\\schelskim\\Nextcloud\\01ANALYSIS\\TUBB\\simulations\\"
+
+        stochastic_path = os.path.join(base_folder,
+                                       "MTRF_stochastic_steady_state")
+        analyzed_path = os.path.join(base_folder, "processed_data")
+
+        exp_MT_density_path = os.path.join(base_folder, "MT_distribution",
+                                           "DIV1")
+        exp_MT_density_file_name = "MT_distributions_modifications_stage2.csv"
+        exp_MT_density_data = pd.read_csv(os.path.join(exp_MT_density_path,
+                                                       exp_MT_density_file_name))
+
+        # exp_MT_density_data = exp_MT_density_data.loc[exp_MT_density_data["position"] > excluded_start]
+        # exp_MT_density_data["position"] -= excluded_start
+        # exp_MT_density_data["position"] /= (1 - excluded_start)
+        # get first position after new reference position:
+        all_positions = exp_MT_density_data["position"].drop_duplicates().values
+        new_reference_pos = \
+        np.sort(all_positions[all_positions > orig_reference_pos])[0]
+        # replace nan with -1, otherwise
+        exp_MT_density_data.loc[np.isnan(
+            exp_MT_density_data[
+                "actub_detyr_fraction"]), "actub_detyr_fraction"] = -1
+        exp_MT_density_data.loc[np.isnan(
+            exp_MT_density_data[
+                "tyrtub_actub_fraction"]), "tyrtub_actub_fraction"] = -1
+        exp_MT_density_data.set_index(["type", "group", "channel_name",
+                                       "actub_detyr_fraction",
+                                       "tyrtub_actub_fraction"], inplace=True)
+
+        # exp_MT_density_data.sort_values(["type", "group", "channel_name",
+        #                                  "actub_detyr_fraction",
+        #                                  "tyrtub_actub_fraction", "position"],
+        #                                 inplace=True)
+        # exp_MT_density_data.reset_index(inplace=True, drop=True)
+
+        # exp_MT_density_data["MT_density_norm"] = exp_MT_density_data["MT_density"]
+
+        # print(exp_MT_density_data.columns)
+
+        def normalize_on_reference(data):
+            data["MT_density_norm"] = data["MT_density"] / data.loc[
+                data["position"] == new_reference_pos,
+                "MT_density"]
+            return data
+
+        exp_MT_density_data = exp_MT_density_data.groupby(
+            ["type", "group", "channel_name",
+             "actub_detyr_fraction",
+             "tyrtub_actub_fraction"]).apply(
+            normalize_on_reference).reset_index(drop=True)
+        exp_MT_density_data.reset_index(inplace=True)
+        # exp_MT_density_data = pd.DataFrame()
+
+        exp_growing_tips_path = os.path.join(base_folder,
+                                             "EB_comet_analysis_new")
+        exp_growing_tips_file_name = "panelB_EB_location_data_mean.csv"
+        exp_growing_tips_data_orig = pd.read_csv(
+            os.path.join(exp_growing_tips_path,
+                         exp_growing_tips_file_name))
+
+        exp_growing_tips_data = pd.DataFrame()
+        exp_growing_tips_data["position"] = exp_growing_tips_data_orig[
+            "neurite_pos_rel"]
+        start_point = exp_growing_tips_data["position"].min()
+        exp_growing_tips_data["position"] -= start_point
+        exp_growing_tips_data["position"] /= (1 - start_point)
+        exp_growing_tips_data["position"] /= exp_growing_tips_data[
+            "position"].max()
+        exp_growing_tips_data["MT_density"] = exp_growing_tips_data_orig[
+            "number"]
+        exp_growing_tips_data["type"] = "experiment"
+        exp_growing_tips_data["group"] = "growing"
+
+        # exp_growing_tips_data = pd.DataFrame()
+
+        if not os.path.exists(analyzed_path):
+            os.mkdir(analyzed_path)
+
+        stochastic_folders = [experiment]
+
+        exp_name = stochastic_folders[0]
+
+        posthoc_data_analysis = ""
+
+        overwrite_processed_data = True
+        overwrite_script = False
+
+        processed_file_name = "panelABCDEFG_data_processed" + exp_name + ".feather"
+
+        figure_script_name = "Figure1_SimVsExp.py"
+        figure_script_path = os.path.join(base_folder, figure_script_name)
+        figure_layout_name = "__figure__1.csv"
+        figure_layout_path = os.path.join(base_folder, figure_layout_name)
+
+        experiment = stochastic_folders[0]
+        # experiment = "MTRF_stable_growth_GupuVgMap_KcuTip5_kNS12_varGsps_axon_160um"
+        # experiment = stochastic_folders[0]
+        if experiment != "":
+            processed_data_folder = os.path.join(analyzed_path, experiment)
+            processed_data_path = os.path.join(processed_data_folder,
+                                               processed_file_name)
+            if not os.path.exists(processed_data_folder):
+                os.mkdir(processed_data_folder)
+                one_simulation_data = pd.DataFrame()
+            elif not overwrite_processed_data:
+                one_simulation_data = pd.read_feather(processed_data_path)
+            else:
+                one_simulation_data = pd.DataFrame()
+
+            # copy script into processed path
+            script_name = os.path.basename(__file__).replace(".py",
+                                                             "_" + experiment + ".py")
+            new_script_path = os.path.join(processed_data_folder, script_name)
+            shutil.copy(__file__, new_script_path)
+
+            script_name = figure_script_name.replace(".py",
+                                                     "_" + experiment + ".py")
+            new_figure_script_path = os.path.join(processed_data_folder,
+                                                  script_name)
+            if not os.path.exists(new_figure_script_path) | overwrite_script:
+                shutil.copy(figure_script_path, new_figure_script_path)
+
+            script_name = figure_layout_name.replace(".csv",
+                                                     "_" + experiment + ".csv")
+            new_figure_script_path = os.path.join(processed_data_folder,
+                                                  script_name)
+            if not os.path.exists(new_figure_script_path):
+                shutil.copy(figure_layout_path, new_figure_script_path)
+
+
+        all_data = pd.DataFrame()
+
+        all_data = pd.concat([all_data, exp_MT_density_data])
+
+        for folder in stochastic_folders:
+            one_simulation_data = self.save_simulation_data(stochastic_path,
+                                                            folder,
+                                                            data_folders,
+                                                            figure_script_name,
+                                                            figure_script_path,
+                                                            figure_layout_path,
+                                                            figure_layout_name,
+                                                            overwrite_script,
+                                                            orig_reference_pos,
+                                                            experiment)
+
+            if len(one_simulation_data) == 0:
+                continue
+
+            # one_simulation_data["MT_density_norm"] = one_simulation_data.groupby(["group",
+            #                                                 "details"])["MT_density"].transform(lambda x: x/x.iloc[0])
+
+            all_data = pd.concat([all_data, one_simulation_data])
+
+            one_simulation_data = pd.concat([one_simulation_data,
+                                             exp_MT_density_data,
+                                             exp_growing_tips_data])
+
+            one_simulation_data = one_simulation_data.fillna(-1)
+
+            one_simulation_data.to_csv(os.path.join(stochastic_path, experiment,
+                                                    "panelAB_all_MT_distributions_SimVsExp_" + exp_name + ".csv"))
+
+            if experiment != "":
+                print(processed_data_path)
+                one_simulation_data.reset_index(drop=True).to_csv(
+                    processed_data_path)
+                del one_simulation_data
+
+        all_data = all_data.fillna(-1)
+        all_data.to_csv(processed_data_path)
+
+        return all_data, processed_file_name
+
+    def get_global_object_orientation(self):
+        """
+
+        Get percentage of forward oriented objects
+
+        Returns:
+
+        """
+
+        if self.simulation is not None:
+            self.data_folder = self.simulation.data_folder
+
+        object_states_array = torch.load(os.path.join(self.data_folder,
+                                                "object_states.pt"))
+        # else:
+        #     object_states_array = self.simulation.object_states
 
         object_states = object_states_array[:1, 0]
-        orientation = object_states_array[:1, 2]
+        orientation = object_states_array[:1, 3]
 
-        # if a target transition_nb for the desired orientation is defined
-        # only leave positions with that number as nonzero
-        if transition_nb_for_orientation is not None:
-            orientation[orientation != transition_nb_for_orientation] = 0
+        # if self.simulation is None:
+        # orientation = torch.load(os.path.join(self.data_folder,
+        #                                         "orientation.pt"))
+        # else:
+        #     orientation = self.simulation.orientation
 
-        orientation_count = torch.count_nonzero(orientation, dim=1)
-        object_count = torch.count_nonzero(object_states, dim=1)
 
-        relative_orientation = ((orientation_count / object_count) *
-                                chance_of_orientation)
+        forward_orientation = 1
+        orientation_forward = copy.deepcopy(orientation)
+        orientation_forward[orientation_forward != forward_orientation] = 0
+        orientation_count_forward = torch.count_nonzero(orientation_forward, dim=1)
+
+        reverse_orientation = -1
+        orientation[orientation != reverse_orientation] = 0
+        orientation_count_reverse = torch.count_nonzero(orientation, dim=1)
+        # object_count = torch.count_nonzero(object_states, dim=1)
+
+        relative_orientation = ((orientation_count_forward /
+                                 (orientation_count_forward +
+                                  orientation_count_reverse)))
 
         orientation_data = {}
         # length_decay_data["time"] = (torch.Tensor(range(len(all_lengths_in_range)))
@@ -206,6 +758,7 @@ class Analyzer():
         all_data["orientation"] = orientation_data
 
         simulation.SSA._save_data(all_data, self.data_folder, 0)
+
 
 
     def track_local_object_length(self, range_start, range_end,
@@ -221,14 +774,27 @@ class Analyzer():
                 is not defined for analyzer
 
         """
-        if self.simulation is None:
-            object_states = torch.load(os.path.join(self.data_folder,
-                                                    "object_states.pt"))
-            properties_array = torch.load(os.path.join(self.data_folder,
-                                                       "property_array.pt"))
-        else:
-            object_states = self.simulation.object_states
-            properties_array = self.simulation.properties_array
+
+        orientation = None
+        if self.simulation is not None:
+            self.data_folder = self.simulation.data_folder
+
+        object_states = torch.load(os.path.join(self.data_folder,
+                                                "object_states.pt"))
+
+        # orientation_path = os.path.join(self.data_folder, "orientation.pt")
+        # if os.path.exists(orientation_path):
+        #     orientation = torch.load(orientation_path)
+        # else:
+        #     orientation = np.zeros(object_states.shape[1:])
+        #     print("WARNING: No orientation data was saved.")
+
+        orientation = object_states[0,3]
+
+        properties_array = torch.load(os.path.join(self.data_folder,
+                                                   "property_array.pt"))
+
+        print(orientation.shape, object_states.shape)
 
         if (max_pos is None) & (self.simulation is None):
             raise ValueError("For the photoconversion simulation, either the "
@@ -257,7 +823,7 @@ class Analyzer():
         # between defined start and end position in compartment.
         # Save start and end position of object that is in range,
         # in separate array
-        first_timepoint_idx_states = 3
+        first_timepoint_idx_states = 4
         initial_creation_time = object_states[1, first_timepoint_idx_states]
         first_timepoint_idx_props = 1
         properties = properties_array[first_timepoint_idx_props]
@@ -283,6 +849,12 @@ class Analyzer():
         for property_nb in range(1, properties.shape[0]):
             properties_sum = properties_sum + properties[property_nb]
 
+        # print(start_length_in_range)
+        # print(end_length_in_range)
+        # print(properties[0])
+        # print(properties_sum)
+        # print(orientation)
+
         _object_length_in_range[nb_SM, nb_cc](start_length_in_range,
                                               end_length_in_range,
                                               range_start_abs, range_end_abs,
@@ -290,6 +862,7 @@ class Analyzer():
                                               0, object_states.shape[2],
                                               to_cuda(properties[0]),
                                               to_cuda(properties_sum),
+                                              to_cuda(orientation),
                                               nb_parallel_cores)
 
         start_length_in_range = torch.Tensor(start_length_in_range.copy_to_host()).cpu()
@@ -370,6 +943,431 @@ class Analyzer():
 
         # return all_data
 
+    def get_local_stable_unstable_dynamic_properties(self, range_starts,
+                                                     range_ends, length,
+                                                     time_res,
+                                                     max_rate_stable_MTs_one_population,
+                                                     max_rate_stable_MTs,
+                                                     min_rate_unstable_MTs,
+                                                     range_names=None,
+                                                     max_time_to_analyze=40,
+                                                     length_groups=None,
+                                                     min_decay_rates_diff=2):
+        """
+
+        Args:
+            range_starts: list of starts of ranges to analyze locally
+            range_ends: list of ends of ranges
+            length: length of neurite in simulation
+            time_res: time resolution to use for analysis
+            max_rate_stable_MTs_one_population: if there is only one rate,
+                everything above this threshold is considered unstable,
+                everything below is considered stable
+            max_rate_stable_MTs: if there are two different rates, then this
+                threshold will be used to check whether both rates are for
+                unstable MTs
+            min_rate_unstable_MTs: f there are two different rates, then this
+                 threshold will be used to check whether both rates are for
+                 unstable MTs
+            range_names: list of strings for names to be used for defined ranges
+                in range_starts and range_ends. Needs to be same length as
+                range_starts/range_ends.
+            max_time_to_analyze: max time to analyze to get decay constants
+            length_groups: groups of neurite lengths to analyze
+            min_decay_rates_diff: minimum difference of the slow and fast decay
+                rates to be considered decay rates from separate propulations.
+                Just randomly decay rates can differ to some extent, even if
+                they come from the same population of objects.
+
+        Returns:
+
+        """
+
+        if range_names is not None:
+            if len(range_names) != len(range_starts):
+                raise ValueError("If range_names is defined, then it has to be"
+                                 " the same length as range_starts/range_ends.")
+        if len(range_starts) != len(range_ends):
+            raise ValueError("The length of range_starts has to be the same"
+                             " as the length of range_ends.")
+        self.get_local_decay(range_starts, range_ends, length, time_res)
+
+        if length_groups is None:
+            length_groups = [10,60]
+
+        if self.data_folder is not None:
+            base_path = self.data_folder
+        else:
+            base_path = self.simulation.data_folder
+
+        file_name = "MT_decay_data_model.feather"
+        data_path = os.path.join(base_path, file_name)
+        if not os.path.exists(data_path):
+            raise ValueError("There was a problem when analyzing "
+                             " local MT decay or the corresponding file"
+                             "MT_decay_data_model.feather can't be found in"
+                             " the simulation folder. ")
+        data = pd.read_feather(os.path.join(base_path, file_name))
+
+        exp_name = os.path.basename(base_path)
+
+        # data = data.loc[data["simulation_nb"] < 400]
+
+        max_time = max_time_to_analyze
+
+        data["time"] -= data["time"].min()
+        data = data.loc[data["time"] <= max_time]
+
+        # first_timepoint = data.loc[data["time"] == 0]
+        # high_int = first_timepoint.loc[first_timepoint["total"] > 16]
+        # high_int.set_index(["simulation_nb", "range"], inplace=True)
+
+        # data.set_index(["simulation_nb", "range"], inplace=True)
+        # data = data.loc[high_int.index.values].reset_index()
+
+        folder = base_path
+        data["neurite_length_um"] = 40
+
+        def remove_early_vals(data):
+            vals = data["total_norm"].values
+            vals[np.isnan(vals)] = 0
+            first_index = np.argmax(vals)
+            data = data.iloc[first_index:]
+            return data
+
+        data["total_norm"] = data.groupby(["simulation_nb",
+                                           "range"])["total"].transform(
+            lambda x: x / x.max())
+
+
+        all_cat_rates = []
+        sb.set(font_scale=2)
+        for data_nb, data in enumerate([data]):
+            def fit_MT_cat_rates(data, mono_exponential,
+                                 dual_exponential, result_index, data_nb=0,
+                                 get_fitted_data=False):
+                # print(data)
+                # print(data.columns, data.reset_index().columns)
+                number_of_simulations = len(
+                    data.reset_index()[["simulation_nb"]].drop_duplicates())
+                print("Analyzing simulation ",
+                      data[["simulation_nb"]].drop_duplicates().values[0])
+
+                data_mean = data
+                # data_mean = data.groupby(["time"]).mean().reset_index()
+                # data = data.loc[data["total_norm"] > 0]
+                if ((data_mean.loc[data_mean["time"] == 0, "total_norm"].values[
+                         0] == 0) |
+                        (np.isnan(data_mean.loc[data_mean[
+                                                    "time"] == 0, "total_norm"].values[
+                                      0]))):
+                    return pd.DataFrame()
+                fit = scipy.optimize.curve_fit(dual_exponential,
+                                               data_mean["time"],
+                                               data["total_norm"],
+                                               bounds=(0, np.inf),
+                                               maxfev=10000)
+                # print(fit)
+
+                # fit_mono = scipy.optimize.curve_fit(mono_exponential, data["time"],
+                #                                data["total_norm"],
+                #                                bounds=(0, np.inf),
+                #                                maxfev=10000)
+                # if len(fit[0]) > 2:
+                exponential_fit_cell = functools.partial(dual_exponential,
+                                                         m=fit[0][0],
+                                                         a=fit[0][1],
+                                                         n=fit[0][2],
+                                                         b=fit[0][3])
+                # else:
+                # mono_exponential_fit_cell = functools.partial(mono_exponential,
+                #                                               m=fit[0][0], a=fit[0][1])
+
+                if len(fit[0]) > 2:
+                    # plt.title("DUAL EXP: " + str(np.round(fit[0][0],2))+"-"+
+                    #           str(np.round(fit[0][1],2))+"-"+
+                    #           str(np.round(fit[0][2],2))+"-"+
+                    #           str(np.round(fit[0][3],2))+"-")
+                    rates = np.array(
+                        [fit[0][result_index + 0], fit[0][result_index + 2]])
+                    low_index = np.where(rates == rates.min())
+                    high_index = np.where(rates == rates.max())
+                    fractions = np.array([fit[0][0], fit[0][2]])
+                    low_fraction = fractions[low_index][0]
+                    high_fraction = fractions[high_index][0]
+                    low_fraction = low_fraction / (low_fraction + high_fraction)
+                    high_fraction = high_fraction / (
+                                low_fraction + high_fraction)
+                    rates_df = pd.DataFrame(columns=("low", "high",
+                                                     "Low fraction",
+                                                     "High fraction",
+                                                     "n_cells"),
+                                            data=[[rates.min(), rates.max(),
+                                                   low_fraction, high_fraction,
+                                                   number_of_simulations]],
+                                            index=[0])
+
+                # if rates.max() > 2:
+                # sb.set(font_scale=2)
+                data_fit = exponential_fit_cell(data_mean["time"])
+                # mono_data_fit = mono_exponential_fit_cell(data["time"])
+
+                if get_fitted_data:
+                    dual_exp_data = data_mean.copy()
+                    dual_exp_data["total_norm"] = data_fit
+                    dual_exp_data["type"] = "dual_exp"
+
+                    # mono_exp_data = data.copy()
+                    # mono_exp_data["total_norm"] = mono_data_fit
+                    # mono_exp_data["type"] = "mono_exp"
+
+                    data_mean["type"] = "data"
+
+                    all_data = pd.concat([data_mean, dual_exp_data])
+                    return all_data
+
+                # name = "Dual_vs_mono_exponential_"+str(result_index)+"_"+str(data_nb)
+                # plt.figure()
+                # plt.gca().set_facecolor('white')
+                # plt.gca().grid(True, color='grey', linestyle='-', linewidth=1)
+                # ax = plt.plot(data["time"], data["total_norm"], color="black", linewidth=3)
+                # ax = plt.plot(data["time"], mono_data_fit, color="grey", linewidth=3)
+                # ax = plt.plot(data["time"], data_fit, color="orange", linewidth=3)
+                # plt.gca().set_facecolor('white')
+                # plt.gca().grid(True, color='grey', linestyle='-', linewidth=1)
+                # plt.ylim([-0.02, 1.1])
+                # plt.xlabel("Time [min]")
+                # plt.ylabel("Relative microtubule mass")
+                # # title = str(idx)
+                # # plt.title(title)
+                if len(fit[0]) > 2:
+
+                    return rates_df
+
+            def dual_exponential(x, m, a, n, b):
+                return m * np.exp(-a * x) + n * np.exp(-b * x)
+
+            def mono_exponential(x, m, a):
+                return m * np.exp(-a * x)
+
+            # print(data.columns)
+            # print(len(data[["date", "exp", "cell"]].drop_duplicates()))
+
+            all_cat_rates_exp = []
+
+            for nb, length in enumerate(length_groups[1:]):
+                length_data = data.loc[
+                    (data["neurite_length_um"] > length_groups[nb]) &
+                    (data["neurite_length_um"] <= length)]
+                print("\n Length group: ", length)
+                length_data["length_group"] = length
+
+                cat_rates_mean = None
+                all_cat_rates_length = []
+                cat_rates_mean = length_data.groupby(
+                    ["simulation_nb", "range", "k_cs"]).apply(fit_MT_cat_rates,
+                                                              mono_exponential,
+                                                              dual_exponential,
+                                                              result_index=1,
+                                                              data_nb=data_nb)
+
+                # fitted_data = length_data.groupby(["simulation_nb", "range", "k_cs"]).apply(fit_MT_cat_rates,
+                #                                                                   mono_exponential, dual_exponential,
+                #                                                                   result_index=1,
+                #                                                                   data_nb=data_nb,
+                #                                                                   get_fitted_data=True)
+
+                # all_cat_rates_length = pd.concat(all_cat_rates_length)
+                cat_rates_mean["neurite_length"] = length
+                all_cat_rates_exp.append(cat_rates_mean)
+
+            all_cat_rates_exp = pd.concat(all_cat_rates_exp)
+            all_cat_rates_exp["exp_type"] = data_nb
+            all_cat_rates.append(all_cat_rates_exp)
+
+        all_cat_rates = pd.concat(all_cat_rates).reset_index()
+        # cat_rates_60s = all_cat_rates.loc[all_cat_rates["exp_type"] == 1]
+        # print(all_cat_rates.groupby(["neurite_length", "exp_type"]).mean())
+
+        if range_names is None:
+            range_names = [str(idx) for idx in range(len(range_starts))]
+
+        for pos_index in range(len(range_starts)):
+            range_start = range_starts[pos_index]
+            range_end = range_ends[pos_index]
+            range_str = str(range_start) + "-" + str(range_end)
+            all_cat_rates.loc[all_cat_rates["range"] == range_str,
+                               "position"] = range_names[pos_index]
+
+        all_cat_rates["position"] = "far"
+        all_cat_rates.loc[
+            all_cat_rates["range"] == "0.25-0.35", "position"] = "close"
+
+        cat_rates = all_cat_rates[["simulation_nb",
+                                   "exp_type", "neurite_length",
+                                   "high", "low", "High fraction",
+                                   "Low fraction", "n_cells", "position"]]
+
+        cat_rates["source"] = "simulation"
+
+        # fitted_data.drop("simulation_nb", axis=1, inplace=True)
+        # fitted_data = fitted_data.drop("k_cs", axis=1).reset_index()
+        # fitted_data["source"] = "simulation"
+        # fitted_data["position"] = "far"
+        # fitted_data.loc[fitted_data["range"] == "0.25-0.35", "position"] = "close"
+        # fitted_data.to_csv(os.path.join(base_path, "MT_decay_sim_close_far_fitted_"+exp_name+".csv"))
+
+        cat_rates.to_csv(
+            os.path.join(base_path, "MT_decay_close_far_sim_" + exp_name +
+                         "_maxt" + str(max_time) + "_raw.csv"))
+
+        cat_rates["one_population"] = 0
+        cat_rates["diff"] = cat_rates["high"] / cat_rates["low"]
+        cat_rates.loc[cat_rates["diff"] < min_decay_rates_diff,
+                      "one_population"] = 1
+        # cat_rates.loc[cat_rates["high"] > 5, "one_population"] = 1
+
+        cat_rates["rate_weighted_mean"] = ((cat_rates["High fraction"] *
+                                            cat_rates["high"])
+                                           + (cat_rates["Low fraction"] *
+                                              cat_rates["low"]))
+
+        cat_rates["only_stable"] = 0
+        cat_rates["only_unstable"] = 0
+
+        # if only one population of MTs is present and its lifetime is similar to
+        # the lifetime of stable MTs, all MTs are stable
+        cat_rates.loc[(cat_rates["one_population"] == 1) &
+                      (cat_rates[
+                           "low"] < max_rate_stable_MTs_one_population), "only_stable"] = 1
+
+        # if only one population of MTs is present and its lifetime is similar to
+        # the lifetime of unstable MTs, all MTs are unstable
+        cat_rates.loc[(cat_rates["one_population"] == 1) &
+                      (cat_rates[
+                           "low"] > max_rate_stable_MTs_one_population), "only_unstable"] = 1
+
+        # if the higher rate is as low as the rate for stable MTs, then all MTs
+        # are stable
+        cat_rates.loc[(cat_rates["one_population"] == 0) &
+                      (cat_rates[
+                           "high"] < min_rate_unstable_MTs), "only_stable"] = 1
+        # if the lower rate is higher than the max rate for stable MTs, then all MTs
+        # are unstable
+        cat_rates.loc[(cat_rates["one_population"] == 0) &
+                      (cat_rates[
+                           "low"] > max_rate_stable_MTs), "only_unstable"] = 1
+
+        # set fractions correctly if there are only stable MTs
+        cat_rates.loc[cat_rates["only_stable"] == 1, "High fraction"] = 0
+        cat_rates.loc[cat_rates["only_stable"] == 1, "Low fraction"] = 1
+
+        # set fractions correctly if there are only unstable MTs
+        cat_rates.loc[cat_rates["only_unstable"] == 1, "High fraction"] = 1
+        cat_rates.loc[cat_rates["only_unstable"] == 1, "Low fraction"] = 0
+
+        # if there are only unstable MTs, set the unstable rate as the weighted mean
+        # of both rates (weighted by the initial fraction)
+        cat_rates.loc[cat_rates["only_unstable"] == 1, "high"] = cat_rates.loc[
+            cat_rates["only_unstable"] == 1, "rate_weighted_mean"]
+
+        # if there are only stable MTs, set the stable rate as the weighted mean
+        # of both rates (weighted by the initial fraction)
+        cat_rates.loc[cat_rates["only_stable"] == 1, "low"] = cat_rates.loc[
+            cat_rates["only_stable"] == 1, "rate_weighted_mean"]
+
+        cat_rates["stable/unstable"] = (cat_rates["Low fraction"] /
+                                        cat_rates["High fraction"])
+
+        cat_rates_close = cat_rates.loc[cat_rates["position"] == "close"]
+        cat_rates_close["position"] = "far/close"
+        cat_rates_far = cat_rates.loc[cat_rates["position"] == "far"]
+        cat_rates_far["position"] = "far/close"
+
+        cat_rates_close.set_index(["source", "simulation_nb", "position"],
+                                  inplace=True)
+        cat_rates_far.set_index(["source", "simulation_nb", "position"],
+                                inplace=True)
+
+        cat_rates_ratio = (cat_rates_far - cat_rates_close) / (
+                    cat_rates_close + cat_rates_far)
+
+        # cat_rates = pd.concat([cat_rates, cat_rates_ratio.reset_index()])
+
+        cat_rates.to_csv(
+            os.path.join(base_path, "MT_decay_close_far_sim_" + exp_name +
+                         "_maxt" + str(max_time) + ".csv"))
+
+        cat_rates_low = cat_rates.copy()
+        cat_rates_low["fraction"] = cat_rates["Low fraction"]
+        cat_rates_low["rate"] = cat_rates["low"]
+        cat_rates_low["type"] = "stable"
+
+        cat_rates_high = cat_rates.copy()
+        cat_rates_high["fraction"] = cat_rates["High fraction"]
+        cat_rates_high["rate"] = cat_rates["high"]
+        cat_rates_high["type"] = "unstable"
+
+        # cat_rates_ratio = cat_rates.copy()
+        cat_rates_ratio["fraction"] = cat_rates_ratio["stable/unstable"]
+        cat_rates_ratio["rate"] = cat_rates_ratio["diff"]
+        cat_rates_ratio["type"] = "stable/unstable"
+
+        cat_rates = pd.concat(
+            [cat_rates_low, cat_rates_high, cat_rates_ratio.reset_index()])
+        cat_rates.drop(["High fraction", "Low fraction",
+                        "high", "low", "stable/unstable"], axis=1, inplace=True)
+
+        cat_rates.to_csv(
+            os.path.join(base_path, "panelA_MT_decay_close_far_sim_long_"
+                         + exp_name + "_maxt" + str(max_time) + ".csv"))
+        return cat_rates
+
+
+    def get_local_decay(self, range_starts, range_ends, length, time_res):
+        """
+
+        Args:
+            range_starts: List of relative start x points for ranges
+            range_ends: List of relative start x points for ranges
+            length: total length of simulation
+            time_res: time resolution at which analysis should be done
+
+        Returns:
+
+        """
+
+        if self.data_folder is not None:
+            folder = self.data_folder
+        else:
+            folder = self.simulation.data_folder
+
+        all_data = []
+        for range_nb in range(len(range_starts)):
+            range_start = range_starts[range_nb]
+            range_end = range_ends[range_nb]
+
+            data_name = "length_decay_" + str(range_start) + "-" + str(
+                range_end)
+            data_folder = "_data_" + data_name
+
+            data_path = os.path.join(folder, data_folder)
+            if os.path.exists(data_path):
+                shutil.rmtree(data_path)
+
+            self.track_local_object_length(range_start=range_start,
+                                             range_end=range_end,
+                                             max_pos=length)
+            self.start(time_resolution=time_res, max_time=length)
+
+            length_decay_data = pd.read_feather(os.path.join(data_path,
+                                                             "data.feather"))
+            length_decay_data["range"] = str(range_start) + "-" + str(range_end)
+            length_decay_data["total"] = length_decay_data[data_name + "_decay"]
+            all_data.append(length_decay_data)
+
+        all_data = pd.concat(all_data)
+        all_data.to_feather(os.path.join(folder, "MT_decay_data_model.feather"))
 
     def start(self, time_resolution, max_time, use_assertion_checks = True):
         """
@@ -395,48 +1393,49 @@ class Analyzer():
 
         print("Starting loading time files...")
         params_removed = False
-        if self.simulation is None:
-            all_times = self._load_data(self.data_folder,
-                                        file_name_keyword="times")
+        if self.simulation is not None:
+            self.data_folder = self.simulation.data_folder
+        all_times = self._load_data(self.data_folder,
+                                    file_name_keyword="times")
 
-            removed_vals_filename = "removed_param_values.feather"
-            # load removed_param_value data
-            if ((removed_vals_filename not in os.listdir(self.data_folder))
-                    & params_removed):
-                raise ValueError(
-                    "No file for removed parameter values was found. "
-                    "But the shape of arrays changes - therefore,"
-                    "param values were removed. Maybe the file name"
-                    "is not 'removed_param_values.feather' anymore or "
-                    "the file was moved to another folder?")
-            removed_param_vals_path = os.path.join(self.data_folder,
-                                                   removed_vals_filename)
-            removed_param_vals = None
-            if os.path.exists(removed_param_vals_path):
-                removed_param_vals = pd.read_feather(removed_param_vals_path)
+        removed_vals_filename = "removed_param_values.feather"
+        # load removed_param_value data
+        if ((removed_vals_filename not in os.listdir(self.data_folder))
+                & params_removed):
+            raise ValueError(
+                "No file for removed parameter values was found. "
+                "But the shape of arrays changes - therefore,"
+                "param values were removed. Maybe the file name"
+                "is not 'removed_param_values.feather' anymore or "
+                "the file was moved to another folder?")
+        removed_param_vals_path = os.path.join(self.data_folder,
+                                               removed_vals_filename)
+        removed_param_vals = None
+        if os.path.exists(removed_param_vals_path):
+            removed_param_vals = pd.read_feather(removed_param_vals_path)
 
-            self.array_resizing_dict = {}
+        self.array_resizing_dict = {}
 
-            # Reconstruct full time arrays by going through removed param values
-            # grouped by timepoint
-            # create list of ALL indices for all dimensions from first timepoint
-            self.all_dim_list = [torch.IntTensor(range(shape)).to(self.device)
-                                 for shape in all_times[0].shape[2:]]
+        # Reconstruct full time arrays by going through removed param values
+        # grouped by timepoint
+        # create list of ALL indices for all dimensions from first timepoint
+        self.all_dim_list = [torch.IntTensor(range(shape)).to(self.device)
+                             for shape in all_times[0].shape[2:]]
 
-            if removed_param_vals is not None:
-                removed_param_vals.groupby(["iteration_nb"]
-                                           ).apply(
-                    self._build_array_resize_dict)
+        if removed_param_vals is not None:
+            removed_param_vals.groupby(["iteration_nb"]
+                                       ).apply(
+                self._build_array_resize_dict)
 
-                print("Starting concatenating arrays with removed params")
-                # for time in all_times:
+            print("Starting concatenating arrays with removed params")
+            # for time in all_times:
 
-                all_times = self._concat_arrays_with_removed_param_vals(
-                    all_times)
-            else:
-                all_times = torch.concat(all_times)
+            all_times = self._concat_arrays_with_removed_param_vals(
+                all_times)
         else:
-            all_times = self.simulation.times.to(self.device)
+            all_times = torch.concat(all_times)
+        # else:
+        #     all_times = self.simulation.times.to(self.device)
 
         print("Finished loading time files.")
         parameters = self._load_parameters()
@@ -445,39 +1444,40 @@ class Analyzer():
         # There is one folder for each function in DataExtraction used.
         # Time and parameter data is in the parent folder and therefore does
         # not need to be looked at per folder (therefore before this for loop)
-        if self.simulation is None:
-            all_data_dict = {}
-            for folder_name in os.listdir(self.data_folder):
-                if not folder_name.startswith("_data"):
-                    continue
-                data_path = os.path.join(self.data_folder, folder_name)
-                if not os.path.isdir(data_path):
-                    continue
-                all_data_dict[data_path] = {}
-                print("Rename files for sorting...")
-                self._rename_files_for_sorting(data_path)
-                data_keywords = self._get_data_keywords(data_path)
-                if "times" in data_keywords:
-                    data_keywords.remove("times")
-                for data_keyword in data_keywords:
-                    new_data = self._load_data(data_path,
-                                               file_name_keyword=data_keyword)
-                    new_data = self._equalize_object_nb(new_data)
-                    try:
-                        new_data = torch.concat(new_data)
-                    except:
-                        concat_func = self._concat_arrays_with_removed_param_vals
-                        new_data = concat_func(new_data)
-                    all_data_dict[data_path][data_keyword] = new_data
-        else:
-            all_data_dict = {}
-            for data_name, data in self.simulation.all_data.items():
-                data_path = os.path.join(self.data_folder, "_data_"+data_name)
-                if not os.path.exists(data_path):
-                    os.mkdir(data_path)
-                all_data_dict[data_path] = {}
-                for keyword, data_array in data.items():
-                    all_data_dict[data_path][keyword] = data_array.cpu()
+        if self.simulation is not None:
+            self.data_folder = self.simulation.data_folder
+        all_data_dict = {}
+        for folder_name in os.listdir(self.data_folder):
+            if not folder_name.startswith("_data"):
+                continue
+            data_path = os.path.join(self.data_folder, folder_name)
+            if not os.path.isdir(data_path):
+                continue
+            all_data_dict[data_path] = {}
+            print("Rename files for sorting...")
+            self._rename_files_for_sorting(data_path)
+            data_keywords = self._get_data_keywords(data_path)
+            if "times" in data_keywords:
+                data_keywords.remove("times")
+            for data_keyword in data_keywords:
+                new_data = self._load_data(data_path,
+                                           file_name_keyword=data_keyword)
+                new_data = self._equalize_object_nb(new_data)
+                try:
+                    new_data = torch.concat(new_data)
+                except:
+                    concat_func = self._concat_arrays_with_removed_param_vals
+                    new_data = concat_func(new_data)
+                all_data_dict[data_path][data_keyword] = new_data
+        # else:
+        #     all_data_dict = {}
+        #     for data_name, data in self.simulation.all_data.items():
+        #         data_path = os.path.join(self.data_folder, "_data_"+data_name)
+        #         if not os.path.exists(data_path):
+        #             os.mkdir(data_path)
+        #         all_data_dict[data_path] = {}
+        #         for keyword, data_array in data.items():
+        #             all_data_dict[data_path][keyword] = data_array.cpu()
 
         print("Analyzer saving data...")
         for data_path, data_dict in tqdm(all_data_dict.items()):

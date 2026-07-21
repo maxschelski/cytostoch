@@ -1154,6 +1154,7 @@ class SSA():
                   "all_parameter_combinations is True.")
 
         self.object_states_file_name = "object_states.pt"
+        self.orientation_file_name = "orientation.pt"
         self.property_array_file_name = "property_array.pt"
         self.first_last_idx_with_object_file_name = (
             "first_last_idx_with_object.pt")
@@ -1704,7 +1705,7 @@ class SSA():
 
                          convert_array(first_last_idx_with_object),
                          local_object_lifetime_array,
-                self.local_lifetime_resolution,
+                         self.local_lifetime_resolution,
 
                         timepoint_array,
                         time_resolution, min_time, save_initial_state,
