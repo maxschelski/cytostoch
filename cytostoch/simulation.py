@@ -1786,7 +1786,7 @@ class SSA():
         object_dependent_rates = np.zeros((nb_dependences,
                                            max_number_objects,
                                            *param_shape_batch
-                                           ))
+                                           ), dtype=np.float64)
 
         self._initialize_object_states(param_shape_batch)
 
@@ -1897,12 +1897,14 @@ class SSA():
         # This provides a unique ID for each object: the position in the array
         # and the time it was created. This is needed for simulation
         # of photoconversion experiments.
+        # additionally to the creation time, also the orientation of objects
+        # is tracked
         if self.track_object_creation_time:
-            nb_dims_time_track = 2
+            nb_dims_time_track = 3
         else:
-            nb_dims_time_track = 1
+            nb_dims_time_track = 2
 
-        nb_properties_tracked_in_states = 4
+        nb_properties_tracked_in_states = 3
         # Last index in second dimension is orientation
         object_states = np.zeros((nb_dims_time_track,
                                   nb_timepoints +
@@ -1999,7 +2001,6 @@ class SSA():
 
         thread_masks = np.zeros((4, *param_shape_batch), dtype=np.int64)
 
-        timepoint_array = convert_array(timepoint_array)
         properties_array = convert_array(properties_array)
 
         # get number of cuda stream managers and cores per stream manager
@@ -2016,6 +2017,7 @@ class SSA():
         # total_density_batch = cuda.to_device(
         #     convert_array(total_density))
 
+        timepoint_array = convert_array(timepoint_array)
         timepoint_array_batch = cuda.to_device(timepoint_array)
         time_resolution = cuda.to_device(time_resolution)
 
@@ -2025,7 +2027,7 @@ class SSA():
         object_states_batch = to_cuda(object_states_batch)
 
         object_dependent_rates_batch = object_dependent_rates
-        object_dependent_rates_batch = convert_array(to_cuda(
+        object_dependent_rates_batch = to_cuda(convert_array(
             object_dependent_rates_batch))
 
         property_array_batch = properties_array
@@ -2164,8 +2166,8 @@ class SSA():
         # plt.figure()
         # plt.plot(local_density_batches.mean(axis=1))
 
-        self.object_states = object_states_batch[:, 4:]
-        self.orientation = object_states_batch[0, 3]
+        self.object_states = object_states_batch[:, 3:]
+        self.orientation = object_states_batch[2, 3:]
         self.creation_source = object_states_batch[0, 2]
 
         # print(np.unique(object_states_batch[0]))

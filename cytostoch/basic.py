@@ -158,13 +158,13 @@ def _get_local_and_total_density(local_density,
                 # while the last position, is the amount of MTs from
                 # x_max to local_resolution to x_max
                 end = (start +
-                       orientation_array[0, object_pos, sim_id, param_id]
+                       orientation_array[timepoint, object_pos, sim_id, param_id]
                        * length_array[timepoint, object_pos, sim_id, param_id])
 
                 # switch start and end for reverse oriented objects to keep
                 # the remaining calculations the same, since they depend on
                 # end > start
-                if orientation_array[0, object_pos, sim_id, param_id] == -1:
+                if orientation_array[timepoint, object_pos, sim_id, param_id] == -1:
                     end_tmp = end
                     end = start
                     start = end_tmp
@@ -709,6 +709,7 @@ class DataExtraction():
 
     def _operation_global(self, dimensions, simulation_object, properties,
                           state_numbers, nucleation_states=False,
+                          orientation=False,
                           **kwargs):
         """
         Get global properties of object in states.
@@ -728,6 +729,8 @@ class DataExtraction():
         """
         if nucleation_states:
             object_states = simulation_object.creation_source.unsqueeze(0)
+        elif orientation:
+            object_states = simulation_object.orientation
         else:
             object_states = simulation_object.object_states[0]
 
@@ -951,6 +954,7 @@ class DataExtraction():
     def _operation_2D_to_1D_density(self, dimensions, simulation_object,
                                     state_numbers=None,
                                     resolution=0.2, end_density=False,
+                                    analyze_only_last_timepoint=False,
                                     **kwargs):
         """
         Create 1D density array from start and length information without
@@ -963,6 +967,7 @@ class DataExtraction():
         Returns:
 
         """
+
         if len(dimensions) > 1:
             return ValueError(f"The operation '2D_to_1D_density' is only "
                               f"implemented for 1 dimension. DataExtraction "
@@ -990,10 +995,10 @@ class DataExtraction():
             length_array = position_array.clone()
             length_array[:] = resolution/1000
 
-        print("Length array shape: ", length_array.shape)
+        # print("Length array shape: ", length_array.shape)
 
         if hasattr(simulation_object, "orientation"):
-            orientation = np.expand_dims(simulation_object.orientation, axis=0)
+            orientation = simulation_object.orientation
         else:
             orientation = torch.ones(length_array.shape)
 
@@ -1054,7 +1059,7 @@ class DataExtraction():
             length_array = torch.gather(length_array, dim=1, index=idx)
             length_array = length_array[:, :max_nb_objects]
 
-            orientation[mask_inv[:1]] = float("nan")
+            orientation[mask_inv] = float("nan")
             orientation = torch.gather(orientation, dim=1, index=idx)
             orientation = orientation[:, :max_nb_objects]
 
@@ -1121,6 +1126,9 @@ class DataExtraction():
                 nb_SM, nb_cc = simulation.SSA._get_number_of_cuda_cores()
 
                 for timepoint in range(object_states.shape[0]):
+                    # check if only the last timepoint should be analyzed
+                    if analyze_only_last_timepoint & (timepoint < (object_states.shape[0] - 1)):
+                        continue
                     _get_local_and_total_density[nb_SM, nb_cc](local_density,
                                                                resolution,
                                                                start_nb_object,

@@ -1196,7 +1196,7 @@ def _run_iteration(object_states, properties_array , times,
     # total rate
     _get_rates = _get_total_and_single_rates_for_state_transitions
     _get_rates(parameter_value_array, params_prop_dependence, position_dependence,
-                        object_dependent_rates,
+                object_dependent_rates,
                transition_parameters,
                all_transition_states, current_transition_rates, total_rates,
                nb_objects_all_states,creation_on_objects,
@@ -2101,8 +2101,8 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                                                   sim_id, param_id]
                         # the position (property_nb ==0)
                         # should not be multiplied by the orientation
-                        if (object_states[0, 3, object_pos, sim_id, param_id] != 0) & (property_nb > 0):
-                            property_val *= object_states[0, 3, object_pos, sim_id, param_id]
+                        if (object_states[2, 0, object_pos, sim_id, param_id] != 0) & (property_nb > 0):
+                            property_val *= object_states[2, 0, object_pos, sim_id, param_id]
                         start += property_val
                         property_nb += 1
 
@@ -2136,8 +2136,8 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                         property_val = properties_array[0, property_nb,
                                                   object_pos,
                                                   sim_id, param_id]
-                        if object_states[0, 3, object_pos, sim_id, param_id] != 0:
-                            property_val *= object_states[0, 3, object_pos,
+                        if object_states[2, 0, object_pos, sim_id, param_id] != 0:
+                            property_val *= object_states[2, 0, object_pos,
                                                           sim_id, param_id]
                         end += property_val
                         property_nb += 1
@@ -2158,7 +2158,7 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                     # the end value and therefore end is smaller than
                     # start, therefore switch end and start so that start is
                     # smaller than end again for the density calculation below
-                    if object_states[0, 3, object_pos, sim_id, param_id] == -1:
+                    if object_states[2, 0, object_pos, sim_id, param_id] == -1:
                         end_tmp = end
                         end = start
                         start = end_tmp
@@ -2274,7 +2274,7 @@ def _get_local_and_total_density(local_density, total_density, local_resolution,
                     # was smaller than end again for the density calculation
                     # now switch back, since the actual end point of the object
                     # is the start point of the new iteration for this object
-                    if object_states[0, 3, object_pos, sim_id, param_id] == -1:
+                    if object_states[2, 0, object_pos, sim_id, param_id] == -1:
                         end = end_tmp
                 creation_property += 1
         object_pos += 1
@@ -2526,6 +2526,9 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
     transition_nb = 0
     last_transition_nb = nb_transitions
     while transition_nb < last_transition_nb:
+
+        if nb_parallel_cores[sim_id, param_id] > 1:
+            cuda.syncwarp(thread_masks[0,sim_id, param_id])
         transition_states = all_transition_states[transition_nb]
         # if the first value is nan then the parameter has no position
         # dependence
@@ -2539,6 +2542,7 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
             # print(current_transition_rates.shape[0])
             if (nb_objects_all_states[0, int(transition_states[0]),
                                       sim_id, param_id] > 0):
+
                 _get_rate_of_prop_dependent_transition(params_prop_dependence[int(
                                                         transition_parameters[
                                                             transition_nb, 0])],
@@ -2557,10 +2561,57 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
                                                       nb_parallel_cores,
                                                       sim_id, param_id, core_id)
                 # print(current_transition_rates[11, sim_id, param_id])
-        transition_nb += 1
 
-    if nb_parallel_cores[sim_id, param_id] > 1:
-        cuda.syncwarp(thread_masks[0,sim_id, param_id])
+                # if core_id == 0:
+                #     current_transition_rates[transition_nb, sim_id, param_id] += objdeprate
+                #     total_rates[sim_id, param_id] += objdeprate
+
+        if nb_parallel_cores[sim_id, param_id] > 1:
+            cuda.syncwarp(thread_masks[0,sim_id, param_id])
+
+        baseline_rate = parameter_value_array[int(
+            transition_parameters[transition_nb, 0]),
+                                              int(timepoint_array[0, sim_id,
+                                                                  param_id]),
+                                              param_id]
+
+        # check whether object dependent rates were assigned correctly
+        # if (transition_nb > 2):
+        #     object_nb = 0
+        #     all_object_dep_rates = 0
+        #     total_final_rate = 0
+        #     while object_nb <= first_last_idx_with_object[1,sim_id, param_id] + 1:
+        #         if object_states[
+        #             0, 0, object_nb, sim_id, param_id] == transition_states[0]:
+        #             if not math.isnan(params_prop_dependence[int(transition_parameters[
+        #                                                             transition_nb, 0]), 2]):
+        #                 total_final_rate += object_dependent_rates[int(params_prop_dependence[int(
+        #                                                         transition_parameters[
+        #                                                             transition_nb, 0])][5]),
+        #                                                                   object_nb, sim_id, param_id]
+        #                 all_object_dep_rates += object_dependent_rates[int(params_prop_dependence[int(
+        #                                                         transition_parameters[
+        #                                                             transition_nb, 0])][5]),
+        #                                                                   object_nb, sim_id, param_id]
+        #             total_final_rate += baseline_rate
+        #         object_nb += 1
+        #
+        #     if (core_id == 0):
+        #         if round(total_final_rate, 6) < round(current_transition_rates[transition_nb, sim_id, param_id], 6):
+        #             print(7777555, transition_nb, baseline_rate, total_final_rate, current_transition_rates[transition_nb, sim_id, param_id],
+        #                   all_object_dep_rates,
+        #                   int(params_prop_dependence[int(
+        #                       transition_parameters[
+        #                           transition_nb, 0])][5]), object_nb, sim_id, param_id
+        #                   )
+        #             total_rates[sim_id, param_id] = 0
+        #             return
+        #     else:
+        #         if round(total_final_rate, 6) < round(current_transition_rates[transition_nb, sim_id, param_id], 6):
+        #             total_rates[sim_id, param_id] = 0
+        #             return
+
+        transition_nb += 1
 
     # if (core_id == 0) & (sim_id == 0) & (param_id == 0) & (times[0, sim_id, param_id] < 0.2):
     #     print(22, current_transition_rates[0, sim_id, param_id],
@@ -2665,7 +2716,7 @@ def _get_rate_of_density_dependent_transition(params_prop_dependence,
                                                      object_nb,
                                                      sim_id, param_id]
                 else:
-                    end_position += (object_states[0, 3, object_nb,
+                    end_position += (object_states[2, 0, object_nb,
                                                    sim_id, param_id] *
                                      properties_array[0,
                                                      int(params_prop_dependence[
@@ -2725,7 +2776,10 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
                                          int(timepoint_array[
                                                  0, sim_id, param_id]),
                                          param_id]
-
+    # object_nb = 0
+    # last_object_pos = first_last_idx_with_object[1, sim_id, param_id] + 1
+    # total_object_dependent_rates = 0
+    # total_nb_objects = 0
     while object_nb < last_object_pos:
         if object_states[0, 0, object_nb, sim_id, param_id] == start_state:
             # get actual rate of the object depending on its position
@@ -2783,7 +2837,7 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
                 else:
                     # account for difference in orientation by decreasing
                     # the end position value for length properties
-                    end_position += (object_states[0, 3, object_nb,
+                    end_position += (object_states[2, 0, object_nb,
                                                    sim_id, param_id] *
                                      properties_array[0,
                                                       int(params_prop_dependence[
@@ -3013,12 +3067,24 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
             #           # params_prop_dependence[4] # change value, nan for none defined
             #           )
 
+            # total_object_dependent_rates += final_rate
             object_dependent_rates[int(params_prop_dependence[5]),
                                    object_nb, sim_id, param_id] = final_rate
+
+            # total_nb_objects += 1
+
+            # cuda.atomic.nanmin(object_dependent_rates,
+            #                 (int(params_prop_dependence[5]), object_nb, sim_id, param_id),
+            #                 0)
+            #
+            # cuda.atomic.nanmax(object_dependent_rates,
+            #                 (int(params_prop_dependence[5]), object_nb, sim_id, param_id),
+            #                 final_rate)
 
             cuda.atomic.add(current_transition_rates,
                             (transition_nb, sim_id, param_id),
                             final_rate)
+
             cuda.atomic.add(total_rates, (sim_id, param_id), final_rate)
 
         object_nb += 1
@@ -3578,6 +3644,16 @@ def _determine_next_transition(total_rates, current_transition_rates,
             return
         transition_nb += 1
 
+    # # check whether all current transition rates together are not more than
+    # # the total rates to check whether current transition rates are calculated
+    # # the correct way
+    # while transition_nb < current_transition_rates.shape[0]:
+    #     current_rate_sum += current_transition_rates[transition_nb,
+    #                                                  sim_id, param_id]
+    #     if round(current_rate_sum, 6) >= round(total_rates[sim_id, param_id], 6):
+    #         print(12345555, current_rate_sum, total_rates[sim_id, param_id])
+    #     transition_nb += 1
+
     print(666666, threshold, current_rate_sum, total_rates[sim_id, param_id],
           random_number)
 
@@ -3727,10 +3803,11 @@ def _determine_positions_of_transitions(current_transitions,
             #     if object_states[0, 0, object_pos, sim_id, param_id] != 5:
             #         print(object_states[0, 0, object_pos, sim_id, param_id])
             # print(1111)
+            # nb_objects_this_state = 0
             while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:
                 if (object_states[0, 0, object_pos, sim_id, param_id] ==
                         start_state):
-
+                    # nb_objects_this_state +=1
                     # print(2222)
                     # print(object_dependent_rates[dependence_idx,
                     #                                       object_pos,
@@ -3748,7 +3825,9 @@ def _determine_positions_of_transitions(current_transitions,
             print(44444, object_pos, current_sum, random_thresh,
                   transition_rate,
                   baseline_rate, start_state,
-                  nb_objects_all_states[0, int(start_state), sim_id, param_id])
+                  nb_objects_all_states[0, int(start_state), sim_id, param_id],
+                  # nb_objects_this_state
+                  )
 
     return
 
@@ -4051,7 +4130,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                         max_value_nb = 3
                         # for reverse oriented objects, the threshold is
                         # not changed
-                        if (object_states[0, 3, object_pos, sim_id, param_id] == 1):
+                        if (object_states[2, 0, object_pos, sim_id, param_id] == 1):
                             while max_value_nb < len(max_value):
                                 val_property_nb = max_value[max_value_nb]
                                 if math.isnan(val_property_nb):
@@ -4087,7 +4166,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                     # all other properties extend the object in the opposite
                     # direction
                     if ((new_property_val >= threshold) &
-                            ((property_nb == 0) | (object_states[0, 3,
+                            ((property_nb == 0) | (object_states[2, 0,
                                                                  object_pos,
                                                                  sim_id,
                                                                  param_id] != -1))):
@@ -4157,7 +4236,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                             # threshold value is only changed for reverse
                             # oriented objects, since only they can grow towards
                             # the min threshold
-                            if (object_states[0, 3, object_pos, sim_id, param_id] == -1):
+                            if (object_states[2, 0, object_pos, sim_id, param_id] == -1):
                                 while min_value_nb < len(min_value):
                                     val_property_nb = min_value[min_value_nb]
                                     if math.isnan(val_property_nb):
@@ -4189,7 +4268,7 @@ def _execute_actions_on_objects(parameter_value_array, action_parameters,
                         # For reverse, all property changes are relevant
                         # for non reverse objects, only position changes are relevant
                         if ((new_property_val < threshold) &
-                                ((property_nb == 0) | (object_states[0, 3,
+                                ((property_nb == 0) | (object_states[2, 0,
                                                                      object_pos,
                                                                      sim_id,
                                                                      param_id] != 1))):
@@ -4577,6 +4656,11 @@ def _update_object_states(current_transitions, all_transition_states,
                     object_states[0,2, transition_position,
                                   sim_id, param_id] = 0
 
+                if object_states[2, 0, transition_position,
+                                 sim_id, param_id] != 0:
+                    object_states[2, 0, transition_position,
+                                  sim_id, param_id] = 0
+
         # if objects are cut creation_on_objects for the transition is not
         # nan at idx 1 and 2 and contain transition maps at these indices
         # indicating that the transition includes cutting of objects
@@ -4628,9 +4712,9 @@ def _update_object_states(current_transitions, all_transition_states,
             #                     "inherit": 4}
             # get orientation of object as defined
             if (transition_parameters[transition_nb, 3] == 1):
-                object_states[0, 3, transition_position, sim_id, param_id] = 1
+                object_states[2, 0, transition_position, sim_id, param_id] = 1
             elif (transition_parameters[transition_nb, 3] == 2):
-                object_states[0, 3, transition_position, sim_id, param_id] = -1
+                object_states[2, 0, transition_position, sim_id, param_id] = -1
             elif (transition_parameters[transition_nb, 3] == 3):
                 # get random orientation with 50/50 chance
                 random_nb = _get_random_number(sim_id, param_id,
@@ -4638,16 +4722,16 @@ def _update_object_states(current_transitions, all_transition_states,
                                                simulation_factor,
                                                parameter_factor)
                 if random_nb > 0.5:
-                    object_states[0, 3, transition_position,
+                    object_states[2, 0, transition_position,
                                   sim_id, param_id] = -1
                 else:
-                    object_states[0, 3, transition_position,
+                    object_states[2, 0, transition_position,
                                   sim_id, param_id] = 1
             elif (math.isnan(transition_parameters[transition_nb, 3])):
                 # if orientation is not defined, use forward direction
                 # otherwise density and position calculations would be
                 # problematic
-                object_states[0, 3, transition_position,
+                object_states[2, 0, transition_position,
                               sim_id, param_id] = 1
 
             # property_nb = 0
@@ -4702,9 +4786,9 @@ def _update_object_states(current_transitions, all_transition_states,
 
                         # inherit orientation if required
                         if (transition_parameters[transition_nb, 3] == 4):
-                            object_states[0, 3, transition_position,
-                                          sim_id, param_id] = object_states[0,
-                                3, template_object_position, sim_id, param_id]
+                            object_states[2, 0, transition_position,
+                                          sim_id, param_id] = object_states[2,
+                                0, template_object_position, sim_id, param_id]
 
                     # print(22, times[0, sim_id, param_id],
                     #       timepoint_array[0, sim_id, param_id])
@@ -5411,13 +5495,13 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                                      sim_id, param_id]
             property_nb = 1
             while property_nb < target_property_nbs[0]:
-                start += (object_states[0, 3, object_position, sim_id, param_id]
+                start += (object_states[2, 0, object_position, sim_id, param_id]
                           * properties_array[0, property_nb, object_position,
                                              sim_id, param_id])
                 property_nb += 1
             # for reverse oriented objects, start has to be after the beginning
             # of the range
-            if object_states[0, 3, object_position, sim_id, param_id] == -1:
+            if object_states[2, 0, object_position, sim_id, param_id] == -1:
                 start_in_range = start > ((x_pos-1) * local_resolution)
             else:
                 start_in_range = start < ((x_pos + 1) * local_resolution)
@@ -5441,14 +5525,14 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                     if not math.isnan(properties_array[0, property_nb,
                                                        object_position,
                                                        sim_id, param_id]):
-                        end += (object_states[0, 3, object_position, sim_id, param_id]
+                        end += (object_states[2, 0, object_position, sim_id, param_id]
                                 * properties_array[0, property_nb, object_position,
                                                 sim_id, param_id])
                     index += 1
 
                 # for reverse oriented objects, end has to be before the end
                 # of the range
-                if object_states[0, 3, object_position, sim_id, param_id] == -1:
+                if object_states[2, 0, object_position, sim_id, param_id] == -1:
                     end_in_range = end < ((x_pos + 1) * local_resolution)
                 else:
                     end_in_range = end > ((x_pos-1) * local_resolution)
@@ -5457,7 +5541,7 @@ def _get_random_object_at_position(target_property_nbs, x_pos,
                 if end_in_range:
                     # now for reverse oriented objects, flip start and end to
                     # allow same calculations
-                    if (object_states[0, 3, object_position, sim_id, param_id]
+                    if (object_states[2, 0, object_position, sim_id, param_id]
                             == -1):
                         end_tmp = end
                         end = start
@@ -5619,8 +5703,8 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                 # For reverse oriented objects only the position is relevant.
                 # Thus, to get something lower or higher than the threshold,
                 # reverse oriented objects just compare start position
-                if ((object_states[0, 3, int(object_pos),sim_id, param_id] == 1)
-                        | (object_states[0, 3, int(object_pos),sim_id, param_id]
+                if ((object_states[2, 0, int(object_pos),sim_id, param_id] == 1)
+                        | (object_states[2, 0, int(object_pos),sim_id, param_id]
                            == 0)):
                     property_idx = 1
                     while property_idx < properties.shape[0]:
@@ -5693,9 +5777,9 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
                         object_states[0,2, int(object_pos),
                                       sim_id, param_id] = 0
 
-                    if object_states[0, 3, int(object_pos),
+                    if object_states[2, 0, int(object_pos),
                                      sim_id, param_id] != 0:
-                        object_states[0, 3, int(object_pos),
+                        object_states[2, 0, int(object_pos),
                                       sim_id, param_id] = 0
 
                     # remove time of object creation
@@ -5772,14 +5856,20 @@ def _save_values_with_temporal_resolution(timepoint_array, times,
     while object_pos < last_object_pos:
         if object_pos > 0:
 
-            object_states[0, timepoint_idx+4,
+            object_states[0, timepoint_idx+3,
                           object_pos,
                           sim_id, param_id] = object_states[0, 0, object_pos,
                                                             sim_id, param_id]
             # save creation time of object
-            object_states[1, timepoint_idx+4,
+            object_states[1, timepoint_idx+3,
                           object_pos,
                           sim_id, param_id] = object_states[1, 0, object_pos,
+                                                            sim_id, param_id]
+
+            # save orientation of object
+            object_states[2, timepoint_idx+3,
+                          object_pos,
+                          sim_id, param_id] = object_states[2, 0, object_pos,
                                                             sim_id, param_id]
 
             property_nb = 0

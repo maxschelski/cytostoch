@@ -194,7 +194,6 @@ class Analyzer():
         Returns:
 
         """
-        print(folder)
         # copy script and layout to each folder
         script_path = os.path.join(path, figure_script_name.replace(".py",
                                                                     "_" +
@@ -236,7 +235,7 @@ class Analyzer():
         def wide_to_long_data(data, populations, columns):
             long_data = []
             for population in populations:
-                print(population)
+                # print(population)
                 new_data = data.copy()
                 new_data["population"] = population
                 for column in columns:
@@ -376,8 +375,11 @@ class Analyzer():
             metadata = pd.read_csv(metadata_path)
 
             position_column = [column for column in data.columns
-                               if column.find("1D_density_position") != -1][
-                0]
+                               if column.find("1D_density_position") != -1]
+            if len(position_column) > 0:
+                position_column = position_column[0]
+            else:
+                position_column = None
             data_columns = [column for column in data.columns
                             if ((column.find("1D_density_position") == -1)
                                 & (column.find("1D_density") != -1))]
@@ -404,20 +406,23 @@ class Analyzer():
 
                 new_data["MT_density"] = data[data_column]
 
-                if len(data[position_column].drop_duplicates()) > 1:
-                    new_data["position"] = data[position_column]
+                if position_column is not None:
+                    if len(data[position_column].drop_duplicates()) > 1:
+                        new_data["position"] = data[position_column]
+                    else:
+                        groups = [*param_columns,
+                                  "simulation_nb"]
+                        new_data["position"] = new_data.groupby(groups)[
+                            "simulation_nb"].transform(
+                            lambda x: list(range(len(x))))
+                        new_data["position"] *= data["position_max"].max() / \
+                                                new_data["position"].max()
+                    new_data["position"] /= new_data["position"].max()
                 else:
-                    groups = [*param_columns,
-                              "simulation_nb"]
-                    new_data["position"] = new_data.groupby(groups)[
-                        "simulation_nb"].transform(
-                        lambda x: list(range(len(x))))
-                    new_data["position"] *= data["position_max"].max() / \
-                                            new_data["position"].max()
+                    new_position["position"] = 0
 
                 new_data["group"] = data_name
                 new_data["details"] = data_column
-                new_data["position"] /= new_data["position"].max()
                 new_data["time"] = data["time"]
                 new_data = new_data.groupby([*param_columns,
                                              "group", "details",
@@ -577,13 +582,15 @@ class Analyzer():
             data["MT_density_norm"] = data["MT_density"] / data.loc[
                 data["position"] == new_reference_pos,
                 "MT_density"]
-            return data
+            cols = data.columns
+            return data.reset_index()[cols]
 
         exp_MT_density_data = exp_MT_density_data.groupby(
             ["type", "group", "channel_name",
              "actub_detyr_fraction",
-             "tyrtub_actub_fraction"]).apply(
-            normalize_on_reference).reset_index(drop=True)
+             "tyrtub_actub_fraction"
+             ]).apply(
+            normalize_on_reference).reset_index()
         exp_MT_density_data.reset_index(inplace=True)
         # exp_MT_density_data = pd.DataFrame()
 
@@ -678,7 +685,7 @@ class Analyzer():
                                                             figure_layout_name,
                                                             overwrite_script,
                                                             orig_reference_pos,
-                                                            experiment)
+                                                            experiment)\
 
             if len(one_simulation_data) == 0:
                 continue
@@ -698,7 +705,7 @@ class Analyzer():
                                                     "panelAB_all_MT_distributions_SimVsExp_" + exp_name + ".csv"))
 
             if experiment != "":
-                print(processed_data_path)
+
                 one_simulation_data.reset_index(drop=True).to_csv(
                     processed_data_path)
                 del one_simulation_data
@@ -725,8 +732,10 @@ class Analyzer():
         # else:
         #     object_states_array = self.simulation.object_states
 
-        object_states = object_states_array[:1, 0]
-        orientation = object_states_array[:1, 3]
+        # object_states = object_states_array[:1, :]
+        orientation = object_states_array[2, 3:]
+
+        # print("\n", object_states.shape, orientation.shape)
 
         # if self.simulation is None:
         # orientation = torch.load(os.path.join(self.data_folder,
@@ -789,12 +798,12 @@ class Analyzer():
         #     orientation = np.zeros(object_states.shape[1:])
         #     print("WARNING: No orientation data was saved.")
 
-        orientation = object_states[0,3]
+        orientation = object_states[2,0]
 
         properties_array = torch.load(os.path.join(self.data_folder,
                                                    "property_array.pt"))
 
-        print(orientation.shape, object_states.shape)
+        # print(orientation.shape, object_states.shape)
 
         if (max_pos is None) & (self.simulation is None):
             raise ValueError("For the photoconversion simulation, either the "
@@ -823,7 +832,7 @@ class Analyzer():
         # between defined start and end position in compartment.
         # Save start and end position of object that is in range,
         # in separate array
-        first_timepoint_idx_states = 4
+        first_timepoint_idx_states = 3
         initial_creation_time = object_states[1, first_timepoint_idx_states]
         first_timepoint_idx_props = 1
         properties = properties_array[first_timepoint_idx_props]
