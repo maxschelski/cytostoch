@@ -1509,7 +1509,8 @@ class ObjectRemovalCondition():
 
 class Parameter():
 
-    def __init__(self, values, scale="rates", convert_half_lifes=True,
+    def __init__(self, values, fun = None, params=None, scale="rates",
+                 convert_half_lifes=True,
                  dependence=None, per_um=False, switch_timepoints=None,
                  name=""):
         """
@@ -1524,6 +1525,11 @@ class Parameter():
                 are switched to the next index (next group). For the last group
                 there is no switch timepoint defined, since these parameter
                 values will be active until the last timepoint.
+            fun (function): Instead of providing predefined values, you can also
+                provide a function that takes the parameter objects in params
+                as input and calculates the parameter values based on that.
+            params (list of Parameter objects): The parameter input to the
+                function fun.
             scale (String): Type of values supplied, can be "rates", "half-lifes"
                 or "other". For half-lifes, values will be converted to rates
                 if convert_half_lifes is True.
@@ -1539,10 +1545,11 @@ class Parameter():
                 defined.
             name (string): Name of parameter
         """
-        try:
-            iter(values[0])
-        except TypeError:
-            values = [values]
+        if len(values) > 0:
+            try:
+                iter(values[0])
+            except TypeError:
+                values = [values]
 
         if (scale == "half-lifes") & (convert_half_lifes):
             lifetime_to_rates_factor = np.log(np.array([2]))
@@ -1554,6 +1561,8 @@ class Parameter():
         self.name = name
         self.number = None
         self.value_array = torch.DoubleTensor([])
+        self.fun = fun
+        self.params = params
         self.dependence = dependence
         self.per_um = per_um
         self.switch_timepoints = None

@@ -813,7 +813,7 @@ class SSA():
             else:
                 object_removal_operations[removal_nb, 0] = 1
 
-            object_removal_operations[removal_nb, 1] = object_removal.threshold
+            object_removal_operations[removal_nb, 1] = object_removal.threshold.number
         return object_removal_operations
 
     def get_first_last_idx_with_object(self, object_states):
@@ -2311,12 +2311,26 @@ class SSA():
         param_nb = 0
         self.parameters = []
         for parameter in parameters:
-            if parameter.number is None:
-                parameter.number = param_nb
-                if parameter.name == "":
-                    parameter.name = str(parameter.number)
+            if parameter.number is not None:
+                continue
+            parameter.number = param_nb
+            if parameter.name == "":
+                parameter.name = str(parameter.number)
+            param_nb += 1
+            self.parameters.append(parameter)
+            # check if dependence on other parameters is defined
+            if parameter.params is None:
+                continue
+            #If it is defined, then one of the parameters
+            # might not have been added
+            for param_param in parameter.params:
+                if param_param.number is not None:
+                    continue
+                param_param.number = param_nb
+                if param_param.name == "":
+                    param_param.name = str(parameter.number)
                 param_nb += 1
-                self.parameters.append(parameter)
+                self.parameters.append(param_param)
 
         # add parameters from max and min property values
         for property in self.properties:
@@ -2335,7 +2349,10 @@ class SSA():
                         property.min_value.name = str(property.min_value.number)
                     param_nb += 1
                     self.parameters.append(property.min_value)
-
+        
+        for object_removal in self.object_removal:
+            self.parameters.append(object_removal.threshold)
+        
         # first get all unique dependencies
         self.dependencies = []
         dependence_nb = 0
@@ -2384,9 +2401,13 @@ class SSA():
                                         for parameters
                                         in self.states]
 
-        parameter_lengths = [len(parameters.values[0])
-                                        for parameters
-                                        in self.parameters]
+        parameter_lengths = []
+        for parameter in self.parameters:
+            if len(parameter.values) == 0:
+                parameter_lengths.append(1)
+                continue
+            parameter_lengths.append(len(parameter.values[0]))
+
 
         simulation_parameter_lengths = [*state_parameter_lengths,
                                         *parameter_lengths]
@@ -2959,6 +2980,10 @@ class SSA():
                 # for each timepoint first get all param values in a nested list
                 for dimension, model_parameters in enumerate(all_simulation_parameters):
                     all_timepoints_param_vals = model_parameters.values
+                    # no values are defined if a function is defined to get the
+                    # values
+                    if len(values) == 0:
+                        continue
                     if len(all_timepoints_param_vals) == 1:
                         param_vals = all_timepoints_param_vals[0]
                     else:
@@ -3006,11 +3031,11 @@ class SSA():
 
                 all_parameter_arrays.append(all_combinations)
 
-
-
         nb_previous_params = 0
         for dimension, model_parameters in enumerate(all_simulation_parameters):
             all_timepoints_param_vals = model_parameters.values
+            if len(all_timepoints_param_vals) == 0:
+                continue
             param_switch_timepoints = model_parameters.switch_timepoints
             if param_switch_timepoints is not None:
                 param_switch_timepoints = np.floor(param_switch_timepoints /
@@ -3117,6 +3142,31 @@ class SSA():
             model_parameters.value_array = all_timepoints_array
             # model_parameters.value_array = np.array(array.reshape((array.shape[1],
             #                                                       -1)))
+
+        # now get parameter values for parameter where no values but only a
+        # function were defined
+
+        param_values_done = False
+        while not param_values_done:
+            param_values_done = True
+            for dimension, model_parameters in enumerate(all_simulation_parameters):
+                if len(model_parameters.value_array) > 0:
+                    continue
+                param_values_done = False
+                # check if all parameters needed to calculate values for current param
+                # already have parameter values defined
+                all_params_have_vals = True
+                for param in model_parameters.params:
+                    if len(param.value_array) == 0:
+                        all_params_have_vals = False
+                        break
+                # if at least one param has no values defined yet, dont calculate
+                # values now but wait for the next iteration, when it was done
+                print(model_parameters.name, all_params_have_vals)
+                if not all_params_have_vals:
+                    continue
+                model_parameters.value_array = model_parameters.fun(
+                    *[param.value_array for param in model_parameters.params])
 
         return None
 
