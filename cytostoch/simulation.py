@@ -437,7 +437,7 @@ class SSA():
             array = torch.Tensor(parameter.value_array[:,param_slice])
             # if parameter is per_um, multiply the parameter value with the
             # max value of position (neurite length)
-            print(nb, parameter.name, parameter.values)
+            print(nb, parameter.name, np.unique(parameter.value_array))
             if parameter.per_um:
                 lengths = self.properties[0].max_value.value_array[:,
                                                                     param_slice]
@@ -882,7 +882,7 @@ class SSA():
             max_nb_properties = max(max_nb_properties, nb_properties)
 
         params_prop_dependence = np.full((len(self.parameters),
-                                         7 + max_nb_properties),
+                                         9 + max_nb_properties),
                                         np.nan, dtype=self.data_type)
 
         position_dependence = False
@@ -940,6 +940,20 @@ class SSA():
                 dependence_nb += 1
                 continue
 
+            # if start or end but not param change are defined, then
+            # the distance has to be defined separately
+            if (((dependence.start_val is not None) |
+                    (dependence.end_val is not None)) &
+                    (dependence.param_change is None)):
+                # set end and start dist for param change
+                # for end and start dist no parameter changes are allowed
+                # since this would complicate the situation
+                if (isinstance(dependence.end_dist_for_change, Parameter)):
+                    params_prop_dependence[param_nb, 7] = dependence.end_dist_for_change.number
+                if (isinstance(dependence.start_dist_for_change, Parameter)):
+                    params_prop_dependence[param_nb, 8] = dependence.start_dist_for_change.number
+
+
             # if rel_change is 0, then the change is absolute
             if dependence.param_change_is_abs:
                 rel_param_change = 0
@@ -953,38 +967,39 @@ class SSA():
                 rel_length_change = 1
             params_prop_dependence[param_nb, 3] = rel_length_change
 
-            change_param = dependence.param_change
-            # if the change param indicates the max property change for which
-            # there should be a dependence, map this max property change
-            # linearly to the starting value so that the param change
-            # goes to zero until the max_property_change
-            # (e.g. for 2 and a position dependence, the param change would go
-            #  to 0 at a position change of 2.)
-            if hasattr(change_param, "as_max_property_changes"):
-                if change_param.as_max_property_changes:
-                    change_param.value_array = - (dependence_start_end_param.value_array /
-                                             change_param.value_array)
-            params_prop_dependence[param_nb, 4] = change_param.number
+            if dependence.param_change is not None:
+                change_param = dependence.param_change
+                # if the change param indicates the max property change for which
+                # there should be a dependence, map this max property change
+                # linearly to the starting value so that the param change
+                # goes to zero until the max_property_change
+                # (e.g. for 2 and a position dependence, the param change would go
+                #  to 0 at a position change of 2.)
+                if hasattr(change_param, "as_max_property_changes"):
+                    if change_param.as_max_property_changes:
+                        change_param.value_array = - (dependence_start_end_param.value_array /
+                                                 change_param.value_array)
+                params_prop_dependence[param_nb, 4] = change_param.number
 
-            params_prop_dependence[param_nb, 5] = dependence_nb
+                params_prop_dependence[param_nb, 5] = dependence_nb
 
-            if dependence.function == "exponential":
-                function = 1
-            else:
-                function = 0
+                if dependence.function == "exponential":
+                    function = 1
+                else:
+                    function = 0
 
-            params_prop_dependence[param_nb, 6] = function
+                params_prop_dependence[param_nb, 6] = function
 
             # if properties are defined, add the property numbers of all
             # defined properties
             if dependence.properties is not None:
                 for property_nb, property in enumerate(dependence.properties):
                     params_prop_dependence[param_nb,
-                                         7 + property_nb] = property.number
+                                         9 + property_nb] = property.number
             else:
                 # if properties are not defined, add all property numbers to
                 # the list
-                params_prop_dependence[param_nb, 7:] = list(range(len(self.properties)))
+                params_prop_dependence[param_nb, 9:] = list(range(len(self.properties)))
 
             dependence_nb += 1
 
@@ -2295,6 +2310,10 @@ class SSA():
         # used twice (some transitions may have the same parameter)
         parameters = [event.parameter for event in [*self.transitions,
                                                     *self.actions]]
+
+        for object_removal in self.object_removal:
+            parameters.append(object_removal.threshold)
+
         for transition in self.transitions:
             if not hasattr(transition, "resources"):
                 continue
@@ -2349,9 +2368,7 @@ class SSA():
                         property.min_value.name = str(property.min_value.number)
                     param_nb += 1
                     self.parameters.append(property.min_value)
-        
-        for object_removal in self.object_removal:
-            self.parameters.append(object_removal.threshold)
+
         
         # first get all unique dependencies
         self.dependencies = []
@@ -2371,6 +2388,8 @@ class SSA():
         # then go through each dependency and extract parameters
         for dependence in self.dependencies:
             all_potential_params = [dependence.start_val, dependence.end_val,
+                                    dependence.end_dist_for_change,
+                                    dependence.start_dist_for_change,
                                     dependence.param_change,
                                     dependence.param_change_is_abs,
                                     dependence.prop_change_is_abs]

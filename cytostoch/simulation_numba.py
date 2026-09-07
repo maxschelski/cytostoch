@@ -981,7 +981,7 @@ def _run_iteration(object_states, properties_array , times,
         # change
         # NOT CONSIDERED:
         # - object vanishing due to reducing all properties values to 0
-        # - no object removal when end below 0!
+        # - object removal
 
         _get_tmin_tmax_for_property_changes(
                                              property_changes_tminmax_array,
@@ -1280,6 +1280,7 @@ def _run_iteration(object_states, properties_array , times,
     _remove_objects(all_object_removal_properties, object_removal_operations,
                     nb_objects_all_states, transition_parameters,
                     object_states, properties_array,
+                                        parameter_value_array,
                     first_last_idx_with_object,
                     local_object_lifetime_array,
                     local_lifetime_resolution, times,
@@ -1793,18 +1794,22 @@ def _get_nucleation_on_objects_rate(creation_on_objects,
     # get nucleation on objects rate
     transition_nb = 0
     transition_nb_creation_on_objects = math.nan
+    nucleation_on_objects_rate = 0
+    # Add all nucleation on object rates
+    # HOWEVER, this does not account for nucleation on objects that only depends
+    # on a specific part of the object (e.g. stable or unstable), it only
+    # accounts
     while transition_nb < creation_on_objects.shape[0]:
-        if (not math.isnan(creation_on_objects[transition_nb, 0, 0])):
-            transition_nb_creation_on_objects = transition_nb
-            break
+        if (math.isnan(creation_on_objects[transition_nb, 0, 0])):
+            transition_nb += 1
+            continue
+        transition_nb_creation_on_objects = transition_nb
+
+        nucleation_on_objects_rate += parameter_value_array[
+            int(transition_parameters[int(transition_nb_creation_on_objects),0]),
+            0, param_id]
         transition_nb += 1
 
-    if math.isnan(transition_nb_creation_on_objects):
-        return math.nan
-
-    nucleation_on_objects_rate = parameter_value_array[
-        int(transition_parameters[int(transition_nb_creation_on_objects),0]),
-        0, param_id]
 
     return nucleation_on_objects_rate
 
@@ -2569,11 +2574,11 @@ def _get_total_and_single_rates_for_state_transitions(parameter_value_array,
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
-        baseline_rate = parameter_value_array[int(
-            transition_parameters[transition_nb, 0]),
-                                              int(timepoint_array[0, sim_id,
-                                                                  param_id]),
-                                              param_id]
+        # baseline_rate = parameter_value_array[int(
+        #     transition_parameters[transition_nb, 0]),
+        #                                       int(timepoint_array[0, sim_id,
+        #                                                           param_id]),
+        #                                       param_id]
 
         # check whether object dependent rates were assigned correctly
         # if (transition_nb > 2):
@@ -2780,27 +2785,64 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
     # last_object_pos = first_last_idx_with_object[1, sim_id, param_id] + 1
     # total_object_dependent_rates = 0
     # total_nb_objects = 0
+
+    # check if no rate diff is needed since the object dependent rate is always
+    # just the base value
+    no_rate_diff = False
+    if math.isnan(params_prop_dependence[0]):
+        base_value = parameter_value_array[int(
+            params_prop_dependence[1]),
+                                           int(timepoint_array[
+                                                   0, sim_id,
+                                                   param_id]),
+                                           param_id]
+        if math.isnan(params_prop_dependence[4]):
+            no_rate_diff = True
+    else:
+        base_value = parameter_value_array[int(
+            params_prop_dependence[0]),
+                                           int(timepoint_array[
+                                                   0, sim_id,
+                                                   param_id]),
+                                           param_id]
+
+        if math.isnan(params_prop_dependence[1]) & (math.isnan(params_prop_dependence[4])):
+            no_rate_diff = True
+    
+    if not no_rate_diff:
+        # if change is not defined, get it from difference between
+        # end and start value, divided by either absolute length in um
+        # or relative length (1, unchanged value)
+        if math.isnan(params_prop_dependence[4]):
+            rate_diff = (parameter_value_array[int(
+                params_prop_dependence[1]),
+                                               int(timepoint_array[
+                                                       0, sim_id,
+                                                       param_id]),
+                                               param_id] -
+                         parameter_value_array[int(
+                             params_prop_dependence[0]),
+                                               int(timepoint_array[
+                                                       0, sim_id,
+                                                       param_id]),
+                                               param_id])
+            if params_prop_dependence[3] == 0:
+                rate_diff /= max_position
+        else:
+            rate_diff = parameter_value_array[int(
+                params_prop_dependence[4]),
+                                              int(timepoint_array[
+                                                      0, sim_id,
+                                                      param_id]),
+                                              param_id]
+
+
     while object_nb < last_object_pos:
         if object_states[0, 0, object_nb, sim_id, param_id] == start_state:
             # get actual rate of the object depending on its position
             # if the start value of position dependence is defined,
             # calculate the change from the start position value
             # otherwise take the end value as the starting state
-
-            if math.isnan(params_prop_dependence[0]):
-                base_value = parameter_value_array[int(
-                                       params_prop_dependence[1]),
-                                                         int(timepoint_array[
-                                                                 0, sim_id,
-                                                                 param_id]),
-                                                         param_id]
-            else:
-                base_value = parameter_value_array[int(
-                                       params_prop_dependence[0]),
-                                                         int(timepoint_array[
-                                                                 0, sim_id,
-                                                                 param_id]),
-                                                         param_id]
 
             # base_value = cuda.selp(math.isnan(params_prop_dependence[0]),
             #                        parameter_value_array[int(
@@ -2819,7 +2861,7 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
             # add all defined properties to get the total property value
             # that the parameter value depends on
             end_position = 0
-            dependence_prop_nb = 7
+            dependence_prop_nb = 9
             while dependence_prop_nb < params_prop_dependence.shape[0]:
                 if math.isnan(params_prop_dependence[dependence_prop_nb]):
                     # first nan indicates that there
@@ -2857,10 +2899,57 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
                 #                                  sim_id, param_id])
                 dependence_prop_nb += 1
 
+
+            # get the position difference either from the end of the neurite
+            # or from the start of the neurite
             if math.isnan(params_prop_dependence[0]):
                 position_diff = max_position - end_position
             else:
                 position_diff = end_position
+
+
+            # check if a ratediff needs to be calculated
+            # which would only be the case if out of start_val, end_val and
+            # param_change only one is defined (start_val or end_val),
+            # additionally the end_distance for the change has to be defined
+            if (not math.isnan(params_prop_dependence[7])) & no_rate_diff:
+                # if the position diff is larger than the end dist of
+                # the param change, dont add an object dependent value
+                if (position_diff > parameter_value_array[
+                                              int(params_prop_dependence[7]),
+                                              int(timepoint_array[0, sim_id,
+                                                                  param_id]),
+                                                         param_id]):
+                    object_dependent_rates[int(params_prop_dependence[5]),
+                                           object_nb, sim_id, param_id] = 0
+                    object_nb += 1
+                    continue
+                # if the start distance is also defined, take it into
+                # account as well by only considering objects that
+                # are in between the start and end dist
+                if not math.isnan(params_prop_dependence[8]):
+                    if (position_diff < parameter_value_array[
+                                                int(params_prop_dependence[8]),
+                                                int(timepoint_array[0, sim_id,
+                                                                    param_id]),
+                                                param_id]):
+                        object_dependent_rates[int(params_prop_dependence[5]),
+                                               object_nb, sim_id, param_id] = 0
+                        object_nb += 1
+                        continue
+
+                object_dependent_rates[int(params_prop_dependence[5]),
+                                       object_nb, sim_id, param_id] = base_value
+                cuda.atomic.add(current_transition_rates,
+                                (transition_nb, sim_id, param_id),
+                                base_value)
+
+                cuda.atomic.add(total_rates, (sim_id, param_id), base_value)
+                object_nb += 1
+                continue
+                
+
+
             # position_diff = cuda.selp(math.isnan(params_prop_dependence[0]),
             #                           max_position - end_position,
             #                           end_position)
@@ -2875,31 +2964,6 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
 
             # position_diff = min(position_diff, 10)
 
-            # if change is not defined, get it from difference between
-            # end and start value, divided by either absolute length in um
-            # or relative length (1, unchanged value)
-            if math.isnan(params_prop_dependence[4]):
-                rate_diff = (parameter_value_array[int(
-                                     params_prop_dependence[1]),
-                                                        int(timepoint_array[
-                                                                0, sim_id,
-                                                                param_id]),
-                                                        param_id] -
-                                  parameter_value_array[int(
-                                      params_prop_dependence[0]),
-                                                        int(timepoint_array[
-                                                                0, sim_id,
-                                                                param_id]),
-                                                        param_id])
-                if params_prop_dependence[3] == 0:
-                    rate_diff /= max_position
-            else:
-                rate_diff = parameter_value_array[int(
-                                      params_prop_dependence[4]),
-                                                        int(timepoint_array[
-                                                                0, sim_id,
-                                                                param_id]),
-                                                        param_id]
             # rate_diff = cuda.selp(math.isnan(params_prop_dependence[4]),
             #
             #                      (parameter_value_array[int(
@@ -2957,6 +3021,7 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
             # start and end, don't allow values at positions in between the
             # start and the end to be higher than the maximum of both.
 
+            # Index 6 indicates whether it is linear (0) or exponential (1)
             if params_prop_dependence[6] == 0:
                 if base_value < 0:
                     final_rate = max(- parameter_value_array[int(
@@ -3524,10 +3589,10 @@ def _get_tau(total_rates, first_last_idx_with_object, object_states,
                                                             (math.pow(tmin,2)) / 2)
 
                                         else:
-                                            # if tau is smaller then tmax, add
-                                            # net_change to variable for tau independent
-                                            # change (eq_terms[0] for constant
-                                            # term)
+                                            # if tau is after tmax, add
+                                            # net_change to variable for tau
+                                            # independent change
+                                            # (eq_terms[0] for constant term)
                                             cuda.atomic.add(eq_terms,
                                                             (0, 1, sim_id,
                                                              param_id),
@@ -5655,7 +5720,7 @@ def _reduce_highest_object_idx(first_last_idx_with_object,
 
 def _remove_objects(all_object_removal_properties, object_removal_operations,
                     nb_objects_all_states, transition_parameters,
-                    object_states, properties_array,
+                    object_states, properties_array, parameter_value_array,
                     first_last_idx_with_object,
                     local_object_lifetime_array,
                                                  local_lifetime_resolution, times,
@@ -5681,7 +5746,8 @@ def _remove_objects(all_object_removal_properties, object_removal_operations,
         # the second value is the threshold
         object_removal_operation = object_removal_operations[removal_nb]
         threshold_operation = object_removal_operation[0]
-        threshold = object_removal_operation[1]
+        threshold = parameter_value_array[int(object_removal_operation[1]),
+                                          0, param_id]
 
         nb_objects = first_last_idx_with_object[1,sim_id, param_id] + 1
         (object_pos,

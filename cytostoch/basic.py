@@ -1605,6 +1605,8 @@ class PropertyDependence():
 
     def __init__(self, start_val = None, end_val = None,
                  param_change = None,
+                 end_dist_for_change = None,
+                 start_dist_for_change = None,
                  param_change_is_abs = False,
                  prop_change_is_abs = False,
                  properties = None,
@@ -1626,8 +1628,19 @@ class PropertyDependence():
             start_val: Parameter object for absolute start value of parameter.
             end_val: Parameter object for absolute end_val of parameter.
                 If end_val is defined but start_val is not defined, then
+                param_change has to be defined.
             param_change: Parameter object for
                 change of parameter per position change
+            end_dist_for_change: Parameter object for
+                distance for which start_val or end_val are used. Will only be
+                used for changing the parameter value to one preset value until
+                the defined distance from the neurite start (when start_val is
+                defined) or from the neurite end (when end_val is defined).
+
+            start_dist_for_change: Parameter object for
+                If both start_dist_for_change and end_dist_for_change are defined,
+                then the region starts not at neurite start or end but at the
+                start_dist_for_change from the start or end of the neurite
             param_change_is_abs: Boolean of whether
                 change of parameter is absolute
                 (in parameter units) or relative (in fraction of difference
@@ -1658,7 +1671,22 @@ class PropertyDependence():
                              "start_val, end_val and param_change "
                              "can be defined. One of them has to be None.")
 
+        if (((start_val is not None) | (end_val is not None)) &
+            ((param_change is None) & (end_dist_for_change is None))):
+            raise ValueError("When defining only start or end val then either"
+                             "param_change or end_dist_for_change have to be "
+                             "defined. If param_change is defined, there is "
+                             "going to be a linear or exponential dependence "
+                             "of the parameter value depending on the position "
+                             "and the distance for that will depend on when "
+                             "the start_val or end_val is reduced to 0 by the "
+                             "param_change. If end_dist_for_change is defined, "
+                             "then the parameter is changed the start_val or"
+                             "end_val if the object is before the distance.")
+
         self.param_change = param_change
+        self.end_dist_for_change = end_dist_for_change
+        self.start_dist_for_change = start_dist_for_change
         self.param_change_is_abs = param_change_is_abs
         self.prop_change_is_abs = prop_change_is_abs
         self.properties = properties

@@ -400,7 +400,7 @@ class Analyzer():
                 if "param_nb" in new_data.columns:
                     param_columns.append("param_nb")
                 for column in data.columns:
-                    if (column.startswith("k_") | column.startswith("v_")):
+                    if (column.startswith("k_") | column.startswith("v_") | column.startswith("d_")):
                         new_data[column] = data[column]
                         param_columns.append(column)
 
@@ -467,7 +467,7 @@ class Analyzer():
 
             group_params = [param
                             for param in one_simulation_data.columns
-                            if param.startswith("k_")]
+                            if (param.startswith("k_") | param.startswith("d_"))]
             if "param_nb" in one_simulation_data.columns:
                 group_params.append("param_nb")
 
@@ -1018,6 +1018,13 @@ class Analyzer():
                              " the simulation folder. ")
         data = pd.read_feather(os.path.join(base_path, file_name))
 
+        param_columns = []
+        if "param_nb" in data.columns:
+            param_columns.append("param_nb")
+        for column in data.columns:
+            if (column.startswith("k_") | column.startswith("v_") | column.startswith("d_")):
+                param_columns.append(column)
+
         exp_name = os.path.basename(base_path)
 
         # data = data.loc[data["simulation_nb"] < 400]
@@ -1174,7 +1181,7 @@ class Analyzer():
                 cat_rates_mean = None
                 all_cat_rates_length = []
                 cat_rates_mean = length_data.groupby(
-                    ["simulation_nb", "range", "k_cs"]).apply(fit_MT_cat_rates,
+                    ["simulation_nb", "range", *param_columns]).apply(fit_MT_cat_rates,
                                                               mono_exponential,
                                                               dual_exponential,
                                                               result_index=1,
@@ -1208,15 +1215,18 @@ class Analyzer():
             all_cat_rates.loc[all_cat_rates["range"] == range_str,
                                "position"] = range_names[pos_index]
 
-        all_cat_rates["position"] = "far"
-        all_cat_rates.loc[
-            all_cat_rates["range"] == "0.25-0.35", "position"] = "close"
+        # all_cat_rates["position"] = "far"
+        # all_cat_rates.loc[
+        #     all_cat_rates["range"] == "0.25-0.35", "position"] = "close"
 
-        cat_rates = all_cat_rates[["simulation_nb",
+        # print(all_cat_rates["k_cu"].drop_duplicates())
+
+        cat_rates = all_cat_rates[[*param_columns, "simulation_nb",
                                    "exp_type", "neurite_length",
                                    "high", "low", "High fraction",
                                    "Low fraction", "n_cells", "position"]]
 
+        # print(cat_rates["k_cu"].drop_duplicates())
         cat_rates["source"] = "simulation"
 
         # fitted_data.drop("simulation_nb", axis=1, inplace=True)
@@ -1293,9 +1303,9 @@ class Analyzer():
         cat_rates_far = cat_rates.loc[cat_rates["position"] == "far"]
         cat_rates_far["position"] = "far/close"
 
-        cat_rates_close.set_index(["source", "simulation_nb", "position"],
+        cat_rates_close.set_index([*param_columns, "source", "simulation_nb", "position"],
                                   inplace=True)
-        cat_rates_far.set_index(["source", "simulation_nb", "position"],
+        cat_rates_far.set_index([*param_columns, "source", "simulation_nb", "position",],
                                 inplace=True)
 
         cat_rates_ratio = (cat_rates_far - cat_rates_close) / (
@@ -1330,6 +1340,8 @@ class Analyzer():
         cat_rates.to_csv(
             os.path.join(base_path, "panelA_MT_decay_close_far_sim_long_"
                          + exp_name + "_maxt" + str(max_time) + ".csv"))
+
+        print(cat_rates["k_cu"].drop_duplicates())
         return cat_rates
 
 
