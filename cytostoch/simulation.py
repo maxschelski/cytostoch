@@ -1462,7 +1462,7 @@ class SSA():
             total_size += np.product(local_object_lifetime_size, 
                                      dtype=np.int64) * 4
 
-            total_size *= 3
+            total_size *= 4
 
             # think about sorting parameter values in the array by
             # their magnitude - higher transition rates should be separate from
@@ -1580,8 +1580,8 @@ class SSA():
 
             print(f"Started simulating {nb_batches} batches on {datetime.datetime.now()}... \n")
             # print(1, numba.cuda.current_context().get_memory_info()[0]/1024/1024/1024)
-            complete_object_states = torch.Tensor([])
-            complete_property_array = torch.Tensor([])
+            # complete_object_states = torch.Tensor([])
+            # complete_property_array = torch.Tensor([])
             complete_first_last_idx_with_object_batch = torch.Tensor([])
             complete_nb_obj_all_states_batch = torch.Tensor([])
 
@@ -1598,9 +1598,7 @@ class SSA():
                                          remaining_param_combinations)
                     param_combinations_per_batch = remaining_param_combinations
                     
-                (object_states_batch,
-                 property_array_batch,
-                 first_last_idx_with_object_batch,
+                (first_last_idx_with_object_batch,
                  nb_obj_all_states_batch) =  self._execute_batch(
                                         batch_nb, param_shape_batch,
                                         params_prop_dependence,
@@ -1642,11 +1640,11 @@ class SSA():
                 # - object_states, properties_array, nb_obj_all_states_batch
                 #   first_last_idx_with_object
 
-                complete_object_states = torch.concatenate([
-                    complete_object_states, object_states_batch], dim=-1)
-
-                complete_property_array = torch.concatenate([
-                    complete_property_array, property_array_batch], dim=-1)
+                # complete_object_states = torch.concatenate([
+                #     complete_object_states, object_states_batch], dim=-1)
+                #
+                # complete_property_array = torch.concatenate([
+                #     complete_property_array, property_array_batch], dim=-1)
 
                 complete_first_last_idx_with_object_batch = torch.concatenate([
                     complete_first_last_idx_with_object_batch,
@@ -1658,13 +1656,13 @@ class SSA():
 
             if self.save_results:
                 # save all files
-                file_path = os.path.join(self.data_folder,
-                                         self.object_states_file_name)
-                torch.save(complete_object_states, file_path)
-
-                file_path = os.path.join(self.data_folder,
-                                         self.property_array_file_name)
-                torch.save(complete_property_array, file_path)
+                # file_path = os.path.join(self.data_folder,
+                #                          self.object_states_file_name)
+                # torch.save(complete_object_states, file_path)
+                #
+                # file_path = os.path.join(self.data_folder,
+                #                          self.property_array_file_name)
+                # torch.save(complete_property_array, file_path)
 
                 file_path = os.path.join(self.data_folder,
                                          self.first_last_idx_with_object_file_name
@@ -2054,8 +2052,8 @@ class SSA():
         sim = simulation_numba._execute_simulation_gpu
 
         object_states_batch = convert_array(object_states)
-        object_states_batch = to_cuda(object_states_batch)
         del object_states
+        object_states_batch = to_cuda(object_states_batch)
 
         object_dependent_rates_batch = object_dependent_rates
         object_dependent_rates_batch = to_cuda(convert_array(
@@ -2063,8 +2061,8 @@ class SSA():
 
         property_array_batch = properties_array
         property_array_batch = convert_array(property_array_batch)
-        property_array_batch = to_cuda(property_array_batch)
         del properties_array
+        property_array_batch = to_cuda(property_array_batch)
 
         times_batch = self.times
         param_val_array_batch = parameter_value_array
@@ -2314,37 +2312,40 @@ class SSA():
         first_last_idx_with_object = torch.Tensor(
             first_last_idx_with_object)
 
-        if nb_batches > 1:
-            self.data_buffer = []
-            del self.times
-            del self.object_states
-            del self.object_states_buffer
+        # if nb_batches > 1:
+        self.data_buffer = []
+        del self.times
+        del self.object_states
+        del self.object_states_buffer
+        del self.orientation
+        del self.creation_source
 
-            # for property in self.properties:
-            #     property.array = []
-            for property in self.properties:
-                del property.array
-                property.array = torch.Tensor([])
-            # del all_data
+        # for property in self.properties:
+        #     property.array = []
+        for property in self.properties:
+            del property.array
+            property.array = torch.Tensor([])
+        del all_data
 
-            del object_dependent_rates_batch
-            del property_array_batch
-            del object_states_batch
-            # del local_density_batch
-            # del total_density_batch
+        del object_dependent_rates_batch
+        del property_array_batch
+        del object_states_batch
 
-            # for property_nb, property in enumerate(self.properties):
-            #     property.array = property.array.cpu()
+        # del local_density_batch
+        # del total_density_batch
 
-            cuda.current_context().memory_manager.deallocations.clear()
-            torch.cuda.empty_cache()
-        else:
-            self.all_data = all_data
+        # for property_nb, property in enumerate(self.properties):
+        #     property.array = property.array.cpu()
+
+        cuda.current_context().memory_manager.deallocations.clear()
+        torch.cuda.empty_cache()
+        print("Everything should be reset now!")
+        del object_states
+        del property_array
 
         cuda.current_context().memory_manager.deallocations.clear()
 
-        return (object_states, property_array,
-                first_last_idx_with_object,
+        return (first_last_idx_with_object,
                 nb_obj_all_states_batch)
 
     def _get_all_parameters(self):
