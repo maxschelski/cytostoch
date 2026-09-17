@@ -920,6 +920,7 @@ class SSA():
 
                 params_prop_dependence[param_nb, 1] = end_val_param_nb
 
+            params_prop_dependence[param_nb, 5] = dependence_nb
 
             # if the start and end values are defined but no change
             # calculate the linear change from the start to the end val
@@ -967,6 +968,7 @@ class SSA():
                 rel_length_change = 1
             params_prop_dependence[param_nb, 3] = rel_length_change
 
+
             if dependence.param_change is not None:
                 change_param = dependence.param_change
                 # if the change param indicates the max property change for which
@@ -981,7 +983,6 @@ class SSA():
                                                  change_param.value_array)
                 params_prop_dependence[param_nb, 4] = change_param.number
 
-                params_prop_dependence[param_nb, 5] = dependence_nb
 
                 if dependence.function == "exponential":
                     function = 1
@@ -1313,7 +1314,6 @@ class SSA():
 
         # create arrays with the parameter size to be explored in one round
 
-
         property_start_values = self._get_property_start_val_arrays()
 
         # properties_array = self._get_property_vals_array()
@@ -1462,7 +1462,7 @@ class SSA():
             total_size += np.product(local_object_lifetime_size, 
                                      dtype=np.int64) * 4
 
-            total_size *= 1.4
+            total_size *= 3
 
             # think about sorting parameter values in the array by
             # their magnitude - higher transition rates should be separate from
@@ -1585,7 +1585,19 @@ class SSA():
             complete_first_last_idx_with_object_batch = torch.Tensor([])
             complete_nb_obj_all_states_batch = torch.Tensor([])
 
+
             for batch_nb in tqdm.tqdm(range(nb_batches)):
+                # Check if the current batch is not completely filled
+                # meaning that not enough parameter combinations are left to
+                # do
+                if (((batch_nb + 1) * param_combinations_per_batch) > 
+                        nb_parameter_combinations):
+                    remaining_param_combinations = (nb_parameter_combinations -
+                                                    (batch_nb * param_combinations_per_batch))
+                    param_shape_batch = (nb_simulations,
+                                         remaining_param_combinations)
+                    param_combinations_per_batch = remaining_param_combinations
+                    
                 (object_states_batch,
                  property_array_batch,
                  first_last_idx_with_object_batch,
@@ -1819,7 +1831,7 @@ class SSA():
                  -1))
             property.array = np.array(property.array)
 
-        self.times = torch.zeros((1, *param_shape_batch))
+        self.times = torch.zeros((1, *param_shape_batch), dtype=torch.float64)
 
         # reshape to have all different parameter values in one axis
         # with the first axis being the number of objects
@@ -1933,7 +1945,10 @@ class SSA():
         properties_array = np.full((nb_timepoints + 1, nb_properties,
                                     self.object_states.shape[0],
                                     *param_shape_batch),
-                                   math.nan, dtype=self.data_type)
+                                   math.nan,
+                                   dtype=np.float64,
+                                   # dtype=self.data_type
+                                   )
 
         # print(object_states.shape)
         # object_states = self.initial_object_states.clone()
@@ -2040,6 +2055,7 @@ class SSA():
 
         object_states_batch = convert_array(object_states)
         object_states_batch = to_cuda(object_states_batch)
+        del object_states
 
         object_dependent_rates_batch = object_dependent_rates
         object_dependent_rates_batch = to_cuda(convert_array(
@@ -2048,6 +2064,7 @@ class SSA():
         property_array_batch = properties_array
         property_array_batch = convert_array(property_array_batch)
         property_array_batch = to_cuda(property_array_batch)
+        del properties_array
 
         times_batch = self.times
         param_val_array_batch = parameter_value_array
@@ -2073,6 +2090,19 @@ class SSA():
         # print(creation_on_objects.shape)
         # print(creation_on_objects[2, 0])
         # dasd
+
+        # print(object_states_batch.dtype, object_states_batch.shape,
+        #       property_array_batch.dtype, property_array_batch.shape,
+        #       times_batch.dtype, times_batch.shape,
+        #       object_dependent_rates_batch.dtype, object_dependent_rates_batch.shape,
+        #       end_position_tmax_array.dtype, end_position_tmax_array.shape,
+        #       properties_tmax_array.dtype, properties_tmax_array.shape,
+        #       properties_tmax.dtype, properties_tmax.shape,
+        #       current_sum_tmax.dtype, current_sum_tmax.shape,
+        #       property_changes_tminmax_array.dtype, property_changes_tminmax_array.shape,
+        #       local_object_lifetime_array.dtype, local_object_lifetime_array.shape,
+        #       local_density.dtype, local_density.shape)
+        #
 
         sim[nb_SM,
          nb_cc](object_states_batch, #int32[:,:,:]
@@ -2157,15 +2187,19 @@ class SSA():
         numba.cuda.synchronize()
         numba.cuda.profile_stop()
 
-        object_states_batch = torch.Tensor(
-            object_states_batch.copy_to_host())
+        object_states_batch = torch.Tensor(object_states_batch.copy_to_host())
+
         property_array_batch = torch.Tensor(
             property_array_batch.copy_to_host())
+
         times_batch = torch.Tensor(timepoint_array_batch.copy_to_host()[2:])
+        del timepoint_array_batch
+        cuda.current_context().memory_manager.deallocations.clear()
+        torch.cuda.empty_cache()
 
         self.local_object_lifetime_array = torch.Tensor(
             local_object_lifetime_array.copy_to_host())
-
+        # del local_object_lifetime_array
         # for time_tmp in range(3, object_states_batch.shape[1]):
         #     print(object_states_batch[0, time_tmp, 1, 0, 0],
         #           object_states_batch[1, time_tmp, 1, 0, 0],
@@ -2175,7 +2209,6 @@ class SSA():
 
         first_last_idx_with_object = first_last_idx_with_object.copy_to_host()
 
-        del timepoint_array_batch
         cuda.current_context().memory_manager.deallocations.clear()
 
         # plt.figure()
@@ -2267,8 +2300,6 @@ class SSA():
         # print(2, numba.cuda.current_context().get_memory_info()[0]
         # /1024/1024/1024)
 
-        cuda.current_context().memory_manager.deallocations.clear()
-        torch.cuda.empty_cache()
         # print(3, numba.cuda.current_context().get_memory_info()[0]
         #       /1024/1024/1024)
 
@@ -2289,8 +2320,11 @@ class SSA():
             del self.object_states
             del self.object_states_buffer
 
+            # for property in self.properties:
+            #     property.array = []
             for property in self.properties:
-                property.array = []
+                del property.array
+                property.array = torch.Tensor([])
             # del all_data
 
             del object_dependent_rates_batch
@@ -2298,8 +2332,16 @@ class SSA():
             del object_states_batch
             # del local_density_batch
             # del total_density_batch
+
+            # for property_nb, property in enumerate(self.properties):
+            #     property.array = property.array.cpu()
+
+            cuda.current_context().memory_manager.deallocations.clear()
+            torch.cuda.empty_cache()
         else:
             self.all_data = all_data
+
+        cuda.current_context().memory_manager.deallocations.clear()
 
         return (object_states, property_array,
                 first_last_idx_with_object,

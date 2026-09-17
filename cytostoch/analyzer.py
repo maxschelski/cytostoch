@@ -14,6 +14,7 @@ import shutil
 import seaborn as sb
 import scipy
 import functools
+from matplotlib import pyplot as plt
 
 @numba.cuda.jit
 def _get_first_and_last_object_pos(nb_objects, nb_parallel_cores, core_id):
@@ -147,6 +148,7 @@ class Analyzer():
 
         self.simulation = simulation
         self.data_folder = data_folder
+        self.best_param_guess = []
 
         if (device.lower() == "gpu") & (torch.cuda.device_count() > 0):
             if use_free_gpu:
@@ -362,6 +364,8 @@ class Analyzer():
 
         folders = data_folders
 
+        tmp = 0
+
         for data_name, folder in folders.items():
             data_path = os.path.join(path, folder, "data.feather")
 
@@ -419,7 +423,7 @@ class Analyzer():
                                                 new_data["position"].max()
                     new_data["position"] /= new_data["position"].max()
                 else:
-                    new_position["position"] = 0
+                    new_data["position"] = 0
 
                 new_data["group"] = data_name
                 new_data["details"] = data_column
@@ -819,6 +823,7 @@ class Analyzer():
         # elif time_resolution is None:
         #     time_resolution = self.simulation.time_resolution
 
+
         # get absolute start and end pos
         range_start_abs = range_start * max_pos
         range_end_abs = range_end * max_pos
@@ -952,6 +957,123 @@ class Analyzer():
 
         # return all_data
 
+    def fit_MT_cat_rates(self, data, mono_exponential,
+                         dual_exponential, result_index, data_nb=0,
+                         get_fitted_data=False):
+        # print(data)
+        # print(data.columns, data.reset_index().columns)
+        number_of_simulations = len(
+            data.reset_index()[["simulation_nb"]].drop_duplicates())
+        print("Analyzing simulation ",
+              data[["simulation_nb"]].drop_duplicates().values[0],
+              data[["param_nb"]].drop_duplicates().values[0])
+
+        data_mean = data
+        # print(data_mean["total"].iloc[:10])
+        # dasd
+
+        # data_mean = data.groupby(["time"]).mean().reset_index()
+        # data = data.loc[data["total_norm"] > 0]
+        if ((data_mean.loc[data_mean["time"] == 0, "total_norm"].values[
+                 0] == 0) |
+                (np.isnan(data_mean.loc[data_mean[
+                                            "time"] == 0, "total_norm"].values[
+                              0]))):
+            return pd.DataFrame()
+
+        if len(self.best_param_guess) > 0:
+            p0 = self.best_param_guess
+        else:
+            p0 = None
+
+        fit = scipy.optimize.curve_fit(dual_exponential,
+                                       data_mean["time"],
+                                       data["total_norm"],
+                                       bounds=(0, np.inf),
+                                       p0 = p0,
+                                       maxfev=10000)
+        # print(fit)
+
+        # fit_mono = scipy.optimize.curve_fit(mono_exponential, data["time"],
+        #                                data["total_norm"],
+        #                                bounds=(0, np.inf),
+        #                                maxfev=10000)
+        # if len(fit[0]) > 2:
+
+        # update 
+        # self.best_param_guess = fit[0]
+
+        exponential_fit_cell = functools.partial(dual_exponential,
+                                                 m=fit[0][0],
+                                                 a=fit[0][1],
+                                                 n=fit[0][2],
+                                                 b=fit[0][3])
+
+        # else:
+        # mono_exponential_fit_cell = functools.partial(mono_exponential,
+        #                                               m=fit[0][0], a=fit[0][1])
+
+        if len(fit[0]) > 2:
+            # plt.title("DUAL EXP: " + str(np.round(fit[0][0],2))+"-"+
+            #           str(np.round(fit[0][1],2))+"-"+
+            #           str(np.round(fit[0][2],2))+"-"+
+            #           str(np.round(fit[0][3],2))+"-")
+            rates = np.array(
+                [fit[0][result_index + 0], fit[0][result_index + 2]])
+            low_index = np.where(rates == rates.min())
+            high_index = np.where(rates == rates.max())
+            fractions = np.array([fit[0][0], fit[0][2]])
+            low_fraction = fractions[low_index][0]
+            high_fraction = fractions[high_index][0]
+            low_fraction = low_fraction / (low_fraction + high_fraction)
+            high_fraction = high_fraction / (
+                    low_fraction + high_fraction)
+            rates_df = pd.DataFrame(columns=("low", "high",
+                                             "Low fraction",
+                                             "High fraction",
+                                             "n_cells"),
+                                    data=[[rates.min(), rates.max(),
+                                           low_fraction, high_fraction,
+                                           number_of_simulations]],
+                                    index=[0])
+
+        # if rates.max() > 2:
+        # sb.set(font_scale=2)
+        data_fit = exponential_fit_cell(data_mean["time"])
+        # mono_data_fit = mono_exponential_fit_cell(data["time"])
+
+        if get_fitted_data:
+            dual_exp_data = data_mean.copy()
+            dual_exp_data["total_norm"] = data_fit
+            dual_exp_data["type"] = "dual_exp"
+
+            # mono_exp_data = data.copy()
+            # mono_exp_data["total_norm"] = mono_data_fit
+            # mono_exp_data["type"] = "mono_exp"
+
+            data_mean["type"] = "data"
+
+            all_data = pd.concat([data_mean, dual_exp_data])
+            return all_data
+
+        # name = "Dual_vs_mono_exponential_"+str(result_index)+"_"+str(data_nb)
+        # plt.figure()
+        # plt.gca().set_facecolor('white')
+        # plt.gca().grid(True, color='grey', linestyle='-', linewidth=1)
+        # ax = plt.plot(data["time"], data["total_norm"], color="black", linewidth=3)
+        # # ax = plt.plot(data["time"], mono_data_fit, color="grey", linewidth=3)
+        # ax = plt.plot(data["time"], data_fit, color="orange", linewidth=3)
+        # plt.gca().set_facecolor('white')
+        # plt.gca().grid(True, color='grey', linestyle='-', linewidth=1)
+        # plt.ylim([-0.02, 1.1])
+        # plt.xlabel("Time [min]")
+        # plt.ylabel("Relative microtubule mass")
+        # # dasd
+        # # # title = str(idx)
+        # # # plt.title(title)
+        if len(fit[0]) > 2:
+            return rates_df
+
     def get_local_stable_unstable_dynamic_properties(self, range_starts,
                                                      range_ends, length,
                                                      time_res,
@@ -1018,6 +1140,9 @@ class Analyzer():
                              " the simulation folder. ")
         data = pd.read_feather(os.path.join(base_path, file_name))
 
+        # print(data.loc[data["time"] > 451, "total"].max())
+        # dasd
+
         param_columns = []
         if "param_nb" in data.columns:
             param_columns.append("param_nb")
@@ -1058,107 +1183,10 @@ class Analyzer():
 
         all_cat_rates = []
         sb.set(font_scale=2)
+
+
         for data_nb, data in enumerate([data]):
-            def fit_MT_cat_rates(data, mono_exponential,
-                                 dual_exponential, result_index, data_nb=0,
-                                 get_fitted_data=False):
-                # print(data)
-                # print(data.columns, data.reset_index().columns)
-                number_of_simulations = len(
-                    data.reset_index()[["simulation_nb"]].drop_duplicates())
-                print("Analyzing simulation ",
-                      data[["simulation_nb"]].drop_duplicates().values[0])
 
-                data_mean = data
-                # data_mean = data.groupby(["time"]).mean().reset_index()
-                # data = data.loc[data["total_norm"] > 0]
-                if ((data_mean.loc[data_mean["time"] == 0, "total_norm"].values[
-                         0] == 0) |
-                        (np.isnan(data_mean.loc[data_mean[
-                                                    "time"] == 0, "total_norm"].values[
-                                      0]))):
-                    return pd.DataFrame()
-                fit = scipy.optimize.curve_fit(dual_exponential,
-                                               data_mean["time"],
-                                               data["total_norm"],
-                                               bounds=(0, np.inf),
-                                               maxfev=10000)
-                # print(fit)
-
-                # fit_mono = scipy.optimize.curve_fit(mono_exponential, data["time"],
-                #                                data["total_norm"],
-                #                                bounds=(0, np.inf),
-                #                                maxfev=10000)
-                # if len(fit[0]) > 2:
-                exponential_fit_cell = functools.partial(dual_exponential,
-                                                         m=fit[0][0],
-                                                         a=fit[0][1],
-                                                         n=fit[0][2],
-                                                         b=fit[0][3])
-                # else:
-                # mono_exponential_fit_cell = functools.partial(mono_exponential,
-                #                                               m=fit[0][0], a=fit[0][1])
-
-                if len(fit[0]) > 2:
-                    # plt.title("DUAL EXP: " + str(np.round(fit[0][0],2))+"-"+
-                    #           str(np.round(fit[0][1],2))+"-"+
-                    #           str(np.round(fit[0][2],2))+"-"+
-                    #           str(np.round(fit[0][3],2))+"-")
-                    rates = np.array(
-                        [fit[0][result_index + 0], fit[0][result_index + 2]])
-                    low_index = np.where(rates == rates.min())
-                    high_index = np.where(rates == rates.max())
-                    fractions = np.array([fit[0][0], fit[0][2]])
-                    low_fraction = fractions[low_index][0]
-                    high_fraction = fractions[high_index][0]
-                    low_fraction = low_fraction / (low_fraction + high_fraction)
-                    high_fraction = high_fraction / (
-                                low_fraction + high_fraction)
-                    rates_df = pd.DataFrame(columns=("low", "high",
-                                                     "Low fraction",
-                                                     "High fraction",
-                                                     "n_cells"),
-                                            data=[[rates.min(), rates.max(),
-                                                   low_fraction, high_fraction,
-                                                   number_of_simulations]],
-                                            index=[0])
-
-                # if rates.max() > 2:
-                # sb.set(font_scale=2)
-                data_fit = exponential_fit_cell(data_mean["time"])
-                # mono_data_fit = mono_exponential_fit_cell(data["time"])
-
-                if get_fitted_data:
-                    dual_exp_data = data_mean.copy()
-                    dual_exp_data["total_norm"] = data_fit
-                    dual_exp_data["type"] = "dual_exp"
-
-                    # mono_exp_data = data.copy()
-                    # mono_exp_data["total_norm"] = mono_data_fit
-                    # mono_exp_data["type"] = "mono_exp"
-
-                    data_mean["type"] = "data"
-
-                    all_data = pd.concat([data_mean, dual_exp_data])
-                    return all_data
-
-                # name = "Dual_vs_mono_exponential_"+str(result_index)+"_"+str(data_nb)
-                # plt.figure()
-                # plt.gca().set_facecolor('white')
-                # plt.gca().grid(True, color='grey', linestyle='-', linewidth=1)
-                # ax = plt.plot(data["time"], data["total_norm"], color="black", linewidth=3)
-                # ax = plt.plot(data["time"], mono_data_fit, color="grey", linewidth=3)
-                # ax = plt.plot(data["time"], data_fit, color="orange", linewidth=3)
-                # plt.gca().set_facecolor('white')
-                # plt.gca().grid(True, color='grey', linestyle='-', linewidth=1)
-                # plt.ylim([-0.02, 1.1])
-                # plt.xlabel("Time [min]")
-                # plt.ylabel("Relative microtubule mass")
-                # # title = str(idx)
-                # # plt.title(title)
-                if len(fit[0]) > 2:
-
-                    return rates_df
 
             def dual_exponential(x, m, a, n, b):
                 return m * np.exp(-a * x) + n * np.exp(-b * x)
@@ -1181,7 +1209,7 @@ class Analyzer():
                 cat_rates_mean = None
                 all_cat_rates_length = []
                 cat_rates_mean = length_data.groupby(
-                    ["simulation_nb", "range", *param_columns]).apply(fit_MT_cat_rates,
+                    [*param_columns, "range","simulation_nb"]).apply(self.fit_MT_cat_rates,
                                                               mono_exponential,
                                                               dual_exponential,
                                                               result_index=1,
@@ -1455,6 +1483,7 @@ class Analyzer():
                 all_times)
         else:
             all_times = torch.concat(all_times)
+
         # else:
         #     all_times = self.simulation.times.to(self.device)
 
@@ -1480,6 +1509,7 @@ class Analyzer():
             data_keywords = self._get_data_keywords(data_path)
             if "times" in data_keywords:
                 data_keywords.remove("times")
+
             for data_keyword in data_keywords:
                 new_data = self._load_data(data_path,
                                            file_name_keyword=data_keyword)
@@ -1593,7 +1623,8 @@ class Analyzer():
         keyword_finder = re.compile(file_name_keyword+"_[\d]+.pt")
         all_data = []
         old_shape = ()
-        new_data_array = None
+        # new_data_array = None
+        new_data_array = []
         # Load all data files, then concatenate together
         file_nb = 0
         for file_name in sorted(os.listdir(data_folder)):
@@ -1608,19 +1639,22 @@ class Analyzer():
             # combine all time and data arrays that have the same shape
             # by opening a new array when the shape changes and concatenating next
             # arrays to it
-            if new_shape != old_shape:
-                if new_data_array is not None:
-                    # compare shapes without the first two dimension (since the
-                    # second dimension indicates the number of objects,
-                    # which does not inform about whether parameter values
-                    # were removed)
-                    all_data.append(torch.concat(new_data_array))
-                new_data_array = [new_data]
-                old_shape = new_shape
-            else:
-                new_data_array.append(new_data)
+            # print(new_shape, old_shape)
+            new_data_array.append(new_data)
 
-        all_data.append(torch.concat(new_data_array))
+            # if new_shape != old_shape:
+            #     if new_data_array is not None:
+            #         # compare shapes without the first two dimension (since the
+            #         # second dimension indicates the number of objects,
+            #         # which does not inform about whether parameter values
+            #         # were removed)
+            #         all_data.append(torch.concat(new_data_array))
+            #     new_data_array = [new_data]
+            #     old_shape = new_shape
+            # else:
+            #     new_data_array.append(new_data)
+
+        all_data.append(torch.concat(new_data_array, dim=-1))
 
         return all_data
 

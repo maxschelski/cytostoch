@@ -731,9 +731,9 @@ def _execute_simulation_cpu(object_states, properties_array, times,
             success = _run_iteration(object_states,
                                      properties_array,
                                        times, parameter_value_array,
-                            params_prop_dependence,
+                                    params_prop_dependence,
                                          position_dependence,
-                            object_dependent_rates,
+                                    object_dependent_rates,
                                        transition_parameters,
                                      all_transition_states,
                                        action_parameters, action_state_array,
@@ -847,6 +847,63 @@ def _execute_simulation_cpu(object_states, properties_array, times,
                 timepoint_array[time_idx+2, sim_id, param_id] = math.nan
                 time_idx += 1
 
+
+def _check_total_number_objects(id, object_states, nb_objects_all_states,
+                                sim_id, param_id, core_id):
+    
+    # check if the actual total nb of objects equals the tracked total number
+    # of objects
+    object_pos = 0
+    total_nb_objects = 0
+    ob_1 = 0
+    ob_2 = 0
+    ob_3 = 0
+    ob_4 = 0
+    ob_5 = 0
+    pos_with_obj = math.nan
+    while object_pos < object_states.shape[2]:#first_last_idx_with_object[1,sim_id, param_id]:  # first_last_idx_with_object[1,sim_id, param_id]:# object_states.shape[1]:#
+        if (object_states[0, 0, object_pos, sim_id, param_id] > 0):
+            total_nb_objects += 1
+            pos_with_obj = object_pos
+
+        if (object_states[0, 0, object_pos, sim_id, param_id] == 1):
+            ob_1 += 1
+        if (object_states[0, 0, object_pos, sim_id, param_id] == 2):
+            ob_2 += 1
+        if (object_states[0, 0, object_pos, sim_id, param_id] == 3):
+            ob_3 += 1
+        if (object_states[0, 0, object_pos, sim_id, param_id] == 4):
+            ob_4 += 1
+        if (object_states[0, 0, object_pos, sim_id, param_id] == 5):
+            ob_5 += 1
+
+        object_pos += 1
+
+    total_nb_tracked_objects = (nb_objects_all_states[0, 1, sim_id, param_id] +
+          nb_objects_all_states[0, 2, sim_id, param_id] +
+          nb_objects_all_states[0, 3, sim_id, param_id] +
+          nb_objects_all_states[0, 4, sim_id, param_id] +
+          nb_objects_all_states[0, 5, sim_id, param_id])
+
+    if total_nb_tracked_objects != total_nb_objects:
+        if core_id == 0:
+            print(id, sim_id, object_pos, pos_with_obj,
+                  total_nb_objects,
+                  nb_objects_all_states[0, 1, sim_id, param_id] +
+                  nb_objects_all_states[0, 2, sim_id, param_id] +
+                  nb_objects_all_states[0, 3, sim_id, param_id] +
+                  nb_objects_all_states[0, 4, sim_id, param_id] +
+                  nb_objects_all_states[0, 5, sim_id, param_id],
+
+                  ob_1,nb_objects_all_states[0, 1, sim_id, param_id],
+                  ob_2,nb_objects_all_states[0, 2, sim_id, param_id],
+                  ob_3,nb_objects_all_states[0, 3, sim_id, param_id],
+                  ob_4,nb_objects_all_states[0, 4, sim_id, param_id],
+                  ob_5,nb_objects_all_states[0, 5, sim_id, param_id],
+                  )
+        return 0
+
+    return 1
 
 def _run_iteration(object_states, properties_array , times,
                    parameter_value_array,
@@ -1072,6 +1129,11 @@ def _run_iteration(object_states, properties_array , times,
     #     print(1, times[0, sim_id, param_id], reaction_times[sim_id, param_id],
     #           timepoint_array[0, sim_id, param_id])
 
+    # tmp = _check_total_number_objects(2222767676, object_states, nb_objects_all_states,
+    #                             sim_id, param_id, core_id)
+    # if tmp ==0:
+    #     return 0
+
     if ((times[0, sim_id, param_id] +
         reaction_times[sim_id, param_id]) >= next_timepoint):
         # if a new timepoint should be saved, the current transition went beyond
@@ -1116,9 +1178,10 @@ def _run_iteration(object_states, properties_array , times,
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
+
         if core_id == 0:
             times[0, sim_id, param_id] = (times[0, sim_id, param_id] +
-                                          reaction_time_tmp)
+                                               reaction_time_tmp)
 
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
@@ -1143,8 +1206,21 @@ def _run_iteration(object_states, properties_array , times,
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
+        # tmp = _check_total_number_objects(2323767676, object_states,
+        #                                   nb_objects_all_states,
+        #                                   sim_id, param_id, core_id)
+        # if tmp == 0:
+        #     return 0
+
+        # if timepoint_array[0, sim_id, param_id] > 40:
+        #     if core_id == 0:
+        #         print(times[0, sim_id, param_id] +
+        #               reaction_times[sim_id, param_id], next_timepoint)
+        #     return 0
+
         if times[0, sim_id, param_id] >= min_time:
             return 1
+
 
     _execute_actions_on_objects(parameter_value_array, action_parameters,
                                 action_state_array,
@@ -1166,13 +1242,20 @@ def _run_iteration(object_states, properties_array , times,
                                 sim_id, param_id,
                                 times)
 
+
     if nb_parallel_cores[sim_id, param_id] > 1:
         cuda.syncwarp(thread_masks[0,sim_id, param_id])
+
+    # tmp = _check_total_number_objects(3333767676, object_states, nb_objects_all_states,
+    #                             sim_id, param_id, core_id)
+    # if tmp ==0:
+    #     return 0
 
     if some_creation_on_objects:
 
         _reset_local_density(local_density, nb_parallel_cores, core_id,
                              sim_id, param_id)
+
         if nb_parallel_cores[sim_id, param_id] > 1:
             cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
@@ -1206,6 +1289,11 @@ def _run_iteration(object_states, properties_array , times,
                nb_parallel_cores,  thread_masks, core_id, sim_id, param_id,
                times)
 
+    # tmp = _check_total_number_objects(5555767676, object_states, nb_objects_all_states,
+    #                             sim_id, param_id, core_id)
+    # if tmp ==0:
+    #     return 0
+
     if core_id == 0:
         _determine_next_transition(total_rates, current_transition_rates,
                                    current_transitions, sim_id, param_id,
@@ -1214,6 +1302,11 @@ def _run_iteration(object_states, properties_array , times,
 
     if nb_parallel_cores[sim_id, param_id] > 1:
         cuda.syncwarp(thread_masks[0,sim_id, param_id])
+
+    # tmp = _check_total_number_objects(6666767676, object_states, nb_objects_all_states,
+    #                             sim_id, param_id, core_id)
+    # if tmp ==0:
+    #     return 0
 
     if core_id == 0:
         # speed up searching for xth object with correct state
@@ -1236,6 +1329,11 @@ def _run_iteration(object_states, properties_array , times,
     if nb_parallel_cores[sim_id, param_id] > 1:
         cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
+    # tmp = _check_total_number_objects(7777767676, object_states, nb_objects_all_states,
+    #                             sim_id, param_id, core_id)
+    # if tmp ==0:
+    #     return 0
+    
     if math.isnan(all_transition_positions[sim_id, param_id]):
         if core_id == 0:
             print(1111111, all_transition_positions[sim_id, param_id],
@@ -1271,11 +1369,24 @@ def _run_iteration(object_states, properties_array , times,
 
                           times)
 
+
     # if core_id == 0:
     #     print(3, times[0, sim_id, param_id], reaction_times[sim_id, param_id],
     #           timepoint_array[0, sim_id, param_id])
     if nb_parallel_cores[sim_id, param_id] > 1:
        cuda.syncwarp(thread_masks[0,sim_id, param_id])
+
+    # tmp = _check_total_number_objects(8888767676, object_states, nb_objects_all_states,
+    #                             sim_id, param_id, core_id)
+    # if tmp ==0:
+    #     if core_id == 0:
+    #         transition_nb = current_transitions[sim_id, param_id]
+    #         transition_nb = int(transition_nb)
+    #         transition_states = all_transition_states[transition_nb]
+    #         start_state = transition_states[0]
+    #         end_state = transition_states[1]
+    #         print(transition_nb, start_state, end_state)
+    #     return 0
 
     _remove_objects(all_object_removal_properties, object_removal_operations,
                     nb_objects_all_states, transition_parameters,
@@ -1287,15 +1398,15 @@ def _run_iteration(object_states, properties_array , times,
                     local_resolution,
                     nb_parallel_cores,  core_id, sim_id, param_id)
 
-    if (times[0, sim_id, param_id] > next_timepoint) & (core_id == 0) & (sim_id == 14):
-        print(2342233,
-              sim_id, param_id,
-              times[0, sim_id, param_id],
-              timepoint_array[0, sim_id, param_id] *
-              time_resolution[0] +
-              time_resolution[0],
-              reaction_times[sim_id, param_id]
-              )
+    # if (times[0, sim_id, param_id] > next_timepoint) & (core_id == 0) & (sim_id == 14):
+    #     print(2342233,
+    #           sim_id, param_id,
+    #           times[0, sim_id, param_id],
+    #           timepoint_array[0, sim_id, param_id] *
+    #           time_resolution[0] +
+    #           time_resolution[0],
+    #           reaction_times[sim_id, param_id]
+    #           )
 
     if core_id == 0:
         times[0, sim_id, param_id] = (times[0, sim_id, param_id] +
@@ -1304,11 +1415,16 @@ def _run_iteration(object_states, properties_array , times,
     if nb_parallel_cores[sim_id, param_id] > 1:
        cuda.syncwarp(thread_masks[0,sim_id, param_id])
 
+    # tmp = _check_total_number_objects(9999767676, object_states, nb_objects_all_states,
+    #                             sim_id, param_id, core_id)
+    # if tmp ==0:
+    #     return 0
+
     if math.isnan(times[0, sim_id, param_id]):
         if core_id == 0:
             print(2222222, 
                   sim_id, param_id,
-                  nb_objects_all_states[0, 0, sim_id, param_id],
+                  # nb_objects_all_states[0, 0, sim_id, param_id],
                   reaction_times[sim_id, param_id])
         return 0
 
@@ -1368,6 +1484,12 @@ def _decorate_all_functions_for_cpu():
     if not isinstance(_run_iteration,
                       numba.core.registry.CPUDispatcher):
         _run_iteration = numba.njit(_run_iteration)
+
+
+    global _check_total_number_objects
+    if not isinstance(_check_total_number_objects,
+                      numba.core.registry.CPUDispatcher):
+        _check_total_number_objects = numba.njit(_check_total_number_objects)
 
     global _get_nucleation_on_objects_rate
     if not isinstance(_get_nucleation_on_objects_rate,
@@ -1506,6 +1628,16 @@ def _decorate_all_functions_for_gpu(simulation_object, debug=False):
         _run_iteration = numba.cuda.jit(_run_iteration, debug=debug, opt=opt,
                                         fastmath=fastmath, lineinfo=lineinfo,
                                             device=True)
+
+    global _check_total_number_objects
+    if not isinstance(_check_total_number_objects,
+                      numba.cuda.dispatcher.CUDADispatcher):
+        _check_total_number_objects = numba.cuda.jit(_check_total_number_objects,
+                                                     debug=debug,
+                                                    opt=opt,
+                                                    fastmath=fastmath,
+                                                    lineinfo=lineinfo,
+                                                    device=True)
 
     global _cut_object
     if not isinstance(_cut_object,
@@ -2907,12 +3039,15 @@ def _get_rate_of_prop_dependent_transition(params_prop_dependence,
             else:
                 position_diff = end_position
 
-
             # check if a ratediff needs to be calculated
             # which would only be the case if out of start_val, end_val and
             # param_change only one is defined (start_val or end_val),
             # additionally the end_distance for the change has to be defined
             if (not math.isnan(params_prop_dependence[7])) & no_rate_diff:
+                #tmp
+                # object_dependent_rates[int(params_prop_dependence[5]),
+                #                        object_nb, sim_id, param_id] = 0
+
                 # if the position diff is larger than the end dist of
                 # the param change, dont add an object dependent value
                 if (position_diff > parameter_value_array[
@@ -3802,9 +3937,14 @@ def _determine_positions_of_transitions(current_transitions,
             # go through all objects, check which one is in the start_state
             # and then choose the nth (n=random_object_pos) object that is in
             # the start_state
-            while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:# object_states.shape[1]:#
+
+            total_nb_objects = 0
+            while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:#first_last_idx_with_object[1,sim_id, param_id]:# object_states.shape[1]:#
                 # if object_state > 4:
                 #     print(555, object_state, object_pos)
+                if (object_states[0, 0, object_pos, sim_id, param_id] > 0):
+                    total_nb_objects += 1
+
                 if (object_states[0, 0, object_pos, sim_id, param_id] ==
                         start_state):
 
@@ -3819,7 +3959,15 @@ def _determine_positions_of_transitions(current_transitions,
                       current_nb_state_objects, random_object_pos,
                       nb_objects,
                       start_state,
-                      sim_id, param_id
+                      sim_id, param_id,
+                      total_nb_objects,
+                      nb_objects_all_states[0, 1, sim_id, param_id] +
+                      nb_objects_all_states[0, 2, sim_id, param_id] +
+                      nb_objects_all_states[0, 3, sim_id, param_id] +
+                      nb_objects_all_states[0, 4, sim_id, param_id] +
+                      nb_objects_all_states[0, 5, sim_id, param_id]
+                      ,
+
                       # int(current_transitions[sim_id,
                       #                          param_id]),
                       # all_transition_states.shape[0]
@@ -3868,11 +4016,11 @@ def _determine_positions_of_transitions(current_transitions,
             #     if object_states[0, 0, object_pos, sim_id, param_id] != 5:
             #         print(object_states[0, 0, object_pos, sim_id, param_id])
             # print(1111)
-            # nb_objects_this_state = 0
+            nb_objects_this_state = 0
             while object_pos <= first_last_idx_with_object[1,sim_id, param_id]:
                 if (object_states[0, 0, object_pos, sim_id, param_id] ==
                         start_state):
-                    # nb_objects_this_state +=1
+                    nb_objects_this_state +=1
                     # print(2222)
                     # print(object_dependent_rates[dependence_idx,
                     #                                       object_pos,
@@ -3890,8 +4038,13 @@ def _determine_positions_of_transitions(current_transitions,
             print(44444, object_pos, current_sum, random_thresh,
                   transition_rate,
                   baseline_rate, start_state,
-                  nb_objects_all_states[0, int(start_state), sim_id, param_id],
-                  # nb_objects_this_state
+                  # nb_objects_all_states[0, int(start_state), sim_id, param_id],
+                  # nb_objects_this_state, int(start_state), sim_id, param_id,
+                  # nb_objects_all_states.shape[0],
+                  # nb_objects_all_states.shape[1],
+                  #   nb_objects_all_states.shape[2],
+                  #   nb_objects_all_states.shape[3],
+            
                   )
 
     return
@@ -4644,34 +4797,48 @@ def _update_object_states(current_transitions, all_transition_states,
         # end_pos = properties_array[0, 0, transition_position, sim_id, param_id] + properties_array[0, 1, transition_position, sim_id, param_id]
         # if end_pos == 20:
         #     return
+        # tmp = _check_total_number_objects(7878767676, object_states,
+        #                                   nb_objects_all_states,
+        #                                   sim_id, param_id, core_id)
+        # if tmp == 0:
+        #     return 0
 
-        object_states[0, 0, transition_position,sim_id, param_id] = end_state
+        if nb_parallel_cores[sim_id, param_id] > 1:
+            cuda.syncwarp(thread_masks[0, sim_id, param_id])
+        if core_id == 0:
+            object_states[0, 0, transition_position, sim_id, param_id] = end_state
 
-        # set time of object creation
-        if (object_states.shape[0] > 1) & (start_state == 0):
-            object_states[1, 0, transition_position,
-                          sim_id, param_id] = times[0, sim_id, param_id]
+            # set time of object creation
+            if (object_states.shape[0] > 1) & (start_state == 0):
+                object_states[1, 0, transition_position,
+                              sim_id, param_id] = times[0, sim_id, param_id]
 
-        # remove time of object creation
-        if (object_states.shape[0] > 1) & (end_state == 0):
-            object_states[1, 0, transition_position, sim_id, param_id] = 0
+            # remove time of object creation
+            if (object_states.shape[0] > 1) & (end_state == 0):
+                object_states[1, 0, transition_position, sim_id, param_id] = 0
+
+
+        if nb_parallel_cores[sim_id, param_id] > 1:
+            cuda.syncwarp(thread_masks[0, sim_id, param_id])
 
         # change the object counter according to the executed transition
         # don't apply standard changes for cutting
         # (creation on object[n, 1,0] not nan))
         # since changes in object numbers are more complicated due to
         # different object states being differently affected by cutting
-        if (core_id == 0) & (math.isnan(creation_on_objects[transition_nb,
-                                                             1, 0])):
-            if start_state != 0:
+        if core_id == 0 and math.isnan(creation_on_objects[transition_nb,
+                                                             1, 0]):
+            if int(start_state) != 0:
+
                 nb_objects_all_states[0, int(start_state),
                                       sim_id, param_id] -= 1
+
             else:
                 # nb_objects_all_states[0, 0, sim_id, param_id] -= 1
 
                 # if resources for the object generation transition are defined,
                 # set generation method for object
-                if not math.isnan(transition_parameters[int(transition_nb), 1]):
+                if not math.isnan(transition_parameters[transition_nb, 1]):
                     # set as parameter number of resource for transition + 1 so
                     # that 0 indicates not generated by a resource limited
                     # object generation
@@ -4680,6 +4847,7 @@ def _update_object_states(current_transitions, all_transition_states,
                     nb_objects_all_states[1, int(transition_parameters[
                                                      transition_nb, 1]),
                                           sim_id, param_id] += 1
+
                 # if the current transition should be tracked (and inherited to
                 # MTs forming on top of it),
                 # set the transition number for the current MT
@@ -4687,8 +4855,17 @@ def _update_object_states(current_transitions, all_transition_states,
                     object_states[0, 2, transition_position,
                                   sim_id, param_id] = transition_nb + 1
 
-            if end_state != 0:
+            if int(end_state) != 0:
+                # _check_total_number_objects(66667676, object_states,
+                #                                   nb_objects_all_states,
+                #                                   sim_id, param_id, core_id)
                 nb_objects_all_states[0, int(end_state), sim_id, param_id] += 1
+
+                # _check_total_number_objects(77767676, object_states,
+                #                                   nb_objects_all_states,
+                #                                   sim_id, param_id, core_id)
+                # if tmp == 0:
+                #     return 0
             else:
                 # nb_objects_all_states[0, 0, sim_id, param_id] += 1
                 # set generation method of object to 0 since the object is
@@ -4726,6 +4903,23 @@ def _update_object_states(current_transitions, all_transition_states,
                     object_states[2, 0, transition_position,
                                   sim_id, param_id] = 0
 
+        if nb_parallel_cores[sim_id, param_id] > 1:
+            cuda.syncwarp(thread_masks[0, sim_id, param_id])
+
+        # tmp = _check_total_number_objects(8989767676, object_states,
+        #                                   nb_objects_all_states,
+        #                                   sim_id, param_id, core_id)
+        # if tmp == 0:
+        #     if core_id == 0:
+        #         print(999, int(start_state), int(end_state),
+        #               creation_on_objects[transition_nb,1, 0],
+        #               transition_position, transition_parameters[
+        #                                              transition_nb, 1],
+        #               int(transition_parameters[
+        #                   transition_nb, 1])
+        #               )
+        #     return 0
+
         # if objects are cut creation_on_objects for the transition is not
         # nan at idx 1 and 2 and contain transition maps at these indices
         # indicating that the transition includes cutting of objects
@@ -4741,12 +4935,13 @@ def _update_object_states(current_transitions, all_transition_states,
                             rng_states, simulation_factor, parameter_factor,
                             sim_id, param_id, core_id)
 
+            if nb_parallel_cores[sim_id, param_id] > 1:
+                cuda.syncwarp(thread_masks[0, sim_id, param_id])
         # change property values based on transitions
-        elif start_state == 0:
+        elif (start_state == 0):
 
             # if core_id == 0:
             #     print(transition_position)
-
             params_prop_dependence = params_prop_dependence[
                 int(transition_parameters[transition_nb, 0])]
             # check if the idx for creating a new object is higher than
@@ -4759,48 +4954,56 @@ def _update_object_states(current_transitions, all_transition_states,
 
             # if a new object was created, set property values according to
             # defined value
+
+            if core_id == 0:
+                if ((local_object_lifetime_array.shape[0] > 1) |
+                        ((local_object_lifetime_array.shape[1] > 1))):
+                    # set start of lifetime for objects
+                    local_object_lifetime_array[transition_position, 0,
+                                                sim_id, param_id] = 0
+
+                # Position 3 in transition_parameters defines orientation
+                # orientation_dict = {"plus-end-out": 1,
+                #                     "plus-end-in": 2,
+                #                     "random": 3,
+                #                     "inherit": 4}
+                # get orientation of object as defined
+                if (transition_parameters[transition_nb, 3] == 1):
+                    object_states[2, 0, transition_position, sim_id, param_id] = 1
+                elif (transition_parameters[transition_nb, 3] == 2):
+                    object_states[2, 0, transition_position, sim_id, param_id] = -1
+                elif (transition_parameters[transition_nb, 3] == 3):
+                    # get random orientation with 50/50 chance
+                    random_nb = _get_random_number(sim_id, param_id,
+                                                   rng_states,
+                                                   simulation_factor,
+                                                   parameter_factor)
+                    if random_nb > 0.5:
+                        object_states[2, 0, transition_position,
+                                      sim_id, param_id] = -1
+                    else:
+                        object_states[2, 0, transition_position,
+                                      sim_id, param_id] = 1
+                elif (math.isnan(transition_parameters[transition_nb, 3])):
+                    # if orientation is not defined, use forward direction
+                    # otherwise density and position calculations would be
+                    # problematic
+                    object_states[2, 0, transition_position,
+                                  sim_id, param_id] = 1
+
+            if nb_parallel_cores[sim_id, param_id] > 1:
+                cuda.syncwarp(thread_masks[0, sim_id, param_id])
+
+            # property_nb = 0
+            # while property_nb < property_start_values.shape[0]:
+
+            #initialize parallelization across property numbers
             nb_properties = property_start_values.shape[0]
             (property_nb,
              last_property_nb) = _get_first_and_last_object_pos(
                 nb_properties, nb_parallel_cores[sim_id, param_id], core_id)
-
-            if ((local_object_lifetime_array.shape[0] > 1) |
-                    ((local_object_lifetime_array.shape[1] > 1))):
-                # set start of lifetime for objects
-                local_object_lifetime_array[transition_position, 0,
-                                            sim_id, param_id] = 0
-
-            # Position 3 in transition_parameters defines orientation
-            # orientation_dict = {"plus-end-out": 1,
-            #                     "plus-end-in": 2,
-            #                     "random": 3,
-            #                     "inherit": 4}
-            # get orientation of object as defined
-            if (transition_parameters[transition_nb, 3] == 1):
-                object_states[2, 0, transition_position, sim_id, param_id] = 1
-            elif (transition_parameters[transition_nb, 3] == 2):
-                object_states[2, 0, transition_position, sim_id, param_id] = -1
-            elif (transition_parameters[transition_nb, 3] == 3):
-                # get random orientation with 50/50 chance
-                random_nb = _get_random_number(sim_id, param_id,
-                                               rng_states,
-                                               simulation_factor,
-                                               parameter_factor)
-                if random_nb > 0.5:
-                    object_states[2, 0, transition_position,
-                                  sim_id, param_id] = -1
-                else:
-                    object_states[2, 0, transition_position,
-                                  sim_id, param_id] = 1
-            elif (math.isnan(transition_parameters[transition_nb, 3])):
-                # if orientation is not defined, use forward direction
-                # otherwise density and position calculations would be
-                # problematic
-                object_states[2, 0, transition_position,
-                              sim_id, param_id] = 1
-
-            # property_nb = 0
-            # while property_nb < property_start_values.shape[0]:
+            # The property numbers are distributed among cores for
+            # parallelization
             while property_nb < last_property_nb:
 
                 if ((not math.isnan(creation_on_objects[
@@ -5013,12 +5216,10 @@ def _update_object_states(current_transitions, all_transition_states,
             # if the removed position is smaller than the first idx with object
             # set the removed position as smallest number (as approximation)
 
-
-            if core_id == 0:
-                if transition_position < first_last_idx_with_object[0,sim_id,
-                                                                    param_id]:
-                    first_last_idx_with_object[0,sim_id,
-                                               param_id] = transition_position
+            if transition_position < first_last_idx_with_object[0,sim_id,
+                                                                param_id]:
+                first_last_idx_with_object[0,sim_id,
+                                           param_id] = transition_position
 
             # if an object was removed, set property values to NaN
             # nb_properties = property_start_values.shape[0]
@@ -5107,7 +5308,7 @@ def _update_object_states(current_transitions, all_transition_states,
                                      sim_id, param_id] = 0
                     zero_property_nb += 1
 
-    return None
+    return 1
 
 
 def _get_total_pos_dependent_creation_rate(transition_nb,
@@ -5885,9 +6086,9 @@ def _save_values_with_temporal_resolution(timepoint_array, times,
         current_timepoint = timepoint_array[0, sim_id, param_id]
         # check .if the next timepoint was reached, then save all values
         # at correct position
-        time_jump = math.floor((times[0,sim_id, param_id] -
-                                     (current_timepoint * time_resolution[0]))
-                                    / time_resolution[0])
+        time_jump = math.floor(round(round(times[0,sim_id, param_id] -
+                                     (current_timepoint * time_resolution[0]),6)
+                                    / round(time_resolution[0],6),6))
         current_timepoint += time_jump
 
         timepoint_array[0, sim_id, param_id] = current_timepoint
