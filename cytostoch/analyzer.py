@@ -44,6 +44,7 @@ def _object_length_in_range(start_length_in_range, end_length_in_range,
                             range_start, range_end,
                             start_nb_object, end_nb_object,
                             position_array, length_array, orientation,
+
                             nb_parallel_cores):
 
     nb_processes = numba.cuda.gridsize(1)
@@ -84,49 +85,89 @@ def _object_length_in_range(start_length_in_range, end_length_in_range,
         while object_pos < last_object_pos:
             if ((not math.isnan(length_array[object_pos, sim_id, param_id]))):
                 start = position_array[object_pos, sim_id, param_id]
+                opposite_orientation = False
                 if orientation is not None:
                     # if the orientation is opposite, length reduces position
                     end = (start + orientation[object_pos, sim_id, param_id] *
                            length_array[object_pos, sim_id, param_id])
 
-                    # if the orientation is opposite, property vals reduced
-                    # the end value and therefore end is smaller than
-                    # start, therefore switch end and start so that start is
-                    # smaller than end again for the density calculation below
                     if orientation[object_pos, sim_id, param_id] == -1:
-                        end_tmp = end
-                        end = start
-                        start = end_tmp
+                        opposite_orientation = True
                 else:
                     end = (start + length_array[object_pos, sim_id, param_id])
 
-                if (start < range_end) & (end > range_start):
-                    # if the object starts after the range start,
-                    # the start length in range is 0, since the beginning is
-                    # already in the range
-                    if start >= range_start:
-                        start_length_in_range[object_pos, sim_id, param_id] = 0
-                    else:
-                        # otherwise, the start length in range is the difference
-                        # between the start pos in range and the start of the
-                        # object
-                        start_length_in_range[object_pos,
-                                           sim_id, param_id] = (range_start -
-                                                                start)
+                if opposite_orientation:
+                    in_range = (end < range_end) & (start > range_start)
+                    if in_range:
+                        # for the opposite orientation, if the start is before
+                        # the range end, start length is 0 since its within
+                        # the range and a length reduction affects the mass
+                        # in range until the object is gone (length 0)
+                        if start <= range_end:
+                            start_length = 0
+                        else:
+                            # Otherwise, if the start is after the
+                            # range end then the start length in range is start
+                            # minus range end, since a reduction in length
+                            # beyond this point will not affect the mass in
+                            # range, since the length will be out of range from
+                            # then on
+                            start_length = start - range_end
 
-                    # if the object end is before the end of the range
-                    # the end length in range is the actual length of the
-                    # object (end - start)
-                    if end <= range_end:
-                        end_length_in_range[object_pos,
-                                            sim_id, param_id] = (end - start)
-                    else:
-                        # otherwise, the object end is after the range end
-                        # and thus the end length in range is the difference of
-                        # the range end and the object start
-                        end_length_in_range[object_pos,
-                                            sim_id, param_id] = (range_end -
-                                                                start)
+                        # for the opposite orientation, if the end is after the
+                        # start, then the end length is the total length
+                        # since the end is within the range and any reduction
+                        # to the length will affect the mass in range
+                        if end >= range_start:
+                            end_length = length_array[object_pos,
+                                                      sim_id, param_id]
+                        else:
+                            # Otherwise, if the end is before the range
+                            # start, then the end length in range is the start
+                            # minus the range_start, since a reduction in length
+                            # will only affect the mass in range, if the length
+                            # is reduced beyond this point, thereby affecting
+                            # the actual range in length
+                            end_length = start - range_start
+                else:
+                    in_range = (start < range_end) & (end > range_start)
+                    if in_range:
+                        # if the object starts after the range start,
+                        # the start length in range is 0, since the beginning is
+                        # already in the range and until the object is gone
+                        # length reduction will affect the mass
+                        if start >= range_start:
+                            start_length = 0
+                        else:
+                            # otherwise, the start length in range is the
+                            # difference between the start pos in range and the
+                            # start of the object and thus length reductions
+                            # will only affect the mass in range until
+                            # this point
+                            start_length= range_start - start
+
+                        # if the object end is before the end of the range
+                        # the end length in range is the actual length of the
+                        # object, since any reduction in length will affect
+                        # the mass in range
+                        if end <= range_end:
+                            end_length = length_array[object_pos,
+                                                          sim_id, param_id]
+                        else:
+                            # otherwise, the object end is after the range end
+                            # and thus the end length in range is the difference
+                            # of the range end and the object start, since
+                            # a reduction in length will only affect the
+                            # mass in range beyond this point (when the affected
+                            # length is actually within the range
+                            end_length = range_end - start
+
+                if in_range:
+                    start_length_in_range[object_pos,
+                                           sim_id, param_id] = start_length
+
+                    end_length_in_range[object_pos,
+                                           sim_id, param_id] = end_length
 
             object_pos += 1
         current_sim_nb += nb_processes
@@ -802,7 +843,6 @@ class Analyzer():
         #     orientation = np.zeros(object_states.shape[1:])
         #     print("WARNING: No orientation data was saved.")
 
-        orientation = object_states[2,0]
 
         properties_array = torch.load(os.path.join(self.data_folder,
                                                    "property_array.pt"))
@@ -839,6 +879,7 @@ class Analyzer():
         # in separate array
         first_timepoint_idx_states = 3
         initial_creation_time = object_states[1, first_timepoint_idx_states]
+        orientation = object_states[2, first_timepoint_idx_states]
         first_timepoint_idx_props = 1
         properties = properties_array[first_timepoint_idx_props]
 
@@ -986,12 +1027,20 @@ class Analyzer():
         else:
             p0 = None
 
-        fit = scipy.optimize.curve_fit(dual_exponential,
-                                       data_mean["time"],
-                                       data["total_norm"],
-                                       bounds=(0, np.inf),
-                                       p0 = p0,
-                                       maxfev=10000)
+        # print(data_mean["time"])
+        # print(data["total_norm"])
+        # print(np.unique(data["total_norm"]))
+        # print(np.unique(data_mean["time"]))
+
+        if len(np.unique(np.isnan(data["total_norm"]))) == 2:
+            fit = [[np.nan, np.nan, np.nan, np.nan,]]
+        else:
+            fit = scipy.optimize.curve_fit(dual_exponential,
+                                           data_mean["time"],
+                                           data["total_norm"],
+                                           bounds=(0, np.inf),
+                                           p0 = p0,
+                                           maxfev=10000)
         # print(fit)
 
         # fit_mono = scipy.optimize.curve_fit(mono_exponential, data["time"],
@@ -1020,14 +1069,18 @@ class Analyzer():
             #           str(np.round(fit[0][3],2))+"-")
             rates = np.array(
                 [fit[0][result_index + 0], fit[0][result_index + 2]])
-            low_index = np.where(rates == rates.min())
-            high_index = np.where(rates == rates.max())
-            fractions = np.array([fit[0][0], fit[0][2]])
-            low_fraction = fractions[low_index][0]
-            high_fraction = fractions[high_index][0]
-            low_fraction = low_fraction / (low_fraction + high_fraction)
-            high_fraction = high_fraction / (
-                    low_fraction + high_fraction)
+            if np.isnan(rates[0]):
+                low_fraction = np.nan
+                high_fraction = np.nan
+            else:
+                low_index = np.where(rates == rates.min())
+                high_index = np.where(rates == rates.max())
+                fractions = np.array([fit[0][0], fit[0][2]])
+                low_fraction = fractions[low_index][0]
+                high_fraction = fractions[high_index][0]
+                low_fraction = low_fraction / (low_fraction + high_fraction)
+                high_fraction = high_fraction / (
+                        low_fraction + high_fraction)
             rates_df = pd.DataFrame(columns=("low", "high",
                                              "Low fraction",
                                              "High fraction",
@@ -1200,6 +1253,7 @@ class Analyzer():
             all_cat_rates_exp = []
 
             for nb, length in enumerate(length_groups[1:]):
+
                 length_data = data.loc[
                     (data["neurite_length_um"] > length_groups[nb]) &
                     (data["neurite_length_um"] <= length)]
@@ -1444,6 +1498,7 @@ class Analyzer():
         params_removed = False
         if self.simulation is not None:
             self.data_folder = self.simulation.data_folder
+
         all_times = self._load_data(self.data_folder,
                                     file_name_keyword="times")
 
