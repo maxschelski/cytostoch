@@ -1006,7 +1006,8 @@ class DataExtraction():
 
         if state_numbers is not None:
             # get mask for all objects in defined state
-            object_states = simulation_object.object_states[0]
+            object_states = simulation_object.object_states[0][3:]
+
             # object_states[orientation == 1] = 0
 
             # object_states[position_array > 30] = 0

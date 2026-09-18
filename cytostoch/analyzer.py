@@ -1,3 +1,4 @@
+
 import pandas as pd
 import torch
 import numpy as np
@@ -772,8 +773,11 @@ class Analyzer():
         if self.simulation is not None:
             self.data_folder = self.simulation.data_folder
 
-        object_states_array = torch.load(os.path.join(self.data_folder,
-                                                "object_states.pt"))
+        object_states_array = self._load_data(self.data_folder,
+                                              "object_states")[0]
+
+        # object_states_array = torch.load(os.path.join(self.data_folder,
+        #                                         "object_states.pt"))
         # else:
         #     object_states_array = self.simulation.object_states
 
@@ -833,8 +837,10 @@ class Analyzer():
         if self.simulation is not None:
             self.data_folder = self.simulation.data_folder
 
-        object_states = torch.load(os.path.join(self.data_folder,
-                                                "object_states.pt"))
+        object_states = self._load_data(self.data_folder, "object_states",
+                                        device="cpu")[0]
+        # torch.load(os.path.join(self.data_folder,
+        #                                         "object_states.pt"))
 
         # orientation_path = os.path.join(self.data_folder, "orientation.pt")
         # if os.path.exists(orientation_path):
@@ -843,9 +849,10 @@ class Analyzer():
         #     orientation = np.zeros(object_states.shape[1:])
         #     print("WARNING: No orientation data was saved.")
 
-
-        properties_array = torch.load(os.path.join(self.data_folder,
-                                                   "property_array.pt"))
+        properties_array = self._load_data(self.data_folder, "property_array",
+                                        device="cpu")[0]
+        # properties_array = torch.load(os.path.join(self.data_folder,
+        #                                            "property_array.pt"))
 
         # print(orientation.shape, object_states.shape)
 
@@ -943,6 +950,7 @@ class Analyzer():
                                   first_timepoint_idx_states):
 
             timepoint_idx_states = timepoint + first_timepoint_idx_states
+            
             timepoint_idx_props = timepoint + first_timepoint_idx_props
             creation_time = object_states[1, timepoint_idx_states]
             # update mask to only include the same objects as in the beginning
@@ -1674,10 +1682,13 @@ class Analyzer():
         return parameters
 
 
-    def _load_data(self, data_folder, file_name_keyword):
+    def _load_data(self, data_folder, file_name_keyword, device=None):
         keyword_finder = re.compile(file_name_keyword+"_[\d]+.pt")
         all_data = []
         old_shape = ()
+
+        if device is None:
+            device = self.device
         # new_data_array = None
         new_data_array = []
         # Load all data files, then concatenate together
@@ -1688,7 +1699,7 @@ class Analyzer():
             file_nb += 1
             file_path = os.path.join(data_folder, file_name)
             new_data = torch.load(file_path,
-                                   map_location=torch.device(self.device))
+                                   map_location=torch.device(device))
             # new_data = new_data.unsqueeze(0)
             new_shape = new_data.shape
             # combine all time and data arrays that have the same shape

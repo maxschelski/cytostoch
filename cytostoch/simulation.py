@@ -2212,9 +2212,10 @@ class SSA():
         # plt.figure()
         # plt.plot(local_density_batches.mean(axis=1))
 
-        self.object_states = object_states_batch[:, 3:]
+        self.object_states = object_states_batch
         self.orientation = object_states_batch[2, 3:]
         self.creation_source = object_states_batch[0, 2]
+        self.property_array = property_array_batch
 
         # print(np.unique(object_states_batch[0]))
         # print(len(np.where(object_states_batch[0,:,0,0] == 1)[0]),
@@ -2305,8 +2306,8 @@ class SSA():
         # reassemble the following entire arrays:
         # - object_states, properties_array, nb_obj_all_states_batch
         #   first_last_idx_with_object
-        object_states = torch.Tensor(object_states_batch)
-        property_array = torch.Tensor(property_array_batch)
+        # object_states = torch.Tensor(object_states_batch)
+        # property_array = torch.Tensor(property_array_batch)
         nb_obj_all_states_batch = torch.Tensor(
             nb_obj_all_states_batch.copy_to_host())
         first_last_idx_with_object = torch.Tensor(
@@ -2319,6 +2320,7 @@ class SSA():
         del self.object_states_buffer
         del self.orientation
         del self.creation_source
+        del self.property_array
 
         # for property in self.properties:
         #     property.array = []
@@ -2340,8 +2342,6 @@ class SSA():
         cuda.current_context().memory_manager.deallocations.clear()
         torch.cuda.empty_cache()
         print("Everything should be reset now!")
-        del object_states
-        del property_array
 
         cuda.current_context().memory_manager.deallocations.clear()
 
@@ -3484,12 +3484,16 @@ class SSA():
 
         self.times_buffer = []
 
-        if self.save_states:
+        if self.save_results | self.save_states:
             # object_state_array = torch.concat(self.object_states_buffer)
-            object_state_array = self.object_states
             file_path = os.path.join(self.data_folder,
-                                        "states_" + str(iteration_nb) + ".pt")
-            torch.save(object_state_array, file_path)
+                                        "object_states_" + str(iteration_nb) + ".pt")
+            torch.save(self.object_states, file_path)
+
+            file_path = os.path.join(self.data_folder,
+                                        "property_array_" + str(iteration_nb) + ".pt")
+            torch.save(self.property_array, file_path)
+
 
         # object_state_array = torch.concat(self.object_states_buffer)
         file_path = os.path.join(self.data_folder,
